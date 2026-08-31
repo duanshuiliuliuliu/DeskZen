@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 export default defineConfig({
   clearScreen: false,
+  publicDir: "resources",
   server: {
     port: 1420,
     strictPort: true,

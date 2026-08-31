@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./styles.css";
@@ -15,6 +15,7 @@ interface PersonaConfig {
   id: string;
   name: string;
   spritesheet: string;
+  cols: number;
   rows: number;
   pixel_art: boolean;
   display_w: number;
@@ -43,8 +44,14 @@ let pointerStart = { x: 0, y: 0 };
 
 /** 应用角色外观：精灵图、行数、显示尺寸、渲染模式 */
 function applyPersona(persona: PersonaConfig): void {
+  document.body.style.setProperty("--cols", String(persona.cols));
   document.body.style.setProperty("--rows", String(persona.rows));
-  character.style.backgroundImage = `url("${persona.spritesheet}")`;
+  character.style.setProperty("--char-w", String(persona.display_w));
+  // 内置角色用站点路径；petdex 导入角色存在磁盘上，需经 asset 协议加载
+  const spriteUrl = persona.spritesheet.startsWith("/")
+    ? persona.spritesheet
+    : convertFileSrc(persona.spritesheet);
+  character.style.backgroundImage = `url("${spriteUrl}")`;
   character.style.width = `${persona.display_w}px`;
   character.style.height = `${persona.display_h}px`;
   character.style.imageRendering = persona.pixel_art ? "pixelated" : "auto";
@@ -56,7 +63,7 @@ function applyState(state: string, cfg: StateConfig | undefined): void {
   if (!cfg) return;
   stateTag.textContent = cfg.label;
   document.title = persona ? `DeskZen · ${persona.name} · ${cfg.label}` : "DeskZen";
-  document.body.style.setProperty("--cols", String(cfg.frames));
+  document.body.style.setProperty("--frames", String(cfg.frames));
   document.body.style.setProperty("--row", String(cfg.row));
   const rows = persona?.rows ?? 3;
   character.style.backgroundPositionY = `${(cfg.row / (rows - 1)) * 100}%`;

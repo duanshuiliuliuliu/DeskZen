@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{Arc, Mutex},
     thread,
     time::Duration,
@@ -7,7 +8,7 @@ use std::{
 
 use chrono::Timelike;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// 一个角色的完整配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -16,6 +17,8 @@ pub struct PersonaConfig {
     pub name: String,
     /// spritesheet 前端资源路径
     pub spritesheet: String,
+    /// spritesheet 总列数（整张图的列数）
+    pub cols: u32,
     /// spritesheet 总行数（每个状态一行）
     pub rows: u32,
     /// 是否像素画（决定放大渲染方式）
@@ -72,15 +75,14 @@ pub struct BubbleEvent {
 
 /// 内置角色：id -> 配置文件（编译期内嵌，运行时切换）
 const EMBEDDED_PERSONAS: &[(&str, &str)] = &[
-    ("dog", include_str!("../personas/dog.json")),
-    ("shinchan", include_str!("../personas/shinchan.json")),
+    ("shinchan", include_str!("../../resources/characters/shinchan/persona.json")),
 ];
 
 /// 生活状态引擎：根据本地时间与当前 persona 作息表计算状态，
 /// 变化时向所有窗口广播事件。只依赖 Rust 进程，不依赖 WebView 存活。
 pub struct StateEngine {
     app: AppHandle,
-    personas: HashMap<String, PersonaConfig>,
+    personas: Arc<Mutex<HashMap<String, PersonaConfig>>>,
     persona: Arc<Mutex<PersonaConfig>>,
     last_state: Arc<Mutex<Option<String>>>,
 }
@@ -93,13 +95,27 @@ impl StateEngine {
                 serde_json::from_str(json).expect("persona 配置解析失败");
             personas.insert((*id).to_string(), cfg);
         }
+        // 加载用户通过 petdex 导入的角色（持久化在用户数据目录）
+        if let Ok(chars_dir) = Self::characters_dir_for(&app) {
+            if let Ok(entries) = std::fs::read_dir(&chars_dir) {
+                for entry in entries.flatten() {
+                    let cfg_path = entry.path().join("persona.json");
+                    let Ok(json) = std::fs::read_to_string(&cfg_path) else {
+                        continue;
+                    };
+                    if let Ok(cfg) = serde_json::from_str::<PersonaConfig>(&json) {
+                        personas.insert(cfg.id.clone(), cfg);
+                    }
+                }
+            }
+        }
         let persona = personas
-            .get("dog")
+            .get("shinchan")
             .cloned()
-            .expect("缺少默认角色 dog");
+            .expect("缺少默认角色 shinchan");
         Self {
             app,
-            personas,
+            personas: Arc::new(Mutex::new(personas)),
             persona: Arc::new(Mutex::new(persona)),
             last_state: Arc::new(Mutex::new(None)),
         }
@@ -120,9 +136,55 @@ impl StateEngine {
         self.persona.lock().unwrap().id.clone()
     }
 
+    /// 用户导入角色的持久化目录（%APPDATA%\com.deskzen.app\characters\）
+    pub fn characters_dir(&self) -> Result<PathBuf, String> {
+        Self::characters_dir_for(&self.app)
+    }
+
+    fn characters_dir_for(app: &AppHandle) -> Result<PathBuf, String> {
+        let dir = app
+            .path()
+            .app_config_dir()
+            .map_err(|e| format!("无法定位应用数据目录: {e}"))?;
+        Ok(dir.join("characters"))
+    }
+
+    /// 运行时注册一个角色（petdex 导入后调用；已存在则覆盖）
+    pub fn register_persona(&self, cfg: PersonaConfig) {
+        self.personas.lock().unwrap().insert(cfg.id.clone(), cfg);
+    }
+
+    /// 删除导入角色：先删除磁盘目录，再从注册表移除。
+    /// 内置角色（如 shinchan）不允许删除。返回被删除角色的显示名。
+    pub fn remove_persona(&self, id: &str) -> Result<String, String> {
+        if !id.starts_with("petdex-") {
+            return Err("内置角色不可删除".into());
+        }
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return Err("角色 id 不合法".into());
+        }
+        let dir = self.characters_dir()?.join(id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| format!("删除角色文件失败: {e}"))?;
+        }
+        let name = self
+            .personas
+            .lock()
+            .unwrap()
+            .remove(id)
+            .map(|p| p.name)
+            .ok_or_else(|| format!("角色不存在: {id}"))?;
+        Ok(name)
+    }
+
     /// 所有可切换角色 (id, 显示名)
     pub fn list_personas(&self) -> Vec<(String, String)> {
         self.personas
+            .lock()
+            .unwrap()
             .iter()
             .map(|(id, p)| (id.clone(), p.name.clone()))
             .collect()
@@ -132,6 +194,8 @@ impl StateEngine {
     pub fn switch_persona(&self, app: &AppHandle, id: &str) -> Result<(), String> {
         let persona = self
             .personas
+            .lock()
+            .unwrap()
             .get(id)
             .cloned()
             .ok_or_else(|| format!("角色不存在: {id}"))?;

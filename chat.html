@@ -7,17 +7,24 @@
   </head>
   <body class="chat-body">
     <div id="chat-root">
-      <header class="chat-header">
-        <span id="chat-title">DeskZen</span>
-        <span id="chat-state" class="chat-state">…</span>
+      <header class="chat-header" data-tauri-drag-region>
+        <div class="chat-head-left" data-tauri-drag-region>
+          <span id="chat-avatar" class="chat-avatar">🐾</span>
+          <span id="chat-title" class="chat-title">DeskZen</span>
+        </div>
+        <div class="chat-head-right">
+          <span id="chat-state" class="chat-state">…</span>
+          <button id="chat-close" class="chat-close" title="关闭" type="button">✕</button>
+        </div>
       </header>
-      <main id="chat-messages" class="chat-messages"></main>
+      <main id="chat-messages" class="chat-messages">
+        <div id="chat-empty" class="chat-empty">双击桌面的角色，和它说说话吧</div>
+      </main>
       <form id="chat-form" class="chat-form">
         <input id="chat-input" type="text" placeholder="和角色说点什么…" autocomplete="off" />
-        <button type="submit">发送</button>
+        <button type="submit" class="chat-send" title="发送">➤</button>
       </form>
     </div>
     <script type="module" src="/src/chat.ts"></script>
   </body>
 </html>
-

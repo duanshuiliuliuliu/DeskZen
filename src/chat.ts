@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./styles.css";
 
 interface ChatReply {
@@ -15,6 +16,10 @@ const messages = document.getElementById("chat-messages") as HTMLDivElement;
 const form = document.getElementById("chat-form") as HTMLFormElement;
 const input = document.getElementById("chat-input") as HTMLInputElement;
 const stateLabel = document.getElementById("chat-state") as HTMLSpanElement;
+const titleEl = document.getElementById("chat-title") as HTMLSpanElement;
+const avatarEl = document.getElementById("chat-avatar") as HTMLSpanElement;
+const closeBtn = document.getElementById("chat-close") as HTMLButtonElement;
+const emptyEl = document.getElementById("chat-empty") as HTMLDivElement;
 const sendBtn = document.querySelector("#chat-form button") as HTMLButtonElement;
 let persona: PersonaConfig | null = null;
 let history: { role: "user" | "assistant"; content: string }[] = [];
@@ -25,6 +30,7 @@ function stateLabelOf(state: string): string {
 }
 
 function addMessage(role: "user" | "bot", text: string): void {
+  emptyEl.style.display = "none";
   const div = document.createElement("div");
   div.className = `msg msg-${role}`;
   div.textContent = text;
@@ -85,9 +91,19 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
+closeBtn.addEventListener("click", () => {
+  void getCurrentWindow().close();
+});
+// 关闭按钮不在拖拽区域内触发拖动
+closeBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+
 try {
   persona = await invoke<PersonaConfig>("get_persona_config");
 } catch {
   persona = null;
+}
+if (persona) {
+  titleEl.textContent = persona.name;
+  avatarEl.textContent = persona.name.slice(0, 1);
 }
 void refreshState();

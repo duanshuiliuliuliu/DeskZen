@@ -1,5 +1,6 @@
 mod engine;
 mod llm;
+mod petdex;
 
 use std::{
     collections::HashMap,
@@ -20,6 +21,8 @@ pub struct AppState {
     pub persona_menu_item: Mutex<Option<MenuItem<tauri::Wry>>>,
     /// 托盘“更换角色”子菜单项，id -> 菜单项
     pub persona_items: Mutex<HashMap<String, MenuItem<tauri::Wry>>>,
+    /// 托盘“更换角色”子菜单句柄，导入新角色后动态追加菜单项
+    pub persona_submenu: Mutex<Option<Submenu<tauri::Wry>>>,
 }
 
 #[derive(serde::Serialize)]
@@ -28,12 +31,19 @@ struct ChatReply {
     state: String,
 }
 
+#[derive(serde::Serialize)]
+struct PersonaInfo {
+    id: String,
+    name: String,
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             passthrough: Mutex::new(false),
             persona_menu_item: Mutex::new(None),
             persona_items: Mutex::new(HashMap::new()),
+            persona_submenu: Mutex::new(None),
         })
         .setup(|app| {
             let engine = engine::StateEngine::new(app.handle().clone());
@@ -76,10 +86,11 @@ pub fn run() {
             open_chat,
             open_settings,
             switch_persona,
+            list_personas,
+            petdex::import_petdex_pet,
+            petdex::delete_persona,
             get_llm_config,
             save_llm_config,
-            get_persona_visible,
-            set_persona_visible,
             get_passthrough,
             set_passthrough,
             quit_app
@@ -99,8 +110,12 @@ async fn open_chat(app: AppHandle) -> Result<(), String> {
     }
     WebviewWindowBuilder::new(&app, "chat", WebviewUrl::App("chat.html".into()))
         .title("DeskZen · 对话")
-        .inner_size(420.0, 560.0)
-        .min_inner_size(320.0, 400.0)
+        .inner_size(360.0, 500.0)
+        .min_inner_size(320.0, 420.0)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
         .visible(false)
         .build()
         .map_err(|e| e.to_string())?;
@@ -148,8 +163,8 @@ async fn open_settings(app: AppHandle) -> Result<(), String> {
     }
     WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
         .title("DeskZen · 设置")
-        .inner_size(440.0, 620.0)
-        .min_inner_size(360.0, 500.0)
+        .inner_size(560.0, 620.0)
+        .min_inner_size(420.0, 500.0)
         .center()
         .build()
         .map_err(|e| e.to_string())?;
@@ -164,6 +179,16 @@ fn switch_persona(
     engine: tauri::State<'_, engine::StateEngine>,
 ) -> Result<(), String> {
     engine.switch_persona(&app, &id)
+}
+
+/// 列出全部可切换角色（设置界面据此展示已导入角色）
+#[tauri::command]
+fn list_personas(engine: tauri::State<'_, engine::StateEngine>) -> Vec<PersonaInfo> {
+    engine
+        .list_personas()
+        .into_iter()
+        .map(|(id, name)| PersonaInfo { id, name })
+        .collect()
 }
 
 #[derive(serde::Serialize)]
@@ -200,24 +225,6 @@ fn save_llm_config(
     let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("llm.json"), json).map_err(|e| e.to_string())?;
     Ok(())
-}
-
-#[tauri::command]
-fn get_persona_visible(app: AppHandle) -> bool {
-    app.get_webview_window("persona")
-        .map(|w| w.is_visible().unwrap_or(false))
-        .unwrap_or(false)
-}
-
-#[tauri::command]
-fn set_persona_visible(app: AppHandle, visible: bool) {
-    if let Some(win) = app.get_webview_window("persona") {
-        if visible {
-            let _ = win.show();
-        } else {
-            let _ = win.hide();
-        }
-    }
 }
 
 #[tauri::command]
@@ -270,7 +277,7 @@ async fn chat_send(
         "bubble",
         engine::BubbleEvent {
             state: state.clone(),
-            text: "汪，收到！".into(),
+            text: "收到！".into(),
         },
     );
     Ok(ChatReply { reply, state })
@@ -300,6 +307,11 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .map(|i| i as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
         .collect();
     let persona_menu = Submenu::with_items(app, "更换角色", true, &persona_refs)?;
+    app.state::<AppState>()
+        .persona_submenu
+        .lock()
+        .unwrap()
+        .replace(persona_menu.clone());
 
     let menu = Menu::with_items(
         app,
@@ -427,4 +439,41 @@ fn update_persona_menu_labels(app: &AppHandle) {
         let label = if *id == active { format!("✓ {name}") } else { name };
         let _ = item.set_text(label);
     }
+}
+
+/// 导入新角色后，往托盘“更换角色”子菜单追加菜单项并刷新 ✓ 标记
+pub(crate) fn add_persona_menu_item(
+    app: &AppHandle,
+    id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let item = MenuItem::with_id(app, format!("persona_{id}"), name, true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    let state = app.state::<AppState>();
+    state
+        .persona_items
+        .lock()
+        .unwrap()
+        .insert(id.to_string(), item.clone());
+    if let Some(submenu) = state.persona_submenu.lock().unwrap().as_ref() {
+        let _ = submenu.append(&item);
+    }
+    update_persona_menu_labels(app);
+    Ok(())
+}
+
+/// 删除角色后，从托盘“更换角色”子菜单移除对应菜单项
+pub(crate) fn remove_persona_menu_item(app: &AppHandle, id: &str) {
+    let state = app.state::<AppState>();
+    let item = {
+        let mut guard = state.persona_items.lock().unwrap();
+        guard.remove(id)
+    };
+    if let (Some(item), Some(submenu)) = (
+        item,
+        state.persona_submenu.lock().unwrap().as_ref(),
+    ) {
+        let _ = submenu.remove(&item);
+    }
+    update_persona_menu_labels(app);
 }
