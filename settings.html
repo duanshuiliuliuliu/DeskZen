@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DeskZen · 设置</title>
+  </head>
+  <body class="settings-body">
+    <main class="settings-root">
+      <header class="settings-header">
+        <h1>DeskZen 设置</h1>
+        <span id="settings-status" class="settings-status"></span>
+      </header>
+
+      <section class="settings-group">
+        <h2>角色</h2>
+        <label class="settings-row settings-check">
+          <input type="checkbox" id="passthrough" />
+          <span>点击穿透（鼠标穿过角色窗口，不挡住下层操作）</span>
+        </label>
+      </section>
+
+      <section class="settings-group">
+        <h2>大模型</h2>
+        <label class="settings-field">
+          <span>接口地址</span>
+          <input id="base-url" type="text" />
+        </label>
+        <label class="settings-field">
+          <span>模型</span>
+          <input id="model" type="text" />
+        </label>
+        <label class="settings-field">
+          <span>API Key</span>
+          <input id="api-key" type="password" placeholder="sk-…" autocomplete="off" />
+        </label>
+        <button id="llm-save" class="btn btn-primary">保存模型配置</button>
+      </section>
+
+      <footer class="settings-footer">
+        <button id="quit-app" class="btn btn-danger">退出 DeskZen</button>
+      </footer>
+    </main>
+    <script type="module" src="/src/settings.ts"></script>
+  </body>
+</html>

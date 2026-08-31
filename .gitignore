@@ -1,0 +1,15 @@
+# 依赖与构建产物
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# 应用图标源文件（源图位于 Downloads，由 scripts/gen_icons.py 重新生成）
+src-tauri/icons/deskzen.png
+
+# 系统 / 编辑器 / 日志
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log

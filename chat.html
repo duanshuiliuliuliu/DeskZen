@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DeskZen · 对话</title>
+  </head>
+  <body class="chat-body">
+    <div id="chat-root">
+      <header class="chat-header">
+        <span id="chat-title">DeskZen</span>
+        <span id="chat-state" class="chat-state">…</span>
+      </header>
+      <main id="chat-messages" class="chat-messages"></main>
+      <form id="chat-form" class="chat-form">
+        <input id="chat-input" type="text" placeholder="和角色说点什么…" autocomplete="off" />
+        <button type="submit">发送</button>
+      </form>
+    </div>
+    <script type="module" src="/src/chat.ts"></script>
+  </body>
+</html>
+
