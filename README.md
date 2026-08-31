@@ -72,7 +72,7 @@ DeskZen/
    │  ├─ main.rs / lib.rs   入口、窗口、托盘、命令
    │  ├─ engine.rs          生活状态引擎 + persona 提示词
    │  └─ llm.rs             DeepSeek 网关
-   ├─ personas/dog.json     角色配置（作息/状态/气泡/提示词）
+   ├─ personas/*.json       角色配置（dog 像素小狗 / shinchan 蜡笔小新）
    ├─ capabilities/         Tauri 权限
    └─ tauri.conf.json       窗口、打包配置
 ```
@@ -130,8 +130,11 @@ DeskZen/
 每个角色一个 JSON（`src-tauri/personas/<id>.json`），包含：
 
 - `system_prompt`：角色定义、回复风格、各状态下的行为约束（注入 LLM）；
-- `states`：状态的中文名、spritesheet 行/帧、气泡文本池；
+- `spritesheet` / `rows` / `pixel_art` / `display_w` / `display_h`：精灵图资源与渲染参数；
+- `states`：状态的中文名、spritesheet 行/帧/帧时长、气泡文本池；
 - `schedule`：24 小时作息时间轴（支持跨午夜）。
+
+托盘“更换角色”子菜单可在运行时切换角色（✓ 标记当前角色），切换后作息表、动画、悬停状态和 LLM 人设同步更新。
 
 ## 运行与构建
 
@@ -157,7 +160,6 @@ npm run tauri build  # 生产构建，生成安装包（NSIS/MSI）
 
 ## 后续规划
 
-- 多角色切换（托盘“更换角色”子菜单已预留）
 - LLM 流式输出、对话历史持久化
 - 环境贴合：屏幕边缘吸附、站立在活动窗口标题栏
 - 便利贴（Notes）机制、免打扰时段

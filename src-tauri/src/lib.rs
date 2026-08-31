@@ -1,7 +1,10 @@
 mod engine;
 mod llm;
 
-use std::sync::Mutex;
+use std::{
+    collections::HashMap,
+    sync::Mutex,
+};
 
 use tauri::{
     menu::{Menu, MenuItem, Submenu},
@@ -15,6 +18,8 @@ pub struct AppState {
     pub passthrough: Mutex<bool>,
     /// 托盘菜单里的“显示/隐藏角色”项，用于动态更新文案
     pub persona_menu_item: Mutex<Option<MenuItem<tauri::Wry>>>,
+    /// 托盘“更换角色”子菜单项，id -> 菜单项
+    pub persona_items: Mutex<HashMap<String, MenuItem<tauri::Wry>>>,
 }
 
 #[derive(serde::Serialize)]
@@ -28,6 +33,7 @@ pub fn run() {
         .manage(AppState {
             passthrough: Mutex::new(false),
             persona_menu_item: Mutex::new(None),
+            persona_items: Mutex::new(HashMap::new()),
         })
         .setup(|app| {
             let engine = engine::StateEngine::new(app.handle().clone());
@@ -69,6 +75,7 @@ pub fn run() {
             chat_send,
             open_chat,
             open_settings,
+            switch_persona,
             get_llm_config,
             save_llm_config,
             get_persona_visible,
@@ -147,6 +154,16 @@ async fn open_settings(app: AppHandle) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 切换当前角色（托盘“更换角色”菜单 / 后续设置界面也可调用）
+#[tauri::command]
+fn switch_persona(
+    app: AppHandle,
+    id: String,
+    engine: tauri::State<'_, engine::StateEngine>,
+) -> Result<(), String> {
+    engine.switch_persona(&app, &id)
 }
 
 #[derive(serde::Serialize)]
@@ -234,7 +251,8 @@ async fn chat_send(
 ) -> Result<ChatReply, String> {
     let state = engine.current_state();
     let cfg = llm::load_config(&app);
-    let system = engine::build_system_prompt(engine.persona(), &state);
+    let persona = engine.persona();
+    let system = engine::build_system_prompt(&persona, &state);
 
     let mut llm_messages = Vec::with_capacity(messages.len() + 1);
     llm_messages.push(llm::LlmMessage {
@@ -261,9 +279,28 @@ async fn chat_send(
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
     let toggle_persona = MenuItem::with_id(app, "toggle_persona", "隐藏角色", true, None::<&str>)?;
-    let dog = MenuItem::with_id(app, "persona_dog", "像素小狗（当前）", true, None::<&str>)?;
-    let persona_menu = Submenu::with_items(app, "更换角色", true, &[&dog])?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+
+    // 角色子菜单：从引擎注册表动态生成
+    let engine = app.state::<engine::StateEngine>();
+    let mut persona_items: Vec<MenuItem<tauri::Wry>> = Vec::new();
+    let mut persona_item_map = HashMap::new();
+    for (id, name) in engine.list_personas() {
+        let item = MenuItem::with_id(app, format!("persona_{id}"), name, true, None::<&str>)?;
+        persona_item_map.insert(id, item.clone());
+        persona_items.push(item);
+    }
+    app.state::<AppState>()
+        .persona_items
+        .lock()
+        .unwrap()
+        .extend(persona_item_map);
+    let persona_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = persona_items
+        .iter()
+        .map(|i| i as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+        .collect();
+    let persona_menu = Submenu::with_items(app, "更换角色", true, &persona_refs)?;
+
     let menu = Menu::with_items(
         app,
         &[&settings, &toggle_persona, &persona_menu, &quit],
@@ -300,14 +337,19 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 }
                 update_persona_menu_label(app);
             }
-            "persona_dog" => {
-                let _ = app.emit(
-                    "bubble",
-                    engine::BubbleEvent {
-                        state: "Awake".into(),
-                        text: "汪汪！我就是当前的角色呀。".into(),
-                    },
-                );
+            id if id.starts_with("persona_") => {
+                let persona_id = id.trim_start_matches("persona_").to_string();
+                let engine = app.state::<engine::StateEngine>();
+                if let Err(e) = engine.switch_persona(app, &persona_id) {
+                    let _ = app.emit(
+                        "bubble",
+                        engine::BubbleEvent {
+                            state: "Awake".into(),
+                            text: e,
+                        },
+                    );
+                }
+                update_persona_menu_labels(app);
             }
             "quit" => {
                 app.exit(0);
@@ -355,6 +397,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+    update_persona_menu_labels(app);
     Ok(())
 }
 
@@ -368,6 +411,20 @@ fn update_persona_menu_label(app: &AppHandle) {
     let state = app.state::<AppState>();
     let guard = state.persona_menu_item.lock().unwrap();
     if let Some(item) = guard.as_ref() {
+        let _ = item.set_text(label);
+    }
+}
+
+/// 根据当前激活角色刷新“更换角色”子菜单文案（✓ 标记当前角色）
+fn update_persona_menu_labels(app: &AppHandle) {
+    let engine = app.state::<engine::StateEngine>();
+    let active = engine.persona_id();
+    let names: HashMap<String, String> = engine.list_personas().into_iter().collect();
+    let state = app.state::<AppState>();
+    let guard = state.persona_items.lock().unwrap();
+    for (id, item) in guard.iter() {
+        let name = names.get(id).cloned().unwrap_or_default();
+        let label = if *id == active { format!("✓ {name}") } else { name };
         let _ = item.set_text(label);
     }
 }

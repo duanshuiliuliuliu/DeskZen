@@ -1,5 +1,6 @@
 :root {
   --cols: 2;
+  --rows: 3;
   --row: 0;
 }
 
@@ -33,9 +34,9 @@ body {
   width: 128px;
   height: 128px;
   background-image: url("/sprites/dog.png");
-  background-size: calc(var(--cols) * 100%) 300%;
+  background-size: calc(var(--cols) * 100%) calc(var(--rows) * 100%);
   background-position-x: 0%;
-  background-position-y: calc(var(--row) * 50%);
+  background-position-y: 0%;
   background-repeat: no-repeat;
   image-rendering: pixelated;
   animation-timing-function: steps(var(--cols), jump-none);

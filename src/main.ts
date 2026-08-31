@@ -14,6 +14,11 @@ interface StateConfig {
 interface PersonaConfig {
   id: string;
   name: string;
+  spritesheet: string;
+  rows: number;
+  pixel_art: boolean;
+  display_w: number;
+  display_h: number;
   states: Record<string, StateConfig>;
 }
 
@@ -36,13 +41,25 @@ let bubbleTimer: ReturnType<typeof setTimeout> | undefined;
 let dragging = false;
 let pointerStart = { x: 0, y: 0 };
 
+/** 应用角色外观：精灵图、行数、显示尺寸、渲染模式 */
+function applyPersona(persona: PersonaConfig): void {
+  document.body.style.setProperty("--rows", String(persona.rows));
+  character.style.backgroundImage = `url("${persona.spritesheet}")`;
+  character.style.width = `${persona.display_w}px`;
+  character.style.height = `${persona.display_h}px`;
+  character.style.imageRendering = persona.pixel_art ? "pixelated" : "auto";
+}
+
 /** 切换角色状态：CSS 变量驱动 spritesheet 的行列位置与帧动画参数 */
 function applyState(state: string, cfg: StateConfig | undefined): void {
   document.body.dataset.state = state;
   if (!cfg) return;
   stateTag.textContent = cfg.label;
+  document.title = persona ? `DeskZen · ${persona.name} · ${cfg.label}` : "DeskZen";
   document.body.style.setProperty("--cols", String(cfg.frames));
   document.body.style.setProperty("--row", String(cfg.row));
+  const rows = persona?.rows ?? 3;
+  character.style.backgroundPositionY = `${(cfg.row / (rows - 1)) * 100}%`;
   character.style.animationName = cfg.frames > 1 ? "sprite-cycle" : "none";
   character.style.animationDuration = `${cfg.frames * cfg.frame_ms}ms`;
 }
@@ -64,7 +81,7 @@ async function init(): Promise<void> {
 
   persona = await invoke<PersonaConfig>("get_persona_config");
   const state = await invoke<string>("get_current_state");
-  document.title = `DeskZen · ${persona.name} · ${state}`;
+  applyPersona(persona);
   applyState(state, persona.states[state]);
 
   // 按住角色拖动窗口：移动超过阈值才进入原生拖动，否则视为点击
@@ -96,6 +113,14 @@ async function init(): Promise<void> {
   await listen<StateChangedPayload>("state-changed", (e) => {
     if (!persona) return;
     applyState(e.payload.state, persona.states[e.payload.state]);
+  });
+
+  await listen<PersonaConfig>("persona-changed", (e) => {
+    persona = e.payload;
+    applyPersona(persona);
+    // 切换后引擎会紧接着广播 state-changed，这里只刷新标题
+    const cfg = persona.states[document.body.dataset.state ?? ""];
+    document.title = `DeskZen · ${persona.name} · ${cfg?.label ?? ""}`;
   });
 
   await listen<BubblePayload>("bubble", (e) => {

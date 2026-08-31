@@ -9,11 +9,20 @@ use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
-/// 一个角色的完整配置（MVP 先从内置 JSON 加载）
+/// 一个角色的完整配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PersonaConfig {
     pub id: String,
     pub name: String,
+    /// spritesheet 前端资源路径
+    pub spritesheet: String,
+    /// spritesheet 总行数（每个状态一行）
+    pub rows: u32,
+    /// 是否像素画（决定放大渲染方式）
+    pub pixel_art: bool,
+    /// 角色在窗口中的显示尺寸
+    pub display_w: u32,
+    pub display_h: u32,
     pub system_prompt: SystemPromptConfig,
     pub states: HashMap<String, StateConfig>,
     pub schedule: Vec<ScheduleEntry>,
@@ -61,35 +70,93 @@ pub struct BubbleEvent {
     pub text: String,
 }
 
-const PERSONA_JSON: &str = include_str!("../personas/dog.json");
+/// 内置角色：id -> 配置文件（编译期内嵌，运行时切换）
+const EMBEDDED_PERSONAS: &[(&str, &str)] = &[
+    ("dog", include_str!("../personas/dog.json")),
+    ("shinchan", include_str!("../personas/shinchan.json")),
+];
 
-/// 生活状态引擎：根据本地时间与 persona 作息表计算当前状态，
+/// 生活状态引擎：根据本地时间与当前 persona 作息表计算状态，
 /// 变化时向所有窗口广播事件。只依赖 Rust 进程，不依赖 WebView 存活。
 pub struct StateEngine {
     app: AppHandle,
-    persona: PersonaConfig,
+    personas: HashMap<String, PersonaConfig>,
+    persona: Arc<Mutex<PersonaConfig>>,
     last_state: Arc<Mutex<Option<String>>>,
 }
 
 impl StateEngine {
     pub fn new(app: AppHandle) -> Self {
-        let persona: PersonaConfig =
-            serde_json::from_str(PERSONA_JSON).expect("persona 配置解析失败");
+        let mut personas = HashMap::new();
+        for (id, json) in EMBEDDED_PERSONAS {
+            let cfg: PersonaConfig =
+                serde_json::from_str(json).expect("persona 配置解析失败");
+            personas.insert((*id).to_string(), cfg);
+        }
+        let persona = personas
+            .get("dog")
+            .cloned()
+            .expect("缺少默认角色 dog");
         Self {
             app,
-            persona,
+            personas,
+            persona: Arc::new(Mutex::new(persona)),
             last_state: Arc::new(Mutex::new(None)),
         }
     }
 
     /// 当前状态（按本地时间实时计算）
     pub fn current_state(&self) -> String {
-        state_at(&self.persona, chrono::Local::now())
+        let persona = self.persona.lock().unwrap();
+        state_at(&persona, chrono::Local::now())
     }
 
-    /// 启动即广播一次当前状态与开场气泡
+    /// 当前角色配置（克隆）
+    pub fn persona(&self) -> PersonaConfig {
+        self.persona.lock().unwrap().clone()
+    }
+
+    pub fn persona_id(&self) -> String {
+        self.persona.lock().unwrap().id.clone()
+    }
+
+    /// 所有可切换角色 (id, 显示名)
+    pub fn list_personas(&self) -> Vec<(String, String)> {
+        self.personas
+            .iter()
+            .map(|(id, p)| (id.clone(), p.name.clone()))
+            .collect()
+    }
+
+    /// 运行时切换角色：更新配置与作息表，并广播事件让前端重新渲染
+    pub fn switch_persona(&self, app: &AppHandle, id: &str) -> Result<(), String> {
+        let persona = self
+            .personas
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("角色不存在: {id}"))?;
+        {
+            let mut cur = self.persona.lock().unwrap();
+            *cur = persona.clone();
+            *self.last_state.lock().unwrap() = None;
+        }
+        let state = state_at(&persona, chrono::Local::now());
+        let _ = app.emit("persona-changed", persona);
+        let _ = app.emit(
+            "state-changed",
+            StateChanged {
+                state,
+                previous: String::new(),
+            },
+        );
+        Ok(())
+    }
+
+    /// 启动即广播当前角色与状态、开场气泡
     pub fn broadcast_state(&self) {
-        let state = self.current_state();
+        let persona = self.persona();
+        let state = state_at(&persona, chrono::Local::now());
+        let _ = self.app.emit("persona-changed", persona.clone());
         let _ = self.app.emit(
             "state-changed",
             StateChanged {
@@ -97,7 +164,7 @@ impl StateEngine {
                 previous: String::new(),
             },
         );
-        if let Some(cfg) = self.persona.states.get(&state) {
+        if let Some(cfg) = persona.states.get(&state) {
             if let Some(text) = pick(&cfg.bubbles) {
                 let _ = self.app.emit("bubble", BubbleEvent { state, text });
             }
@@ -107,11 +174,14 @@ impl StateEngine {
     /// 后台节拍线程：每 30 秒检查一次状态，变化时广播并弹出对应气泡
     pub fn start(&self) {
         let app = self.app.clone();
-        let persona = self.persona.clone();
+        let persona = Arc::clone(&self.persona);
         let last_state = Arc::clone(&self.last_state);
         thread::spawn(move || loop {
             thread::sleep(Duration::from_secs(30));
-            let state = state_at(&persona, chrono::Local::now());
+            let (state, persona) = {
+                let p = persona.lock().unwrap();
+                (state_at(&p, chrono::Local::now()), p.clone())
+            };
             let mut last = last_state.lock().unwrap();
             if last.as_deref() != Some(state.as_str()) {
                 let previous = last.clone().unwrap_or_default();
@@ -131,15 +201,11 @@ impl StateEngine {
             }
         });
     }
-
-    pub fn persona(&self) -> &PersonaConfig {
-        &self.persona
-    }
 }
 
 #[tauri::command]
 pub fn get_persona_config(engine: tauri::State<'_, StateEngine>) -> PersonaConfig {
-    engine.persona().clone()
+    engine.persona()
 }
 
 #[tauri::command]
