@@ -20,20 +20,28 @@ const titleEl = document.getElementById("chat-title") as HTMLSpanElement;
 const avatarEl = document.getElementById("chat-avatar") as HTMLSpanElement;
 const closeBtn = document.getElementById("chat-close") as HTMLButtonElement;
 const emptyEl = document.getElementById("chat-empty") as HTMLDivElement;
-const sendBtn = document.querySelector("#chat-form button") as HTMLButtonElement;
+const sendBtn = document.querySelector("#chat-form .chat-send") as HTMLButtonElement;
+const screenBtn = document.getElementById("chat-screen") as HTMLButtonElement;
 let persona: PersonaConfig | null = null;
 let history: { role: "user" | "assistant"; content: string }[] = [];
 let sending = false;
+const SCREEN_DEFAULT_QUESTION = "请看看我当前屏幕上的内容，告诉我你看到了什么。";
 
 function stateLabelOf(state: string): string {
   return persona?.states[state]?.label ?? state;
 }
 
-function addMessage(role: "user" | "bot", text: string): void {
+function addMessage(role: "user" | "bot", text: string, screen = false): void {
   emptyEl.style.display = "none";
   const div = document.createElement("div");
   div.className = `msg msg-${role}`;
   div.textContent = text;
+  if (screen) {
+    const tag = document.createElement("span");
+    tag.className = "msg-screen-tag";
+    tag.textContent = "📷";
+    div.appendChild(tag);
+  }
   messages.appendChild(div);
   messages.scrollTop = messages.scrollHeight;
 }
@@ -56,23 +64,23 @@ async function refreshState(): Promise<void> {
   }
 }
 
-form.addEventListener("submit", async (e) => {
-  e.preventDefault();
+async function sendMessage(text: string, withScreen: boolean): Promise<void> {
   if (sending) return;
-  const text = input.value.trim();
-  if (!text) return;
   input.value = "";
-  addMessage("user", text);
-  history.push({ role: "user", content: text });
+  const question = withScreen ? text.trim() || SCREEN_DEFAULT_QUESTION : text;
+  addMessage("user", question, withScreen);
+  history.push({ role: "user", content: question });
   sending = true;
   sendBtn.disabled = true;
+  screenBtn.disabled = true;
   const pending = addTypingIndicator();
   try {
     const { reply, state } = await invoke<ChatReply>("chat_send", {
       messages: history,
+      useScreenshot: withScreen,
     });
     stateLabel.textContent = stateLabelOf(state);
-    pending.textContent = reply;
+    pending.textContent = reply.trim() || "（我好像没看清屏幕，再发一张看看？）";
     pending.classList.remove("typing");
     history.push({ role: "assistant", content: reply });
     // 只保留最近 20 条，避免上下文无限膨胀
@@ -86,9 +94,21 @@ form.addEventListener("submit", async (e) => {
   } finally {
     sending = false;
     sendBtn.disabled = false;
+    screenBtn.disabled = false;
     messages.scrollTop = messages.scrollHeight;
     input.focus();
   }
+}
+
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  void sendMessage(text, false);
+});
+
+screenBtn.addEventListener("click", () => {
+  void sendMessage(input.value, true);
 });
 
 closeBtn.addEventListener("click", () => {

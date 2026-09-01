@@ -14,7 +14,8 @@ use serde::Deserialize;
 use tauri::AppHandle;
 
 use crate::engine::{
-    PersonaConfig, ScheduleEntry, StateConfig, StateEngine, SystemPromptConfig,
+    LoopConfig, PersonaConfig, ScheduleConfig, StateConfig, StateEngine, SystemPromptConfig,
+    TimeSlot,
 };
 
 const PETDEX_SITE: &str = "https://petdex.dev";
@@ -422,25 +423,27 @@ fn default_guidelines() -> HashMap<String, String> {
     g
 }
 
-fn default_schedule() -> Vec<ScheduleEntry> {
-    vec![
-        ScheduleEntry { start: "00:00".into(), end: "07:00".into(), state: "Waiting".into() },
-        ScheduleEntry { start: "07:00".into(), end: "07:30".into(), state: "Running".into() },
-        ScheduleEntry { start: "07:30".into(), end: "08:00".into(), state: "Idle".into() },
-        ScheduleEntry { start: "08:00".into(), end: "08:30".into(), state: "RunRight".into() },
-        ScheduleEntry { start: "08:30".into(), end: "10:00".into(), state: "Review".into() },
-        ScheduleEntry { start: "10:00".into(), end: "11:00".into(), state: "Jumping".into() },
-        ScheduleEntry { start: "11:00".into(), end: "12:00".into(), state: "RunLeft".into() },
-        ScheduleEntry { start: "12:00".into(), end: "13:30".into(), state: "Waiting".into() },
-        ScheduleEntry { start: "13:30".into(), end: "15:00".into(), state: "Review".into() },
-        ScheduleEntry { start: "15:00".into(), end: "16:00".into(), state: "Jumping".into() },
-        ScheduleEntry { start: "16:00".into(), end: "17:30".into(), state: "RunRight".into() },
-        ScheduleEntry { start: "17:30".into(), end: "18:30".into(), state: "Idle".into() },
-        ScheduleEntry { start: "18:30".into(), end: "20:00".into(), state: "Review".into() },
-        ScheduleEntry { start: "20:00".into(), end: "21:00".into(), state: "Waving".into() },
-        ScheduleEntry { start: "21:00".into(), end: "22:00".into(), state: "Idle".into() },
-        ScheduleEntry { start: "22:00".into(), end: "24:00".into(), state: "Waiting".into() },
-    ]
+fn default_schedule() -> ScheduleConfig {
+    ScheduleConfig::Config {
+        r#loop: LoopConfig {
+            loop_time_slot: 5,
+            loop_states: vec![
+                "Idle".into(),
+                "Waving".into(),
+                "Jumping".into(),
+                "RunRight".into(),
+                "RunLeft".into(),
+            ],
+        },
+        time: vec![
+            TimeSlot { start: "00:00".into(), end: "07:00".into(), state: "Waiting".into() },
+            TimeSlot { start: "08:30".into(), end: "10:00".into(), state: "Review".into() },
+            TimeSlot { start: "12:00".into(), end: "13:30".into(), state: "Waiting".into() },
+            TimeSlot { start: "13:30".into(), end: "15:00".into(), state: "Review".into() },
+            TimeSlot { start: "18:30".into(), end: "20:00".into(), state: "Review".into() },
+            TimeSlot { start: "22:00".into(), end: "24:00".into(), state: "Waiting".into() },
+        ],
+    }
 }
 
 #[cfg(test)]
@@ -523,7 +526,8 @@ mod tests {
         assert_eq!(cfg.cols, 8);
         assert_eq!(cfg.rows, 9);
         assert_eq!(cfg.states.len(), 9);
-        assert_eq!(cfg.schedule.len(), 16);
+        assert_eq!(cfg.schedule.time().len(), 6);
+        assert!(!cfg.schedule.loop_states().is_empty());
         assert!(cfg.system_prompt.definition.contains("robot-cat"));
     }
 }

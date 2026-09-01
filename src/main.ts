@@ -83,7 +83,12 @@ function showBubble(text: string): void {
 }
 
 async function init(): Promise<void> {
-  // 禁用 WebView2 默认右键菜单（右键点击角色不做任何事）
+  // 右键角色 → 弹出原生菜单（下个状态 / 隐藏）
+  character.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    void invoke("show_persona_menu");
+  });
+  // 禁用 WebView2 默认右键菜单（其余区域右键不做任何事）
   document.addEventListener("contextmenu", (e) => e.preventDefault());
 
   persona = await invoke<PersonaConfig>("get_persona_config");

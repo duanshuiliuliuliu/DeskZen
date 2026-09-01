@@ -1,6 +1,7 @@
 mod engine;
 mod llm;
 mod petdex;
+mod screen;
 
 use std::{
     collections::HashMap,
@@ -8,7 +9,7 @@ use std::{
 };
 
 use tauri::{
-    menu::{Menu, MenuItem, Submenu},
+    menu::{Menu, MenuEvent, MenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder,
 };
@@ -45,6 +46,7 @@ pub fn run() {
             persona_items: Mutex::new(HashMap::new()),
             persona_submenu: Mutex::new(None),
         })
+        .on_menu_event(handle_menu_event)
         .setup(|app| {
             let engine = engine::StateEngine::new(app.handle().clone());
             engine.broadcast_state();
@@ -93,10 +95,42 @@ pub fn run() {
             save_llm_config,
             get_passthrough,
             set_passthrough,
+            show_persona_menu,
             quit_app
         ])
         .run(tauri::generate_context!())
         .expect("DeskZen 启动失败");
+}
+
+/// 角色右键菜单：下个状态 / 隐藏
+#[tauri::command]
+fn show_persona_menu(app: AppHandle) -> Result<(), String> {
+    // 注意：id 不能以 "persona_" 开头，否则会被托盘菜单当成“切换角色”解析
+    let next = MenuItem::with_id(&app, "ctx_next_state", "下个状态", true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    let hide = MenuItem::with_id(&app, "ctx_hide", "隐藏", true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    let menu = Menu::with_items(&app, &[&next, &hide]).map_err(|e| e.to_string())?;
+    let persona = app
+        .get_webview_window("persona")
+        .ok_or("找不到角色窗口")?;
+    persona.popup_menu(&menu).map_err(|e| e.to_string())
+}
+
+/// 菜单项点击分发（应用级全局处理角色右键菜单事件）
+fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
+    match event.id().as_ref() {
+        "ctx_next_state" => {
+            app.state::<engine::StateEngine>().next_state();
+        }
+        "ctx_hide" => {
+            if let Some(win) = app.get_webview_window("persona") {
+                let _ = win.hide();
+            }
+            update_persona_menu_label(app);
+        }
+        _ => {}
+    }
 }
 
 /// 点击角色/气泡后打开（或聚焦）对话窗口
@@ -195,6 +229,7 @@ fn list_personas(engine: tauri::State<'_, engine::StateEngine>) -> Vec<PersonaIn
 struct LlmConfigView {
     base_url: String,
     model: String,
+    vision_model: String,
     api_key: String,
 }
 
@@ -204,6 +239,7 @@ fn get_llm_config(app: AppHandle) -> LlmConfigView {
     LlmConfigView {
         base_url: cfg.base_url,
         model: cfg.model,
+        vision_model: cfg.vision_model,
         api_key: cfg.api_key,
     }
 }
@@ -213,6 +249,7 @@ fn save_llm_config(
     app: AppHandle,
     base_url: String,
     model: String,
+    vision_model: String,
     api_key: String,
 ) -> Result<(), String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
@@ -220,6 +257,7 @@ fn save_llm_config(
     let cfg = llm::LlmConfig {
         base_url,
         model,
+        vision_model,
         api_key,
     };
     let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
@@ -255,24 +293,40 @@ async fn chat_send(
     app: AppHandle,
     messages: Vec<llm::LlmMessage>,
     engine: tauri::State<'_, engine::StateEngine>,
+    use_screenshot: Option<bool>,
 ) -> Result<ChatReply, String> {
     let state = engine.current_state();
     let cfg = llm::load_config(&app);
     let persona = engine.persona();
-    let system = engine::build_system_prompt(&persona, &state);
+    let mut system = engine::build_system_prompt(&persona, &state);
+    let with_screenshot = use_screenshot.unwrap_or(false);
 
-    let mut llm_messages = Vec::with_capacity(messages.len() + 1);
-    llm_messages.push(llm::LlmMessage {
-        role: "system".into(),
-        content: system,
-    });
-    llm_messages.extend(
-        messages
-            .into_iter()
-            .filter(|m| m.role == "user" || m.role == "assistant"),
+    let mut llm_messages: Vec<llm::LlmMessage> = messages
+        .into_iter()
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .collect();
+    if with_screenshot {
+        let data_url = screen::capture_current_monitor_data_url(&app)?;
+        llm::attach_image_to_last_user(&mut llm_messages, data_url);
+        system.push_str(
+            "\n\n【本次回答】用户给你看了一张当前屏幕的截图。\
+             请以截图上的内容作为依据回答；若问题与截图无关或看不清，请如实说明。",
+        );
+    }
+    llm_messages.insert(
+        0,
+        llm::LlmMessage {
+            role: "system".into(),
+            content: system.into(),
+        },
     );
 
-    let reply = llm::chat_completion(&cfg, &llm_messages).await?;
+    let model = if with_screenshot && !cfg.vision_model.is_empty() {
+        &cfg.vision_model
+    } else {
+        &cfg.model
+    };
+    let reply = llm::chat_completion(&cfg, model, &llm_messages).await?;
     let _ = app.emit(
         "bubble",
         engine::BubbleEvent {

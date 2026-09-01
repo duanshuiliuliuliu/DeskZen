@@ -27,7 +27,7 @@
       "label": "待机",
       "row": 0,
       "frames": 6,
-      "frame_ms": 180,
+      "frame_ms": 300,
       "bubbles": [
         "嘿嘿，我在待机中～",
         "要不要一起玩？",
@@ -38,7 +38,7 @@
       "label": "向右跑",
       "row": 1,
       "frames": 8,
-      "frame_ms": 120,
+      "frame_ms": 300,
       "bubbles": [
         "向右冲！",
         "跑起来咯！"
@@ -48,7 +48,7 @@
       "label": "向左跑",
       "row": 2,
       "frames": 8,
-      "frame_ms": 120,
+      "frame_ms": 300,
       "bubbles": [
         "向左冲！",
         "嗖——"
@@ -58,7 +58,7 @@
       "label": "挥手",
       "row": 3,
       "frames": 4,
-      "frame_ms": 160,
+      "frame_ms": 300,
       "bubbles": [
         "嗨！你好呀！",
         "挥手挥手～"
@@ -68,7 +68,7 @@
       "label": "跳跃",
       "row": 4,
       "frames": 5,
-      "frame_ms": 140,
+      "frame_ms": 300,
       "bubbles": [
         "跳高高！",
         "嘿嘿，接住！"
@@ -78,7 +78,7 @@
       "label": "失败",
       "row": 5,
       "frames": 8,
-      "frame_ms": 130,
+      "frame_ms": 300,
       "bubbles": [
         "哎呀，摔了一跤…",
         "呜哇，失败了！"
@@ -88,7 +88,7 @@
       "label": "等待",
       "row": 6,
       "frames": 6,
-      "frame_ms": 220,
+      "frame_ms": 300,
       "bubbles": [
         "我在等什么呢…",
         "（等ing）"
@@ -98,7 +98,7 @@
       "label": "跑步",
       "row": 7,
       "frames": 6,
-      "frame_ms": 130,
+      "frame_ms": 300,
       "bubbles": [
         "跑跑跑！",
         "冲刺！"
@@ -108,29 +108,21 @@
       "label": "复习",
       "row": 8,
       "frames": 6,
-      "frame_ms": 200,
+      "frame_ms": 300,
       "bubbles": [
         "复习功课中…",
         "这个字怎么写来着？"
       ]
     }
   },
-  "schedule": [
-    { "start": "00:00", "end": "07:00", "state": "Waiting" },
-    { "start": "07:00", "end": "07:30", "state": "Running" },
-    { "start": "07:30", "end": "08:00", "state": "Idle" },
-    { "start": "08:00", "end": "08:30", "state": "RunRight" },
-    { "start": "08:30", "end": "10:00", "state": "Review" },
-    { "start": "10:00", "end": "11:00", "state": "Jumping" },
-    { "start": "11:00", "end": "12:00", "state": "RunLeft" },
-    { "start": "12:00", "end": "13:30", "state": "Waiting" },
-    { "start": "13:30", "end": "15:00", "state": "Review" },
-    { "start": "15:00", "end": "16:00", "state": "Jumping" },
-    { "start": "16:00", "end": "17:30", "state": "RunRight" },
-    { "start": "17:30", "end": "18:30", "state": "Idle" },
-    { "start": "18:30", "end": "20:00", "state": "Review" },
-    { "start": "20:00", "end": "21:00", "state": "Waving" },
-    { "start": "21:00", "end": "22:00", "state": "Idle" },
-    { "start": "22:00", "end": "24:00", "state": "Waiting" }
-  ]
+  "schedule":{
+    "loop": {
+      "loop_time_slot": 15,
+      "loop_states": ["RunRight","Waving", "RunLeft", "Jumping", "Failed", "Waiting", "Running", "Review"]
+    },
+    "time": [
+      { "start": "20:00", "end": "09:00", "state": "Idle" },
+      { "start": "12:00", "end": "13:30", "state": "Idle" }
+    ]
+  }
 }

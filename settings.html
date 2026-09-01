@@ -63,10 +63,15 @@
               <input id="model" type="text" />
             </label>
             <label class="settings-field">
+              <span>视觉模型（截图问答用）</span>
+              <input id="vision-model" type="text" placeholder="deepseek-v4-flash-vision-exp" />
+            </label>
+            <label class="settings-field">
               <span>API Key</span>
               <input id="api-key" type="password" placeholder="sk-…" autocomplete="off" />
             </label>
             <button id="llm-save" class="btn btn-primary">保存模型配置</button>
+            <p class="settings-hint">聊天框的“📷 问屏幕”会把当前屏幕截图发给大模型；请使用支持图像输入的视觉模型（默认 deepseek-v4-flash-vision-exp）。</p>
           </section>
         </section>
 

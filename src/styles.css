@@ -336,6 +336,48 @@ body.chat-body {
   transform: none;
 }
 
+.chat-screen {
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: #f0e3c6;
+  color: #8a6428;
+  font-size: 16px;
+  cursor: pointer;
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease;
+}
+
+.chat-screen:hover {
+  background: #e6d3a8;
+  transform: scale(1.06);
+}
+
+.chat-screen:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.msg-screen-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(217, 164, 65, 0.2);
+  color: #8a6428;
+  font-size: 10px;
+  vertical-align: middle;
+}
+
 /* ---- 设置窗口 ---- */
 body.settings-body {
   background: #f6f2e9;
