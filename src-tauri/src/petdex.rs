@@ -140,7 +140,7 @@ pub fn delete_persona(
     crate::remove_persona_menu_item(&app, &id);
     // 删除的是当前角色时，回退到内置默认角色
     if engine.persona_id() == id {
-        engine.switch_persona(&app, "shinchan")?;
+        engine.switch_persona(&app, "link")?;
     }
     Ok(())
 }

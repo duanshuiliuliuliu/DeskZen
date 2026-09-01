@@ -132,7 +132,7 @@ pub struct BubbleEvent {
 
 /// 内置角色：id -> 配置文件（编译期内嵌，运行时切换）
 const EMBEDDED_PERSONAS: &[(&str, &str)] = &[
-    ("shinchan", include_str!("../../resources/characters/shinchan/persona.json")),
+    ("link", include_str!("../../resources/characters/link/persona.json")),
 ];
 
 /// 生活状态引擎：根据本地时间与当前 persona 作息表计算状态，
@@ -169,9 +169,9 @@ impl StateEngine {
             }
         }
         let persona = personas
-            .get("shinchan")
+            .get("link")
             .cloned()
-            .expect("缺少默认角色 shinchan");
+            .expect("缺少默认角色 link");
         Self {
             app,
             personas: Arc::new(Mutex::new(personas)),
@@ -232,7 +232,7 @@ impl StateEngine {
     }
 
     /// 删除导入角色：先删除磁盘目录，再从注册表移除。
-    /// 内置角色（如 shinchan）不允许删除。返回被删除角色的显示名。
+    /// 内置角色（如 link）不允许删除。返回被删除角色的显示名。
     pub fn remove_persona(&self, id: &str) -> Result<String, String> {
         if !id.starts_with("petdex-") {
             return Err("内置角色不可删除".into());
@@ -568,26 +568,26 @@ fn pick(list: &[String]) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn shinchan() -> PersonaConfig {
+    fn link() -> PersonaConfig {
         serde_json::from_str(include_str!(
-            "../../resources/characters/shinchan/persona.json"
+            "../../resources/characters/link/persona.json"
         ))
         .expect("内置 persona.json 解析失败")
     }
 
     #[test]
     fn schedule_parses_new_format() {
-        let p = shinchan();
+        let p = link();
         assert_eq!(p.schedule.loop_time_slot(), 15);
-        assert_eq!(p.schedule.loop_states().len(), 8);
+        assert_eq!(p.schedule.loop_states().len(), 3);
         assert_eq!(p.schedule.time().len(), 2);
     }
 
     #[test]
     fn time_slot_overrides_loop() {
-        let p = shinchan();
+        let p = link();
         // 12:30 位于 12:00-13:30 时段内 → 固定 Idle
-        assert_eq!(automatic_state(&p, 12 * 60 + 30), "Idle");
+        assert_eq!(automatic_state(&p, 12 * 60 + 30), "idle");
         // 10:30 不在任何时段内 → 走循环
         let mins = 10 * 60 + 30;
         let states = p.schedule.loop_states();
@@ -597,11 +597,11 @@ mod tests {
 
     #[test]
     fn next_loop_state_cycles() {
-        let p = shinchan();
+        let p = link();
         let states = p.schedule.loop_states();
         assert_eq!(next_loop_state(&p, &states[0]), states[1]);
         assert_eq!(next_loop_state(&p, &states[states.len() - 1]), states[0]);
-        // 当前不在循环列表（如 Idle）→ 取循环第一个
-        assert_eq!(next_loop_state(&p, "Idle"), states[0]);
+        // 当前不在循环列表（如未知状态）→ 取循环第一个
+        assert_eq!(next_loop_state(&p, "unknown"), states[0]);
     }
 }

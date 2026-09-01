@@ -11,10 +11,10 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
 | 功能 | 说明 |
 |---|---|
 | 生活状态引擎 | 每个角色独立的状态机：默认按 `loop_states` 每 `loop_time_slot` 分钟循环；`time` 时段内固定为对应状态，每 30 秒计算并广播状态变化 |
-| 多角色运行时切换 | 内置蜡笔小新；托盘「更换角色」子菜单即时切换（✓ 标记当前角色） |
+| 多角色运行时切换 | 内置林克；托盘「更换角色」子菜单即时切换（✓ 标记当前角色） |
 | Petdex 角色导入 | 从 petdex.dev 链接下载 zip 包（或直接资源），自动生成角色配置并持久化 |
 | 角色删除 | 设置界面一键删除导入角色，删除当前角色时自动回退到默认角色 |
-| 桌面角色动画 | 8×9 spritesheet + CSS steps 帧动画，9 种状态各占一行 |
+| 桌面角色动画 | spritesheet + CSS steps 帧动画（内置林克 20×3，3 种状态各占一行） |
 | 对话面板 | 双击角色打开，圆角卡片 UI，带角色头像/状态，接入 DeepSeek |
 | 状态气泡 | 状态切换 / 收到回复时角色头顶弹出轻量气泡，超时自动消失 |
 | 角色右键菜单 | 右键角色弹出「下个状态 / 隐藏」：循环切换角色动画状态（按 spritesheet 行序），或隐藏角色窗口 |
@@ -29,7 +29,7 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
 
 - 多角色支持：内置角色 + 用户导入角色，运行时切换。
 - 状态机驱动：默认在 `loop_states` 中按 `loop_time_slot`（分钟）循环；`time` 配置的时段内固定为对应状态（支持跨午夜），时段外回到循环。
-- 9 个标准状态（与 Petdex 规范一致，spritesheet 每状态一行）：`Idle`、`RunRight`、`RunLeft`、`Waving`、`Jumping`、`Failed`、`Waiting`、`Running`、`Review`。
+- 内置角色状态由 persona.json 定义（林克：`walking`/`motorcycle`/`idle`）；Petdex 导入角色默认 9 个标准状态（`Idle`、`RunRight`、`RunLeft`、`Waving`、`Jumping`、`Failed`、`Waiting`、`Running`、`Review`，与 Petdex 规范一致，spritesheet 每状态一行）。
 - 状态与回复绑定：对话时 system prompt 注入「角色定义 + 回复风格 + 当前状态约束」，同一角色在不同状态下回复风格不同。
 - 状态切换气泡：状态变化时从该状态的气泡文本池随机弹出一条。
 
@@ -42,7 +42,7 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
 ### 角色导入与删除（Petdex）
 
 - 导入：设置界面「角色设置 → 从 Petdex 导入」，输入 `https://petdex.dev/pets/{slug}` 链接，流程见下文「核心流程」。
-- 删除：设置界面「已导入角色」列表可删除；同时移除磁盘文件与托盘菜单项；删除当前角色时自动回退到内置默认角色（蜡笔小新）；内置角色不可删除。
+- 删除：设置界面「已导入角色」列表可删除；同时移除磁盘文件与托盘菜单项；删除当前角色时自动回退到内置默认角色（林克）；内置角色不可删除。
 
 ### 聊天窗口
 
@@ -90,9 +90,9 @@ DeskZen/
 │  ├─ settings.ts   设置窗（侧边栏：角色设置 / 大模型设置）
 │  └─ styles.css
 ├─ resources/                                资源目录（Vite publicDir）
-│  ├─ characters/shinchan/
+│  ├─ characters/link/
 │  │  ├─ persona.json     角色配置（作息/状态/气泡/提示词）
-│  │  └─ spritesheet.webp 角色精灵图（8×9）
+│  │  └─ spritesheet.webp 角色精灵图（20×3）
 │  └─ icons/              应用图标（32/128/256 + ico）
 ├─ scripts/                                  开发与测试脚本
 │  ├─ gen_icons.py    从源 PNG 生成应用图标
@@ -124,7 +124,7 @@ DeskZen/
 
 ### 状态引擎流程
 
-1. 启动时加载角色：编译期内嵌的内置角色（`resources/characters/shinchan/persona.json`）+ 扫描用户数据目录（`%APPDATA%\com.deskzen.app\characters\*\persona.json`）中已导入的角色。
+1. 启动时加载角色：编译期内嵌的内置角色（`resources/characters/link/persona.json`）+ 扫描用户数据目录（`%APPDATA%\com.deskzen.app\characters\*\persona.json`）中已导入的角色。
 2. Rust 引擎每 30 秒按本地时间计算当前状态，变化时广播 `state-changed` 事件并弹出对应气泡。
 3. 前端收到事件后切换 spritesheet 行（动画）并更新悬停状态标签；切换角色时广播 `persona-changed` 让前端重新渲染。
 
@@ -230,7 +230,7 @@ npm run tauri build -- --no-bundle  # 仅生成 deskzen.exe，不打包安装包
 | MVP 目标 | 状态 |
 |---|---|
 | 透明穿透窗口基础框架 | ✅ 完成（透明无边框小窗 + 整窗穿透开关） |
-| 基础角色 + 多状态帧动画 | ✅ 完成（蜡笔小新，9 种动画状态） |
+| 基础角色 + 多状态帧动画 | ✅ 完成（林克，3 种动画状态） |
 | 状态机按本地时间切换 | ✅ 完成 |
 | 状态切换随机气泡 | ✅ 完成 |
 | 对话面板 + LLM + 状态注入 | ✅ 完成（DeepSeek deepseek-v4-flash） |

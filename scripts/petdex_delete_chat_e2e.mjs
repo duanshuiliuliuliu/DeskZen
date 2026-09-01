@@ -37,14 +37,14 @@ const afterDelete = await evaluate(
 );
 ids = (await listPersonas()).map((p) => p.id);
 console.log("删除后当前角色:", afterDelete.name, "| 角色列表含 maruko:", ids.includes("petdex-maruko"));
-if (afterDelete.id !== "shinchan" || ids.includes("petdex-maruko")) {
+if (afterDelete.id !== "link" || ids.includes("petdex-maruko")) {
   throw new Error("删除角色后未正确回退/移除");
 }
 
 // 3. 内置角色不可删除
 const guardErr = await evaluate(
   persona,
-  `window.__TAURI_INTERNALS__.invoke("delete_persona", { id: "shinchan" }).then(
+  `window.__TAURI_INTERNALS__.invoke("delete_persona", { id: "link" }).then(
      () => "no-error",
      (e) => String(e),
    )`,
@@ -82,7 +82,7 @@ const ui = await evaluate(
    })()`,
 );
 console.log("聊天 UI:", JSON.stringify(ui));
-if (ui.title !== "蜡笔小新" || !ui.hasClose || !ui.hasSend || !ui.emptyVisible) {
+if (ui.title !== "林克" || !ui.hasClose || !ui.hasSend || !ui.emptyVisible) {
   throw new Error("聊天窗口 UI 异常");
 }
 
