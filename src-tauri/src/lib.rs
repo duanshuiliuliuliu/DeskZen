@@ -74,7 +74,7 @@ pub fn run() {
                 if let tauri::WindowEvent::Moved(_) = event {
                     if let Some(chat) = app_handle.get_webview_window("chat") {
                         if chat.is_visible().unwrap_or(false) {
-                            reposition_chat(&app_handle);
+                            place_chat_bubble(&app_handle);
                         }
                     }
                 }
@@ -96,6 +96,7 @@ pub fn run() {
             get_passthrough,
             set_passthrough,
             show_persona_menu,
+            reposition_chat,
             quit_app
         ])
         .run(tauri::generate_context!())
@@ -137,23 +138,24 @@ fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
 #[tauri::command]
 async fn open_chat(app: AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("chat") {
-        reposition_chat(&app);
+        place_chat_bubble(&app);
         let _ = win.show();
         let _ = win.set_focus();
         return Ok(());
     }
     WebviewWindowBuilder::new(&app, "chat", WebviewUrl::App("chat.html".into()))
         .title("DeskZen · 对话")
-        .inner_size(360.0, 500.0)
-        .min_inner_size(320.0, 420.0)
+        .inner_size(340.0, 220.0)
+        .min_inner_size(300.0, 140.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
         .shadow(false)
+        .always_on_top(true)
         .visible(false)
         .build()
         .map_err(|e| e.to_string())?;
-    reposition_chat(&app);
+    place_chat_bubble(&app);
     if let Some(win) = app.get_webview_window("chat") {
         let _ = win.show();
         let _ = win.set_focus();
@@ -161,30 +163,42 @@ async fn open_chat(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 把对话窗摆到角色旁边（默认右侧，右侧放不下则左侧），并限制在显示器工作区内
-fn reposition_chat(app: &AppHandle) {
+/// 把对话气泡摆到角色上方/左上方（尖角指向角色）；上方放不下则放到角色右侧。
+/// 限制在显示器工作区内。
+fn place_chat_bubble(app: &AppHandle) {
     let Some(persona) = app.get_webview_window("persona") else { return };
     let Some(chat) = app.get_webview_window("chat") else { return };
     let Ok(p_pos) = persona.outer_position() else { return };
     let Ok(p_size) = persona.outer_size() else { return };
     let Ok(c_size) = chat.outer_size() else { return };
-    let gap: i32 = 16;
-    let mut x = p_pos.x + p_size.width as i32 + gap;
-    let mut y = p_pos.y + (p_size.height as i32 - c_size.height as i32) / 2;
+    let gap: i32 = 6;
+    // 角色精灵头顶的屏幕纵坐标（精灵高 128、底距 24）
+    let char_top = p_pos.y + p_size.height as i32 - 24 - 128;
+    // 默认放在角色上方，水平居中；气泡底贴近精灵头顶（重叠角色窗上半透明区）
+    let mut x = p_pos.x + (p_size.width as i32 - c_size.width as i32) / 2;
+    let mut y = char_top - c_size.height as i32 - gap;
     if let Ok(Some(monitor)) = persona.current_monitor() {
         let wa = monitor.work_area();
         let min_x = wa.position.x;
         let min_y = wa.position.y;
         let max_x = min_x + wa.size.width as i32;
         let max_y = min_y + wa.size.height as i32;
-        // 右侧放不下就换到左侧
-        if x + c_size.width as i32 > max_x {
-            x = p_pos.x - c_size.width as i32 - gap;
+        // 上方放不下 → 放到角色右侧（垂直对齐角色中心）
+        if y < min_y {
+            x = p_pos.x + p_size.width as i32 + gap;
+            y = (p_pos.y + p_size.height as i32 / 2 - c_size.height as i32 / 2)
+                .clamp(min_y, max_y - c_size.height as i32);
         }
         x = x.clamp(min_x, max_x - c_size.width as i32);
         y = y.clamp(min_y, max_y - c_size.height as i32);
     }
     let _ = chat.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+/// 供前端在气泡高度自适应后调用：重新贴到角色附近
+#[tauri::command]
+fn reposition_chat(app: AppHandle) {
+    place_chat_bubble(&app);
 }
 
 /// 打开（或聚焦）设置窗口

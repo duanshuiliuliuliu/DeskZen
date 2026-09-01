@@ -90,66 +90,52 @@ body {
   display: none;
 }
 
-/* ---- 悬停状态标签 ---- */
-.state-tag {
-  position: absolute;
-  left: 50%;
-  bottom: 136px;
-  transform: translateX(-50%);
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: rgba(40, 30, 20, 0.72);
-  color: #ffe9c4;
-  font-size: 12px;
-  letter-spacing: 1px;
-  white-space: nowrap;
-  opacity: 0;
-  transition: opacity 0.18s ease;
-  pointer-events: none;
-}
-
-#character:hover + #state-tag {
-  opacity: 1;
-}
-
 /* ---- 对话窗口 ---- */
 body.chat-body {
   background: transparent !important;
 }
 
 #chat-root {
+  position: relative;
+  box-sizing: border-box;
+  width: 340px;
+  margin: 0 0 12px; /* 底部留出尖角空间 */
+  padding: 10px 12px 8px;
+  border-radius: 16px;
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 24px);
-  margin: 12px;
-  border-radius: 18px;
-  overflow: hidden;
-  background: linear-gradient(180deg, #fffaf0 0%, #f6f0e2 100%);
-  border: 1px solid rgba(222, 202, 160, 0.75);
-  box-shadow: 0 12px 32px rgba(74, 52, 16, 0.28);
+  background: linear-gradient(180deg, #fffdf6 0%, #fdf6e8 100%);
+  border: 1px solid rgba(205, 175, 125, 0.55);
+  box-shadow: 0 4px 12px rgba(90, 60, 20, 0.12);
 }
 
-.chat-header {
+/* 指向角色的尖角（气泡下方偏右） */
+#chat-root::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -12px;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 9px solid transparent;
+  border-right: 9px solid transparent;
+  border-top: 12px solid #fdf6e8;
+}
+
+.chat-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 11px 14px;
-  background: linear-gradient(135deg, #f8e2b2 0%, #efc77e 100%);
-  border-bottom: 1px solid rgba(210, 176, 110, 0.55);
+  gap: 8px;
+  padding: 2px 2px 8px;
   user-select: none;
   -webkit-user-select: none;
 }
 
-.chat-head-left,
-.chat-head-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .chat-avatar {
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -157,59 +143,56 @@ body.chat-body {
   border-radius: 50%;
   background: rgba(255, 250, 238, 0.92);
   color: #8a6428;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 700;
   box-shadow: inset 0 0 0 1px rgba(190, 150, 80, 0.35);
 }
 
 .chat-title {
+  flex: 1;
+  min-width: 0;
   font-size: 14px;
   font-weight: 700;
   color: #6b4f2a;
   white-space: nowrap;
-}
-
-.chat-state {
-  font-size: 12px;
-  font-weight: 400;
-  color: #7d5f2f;
-  background: rgba(255, 250, 238, 0.85);
-  padding: 2px 8px;
-  border-radius: 999px;
-  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-close {
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   border: none;
   border-radius: 50%;
-  background: transparent;
+  background: rgba(200, 170, 120, 0.18);
   color: #7d5f2f;
-  font-size: 13px;
+  font-size: 11px;
   line-height: 1;
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .chat-close:hover {
-  background: rgba(160, 105, 30, 0.18);
+  background: rgba(190, 140, 70, 0.32);
   color: #5d4219;
 }
 
 .chat-messages {
-  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   overflow-y: auto;
-  padding: 14px 14px 8px;
+  padding: 4px 4px 6px;
+  max-height: 236px;
+  scrollbar-width: thin;
 }
 
 .chat-messages::-webkit-scrollbar {
-  width: 6px;
+  width: 5px;
 }
 
 .chat-messages::-webkit-scrollbar-thumb {
@@ -217,20 +200,12 @@ body.chat-body {
   border-radius: 999px;
 }
 
-.chat-empty {
-  margin: auto;
-  color: #b7a37b;
-  font-size: 13px;
-  text-align: center;
-  line-height: 1.7;
-}
-
 .msg {
-  max-width: 78%;
-  padding: 9px 13px;
-  border-radius: 16px;
+  max-width: 82%;
+  padding: 8px 12px;
+  border-radius: 14px;
   font-size: 13px;
-  line-height: 1.55;
+  line-height: 1.5;
   word-break: break-word;
   white-space: pre-wrap;
   user-select: text;
@@ -241,16 +216,15 @@ body.chat-body {
   align-self: flex-end;
   background: linear-gradient(135deg, #ffd98a 0%, #ffc95e 100%);
   color: #4a3412;
-  border-bottom-right-radius: 5px;
-  box-shadow: 0 2px 5px rgba(190, 140, 40, 0.22);
+  border-bottom-right-radius: 4px;
 }
 
 .msg-bot {
   align-self: flex-start;
   background: #fff;
   color: #3a3a3a;
-  border-bottom-left-radius: 5px;
-  box-shadow: 0 2px 6px rgba(120, 90, 30, 0.1);
+  border-bottom-left-radius: 4px;
+  box-shadow: 0 1px 3px rgba(120, 90, 30, 0.08);
 }
 
 .msg.typing {
@@ -284,32 +258,32 @@ body.chat-body {
 .chat-form {
   display: flex;
   gap: 8px;
-  padding: 10px 14px 14px;
+  padding: 8px 2px 2px;
 }
 
 .chat-form input {
   flex: 1;
   min-width: 0;
-  padding: 10px 14px;
-  border: 1px solid #e5d9bd;
+  padding: 8px 12px;
+  border: 1px solid #e6dcc2;
   border-radius: 999px;
   font-size: 13px;
   outline: none;
-  background: #fff;
+  background: #fffdf8;
   color: #333;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.04);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.03);
   user-select: text;
   -webkit-user-select: text;
 }
 
 .chat-form input:focus {
   border-color: #d9a441;
-  box-shadow: 0 0 0 3px rgba(217, 164, 65, 0.16);
+  box-shadow: 0 0 0 3px rgba(217, 164, 65, 0.14);
 }
 
 .chat-send {
-  width: 38px;
-  height: 38px;
+  width: 32px;
+  height: 32px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -318,11 +292,15 @@ body.chat-body {
   border-radius: 50%;
   background: #d9a441;
   color: #fff;
-  font-size: 15px;
   cursor: pointer;
   transition:
     transform 0.15s ease,
     background 0.15s ease;
+}
+
+.chat-send svg,
+.chat-screen svg {
+  display: block;
 }
 
 .chat-send:hover {
@@ -337,17 +315,16 @@ body.chat-body {
 }
 
 .chat-screen {
-  width: 38px;
-  height: 38px;
+  width: 32px;
+  height: 32px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   border: none;
   border-radius: 50%;
-  background: #f0e3c6;
+  background: #f4ead2;
   color: #8a6428;
-  font-size: 16px;
   cursor: pointer;
   transition:
     transform 0.15s ease,
@@ -355,7 +332,7 @@ body.chat-body {
 }
 
 .chat-screen:hover {
-  background: #e6d3a8;
+  background: #eadfc0;
   transform: scale(1.06);
 }
 

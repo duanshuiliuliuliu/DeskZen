@@ -7,23 +7,20 @@
   </head>
   <body class="chat-body">
     <div id="chat-root">
-      <header class="chat-header" data-tauri-drag-region>
-        <div class="chat-head-left" data-tauri-drag-region>
-          <span id="chat-avatar" class="chat-avatar">🐾</span>
-          <span id="chat-title" class="chat-title">DeskZen</span>
-        </div>
-        <div class="chat-head-right">
-          <span id="chat-state" class="chat-state">…</span>
-          <button id="chat-close" class="chat-close" title="关闭" type="button">✕</button>
-        </div>
-      </header>
-      <main id="chat-messages" class="chat-messages">
-        <div id="chat-empty" class="chat-empty">双击桌面的角色，和它说说话吧</div>
-      </main>
+      <div class="chat-head">
+        <span id="chat-avatar" class="chat-avatar">🐾</span>
+        <span id="chat-title" class="chat-title">DeskZen</span>
+        <button id="chat-close" class="chat-close" title="关闭" type="button">✕</button>
+      </div>
+      <main id="chat-messages" class="chat-messages"></main>
       <form id="chat-form" class="chat-form">
         <input id="chat-input" type="text" placeholder="和角色说点什么…" autocomplete="off" />
-        <button id="chat-screen" type="button" class="chat-screen" title="问屏幕：把当前屏幕截图发给角色看">📷</button>
-        <button type="submit" class="chat-send" title="发送">➤</button>
+        <button id="chat-screen" type="button" class="chat-screen" title="问屏幕：把当前屏幕截图发给角色看">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-4l-1.6-2H9.6z"/><circle cx="12" cy="13" r="3.2"/></svg>
+        </button>
+        <button type="submit" class="chat-send" title="发送">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M3.4 11.2l17.2-6.8-6.8 17.2-2.8-6.7-7.6-3.7z"/></svg>
+        </button>
       </form>
     </div>
     <script type="module" src="/src/chat.ts"></script>

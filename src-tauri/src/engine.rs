@@ -40,7 +40,7 @@ pub struct SystemPromptConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StateConfig {
-    /// 状态的中文显示名（悬停标签 / 对话窗头部）
+    /// 状态的中文显示名（对话窗头部）
     pub label: String,
     /// spritesheet 中该状态所在的行
     pub row: u32,
@@ -384,17 +384,6 @@ impl StateEngine {
                 previous: current,
             },
         );
-        if let Some(cfg) = persona.states.get(&next) {
-            if let Some(text) = pick(&cfg.bubbles) {
-                let _ = self.app.emit(
-                    "bubble",
-                    BubbleEvent {
-                        state: next.clone(),
-                        text,
-                    },
-                );
-            }
-        }
         next
     }
 }

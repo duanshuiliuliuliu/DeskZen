@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./styles.css";
 
@@ -15,24 +16,26 @@ interface PersonaConfig {
 const messages = document.getElementById("chat-messages") as HTMLDivElement;
 const form = document.getElementById("chat-form") as HTMLFormElement;
 const input = document.getElementById("chat-input") as HTMLInputElement;
-const stateLabel = document.getElementById("chat-state") as HTMLSpanElement;
 const titleEl = document.getElementById("chat-title") as HTMLSpanElement;
 const avatarEl = document.getElementById("chat-avatar") as HTMLSpanElement;
 const closeBtn = document.getElementById("chat-close") as HTMLButtonElement;
-const emptyEl = document.getElementById("chat-empty") as HTMLDivElement;
 const sendBtn = document.querySelector("#chat-form .chat-send") as HTMLButtonElement;
 const screenBtn = document.getElementById("chat-screen") as HTMLButtonElement;
+const chatRoot = document.getElementById("chat-root") as HTMLDivElement;
+const win = getCurrentWindow();
 let persona: PersonaConfig | null = null;
 let history: { role: "user" | "assistant"; content: string }[] = [];
 let sending = false;
 const SCREEN_DEFAULT_QUESTION = "请看看我当前屏幕上的内容，告诉我你看到了什么。";
 
-function stateLabelOf(state: string): string {
-  return persona?.states[state]?.label ?? state;
+/** 让气泡高度贴合内容，并重新贴到角色附近 */
+async function fitToContent(): Promise<void> {
+  const h = Math.min(Math.max(chatRoot.offsetHeight + 12, 150), 480);
+  await win.setSize(new LogicalSize(340, h));
+  await invoke("reposition_chat");
 }
 
 function addMessage(role: "user" | "bot", text: string, screen = false): void {
-  emptyEl.style.display = "none";
   const div = document.createElement("div");
   div.className = `msg msg-${role}`;
   div.textContent = text;
@@ -55,15 +58,6 @@ function addTypingIndicator(): HTMLDivElement {
   return div;
 }
 
-async function refreshState(): Promise<void> {
-  try {
-    const state = await invoke<string>("get_current_state");
-    stateLabel.textContent = stateLabelOf(state);
-  } catch {
-    stateLabel.textContent = "…";
-  }
-}
-
 async function sendMessage(text: string, withScreen: boolean): Promise<void> {
   if (sending) return;
   input.value = "";
@@ -74,12 +68,12 @@ async function sendMessage(text: string, withScreen: boolean): Promise<void> {
   sendBtn.disabled = true;
   screenBtn.disabled = true;
   const pending = addTypingIndicator();
+  void fitToContent();
   try {
-    const { reply, state } = await invoke<ChatReply>("chat_send", {
+    const { reply } = await invoke<ChatReply>("chat_send", {
       messages: history,
       useScreenshot: withScreen,
     });
-    stateLabel.textContent = stateLabelOf(state);
     pending.textContent = reply.trim() || "（我好像没看清屏幕，再发一张看看？）";
     pending.classList.remove("typing");
     history.push({ role: "assistant", content: reply });
@@ -96,6 +90,7 @@ async function sendMessage(text: string, withScreen: boolean): Promise<void> {
     sendBtn.disabled = false;
     screenBtn.disabled = false;
     messages.scrollTop = messages.scrollHeight;
+    void fitToContent();
     input.focus();
   }
 }
@@ -114,8 +109,6 @@ screenBtn.addEventListener("click", () => {
 closeBtn.addEventListener("click", () => {
   void getCurrentWindow().close();
 });
-// 关闭按钮不在拖拽区域内触发拖动
-closeBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
 
 try {
   persona = await invoke<PersonaConfig>("get_persona_config");
@@ -126,4 +119,4 @@ if (persona) {
   titleEl.textContent = persona.name;
   avatarEl.textContent = persona.name.slice(0, 1);
 }
-void refreshState();
+void fitToContent();

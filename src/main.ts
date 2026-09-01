@@ -37,7 +37,6 @@ let persona: PersonaConfig | null = null;
 
 const character = document.getElementById("character") as HTMLDivElement;
 const bubble = document.getElementById("bubble") as HTMLDivElement;
-const stateTag = document.getElementById("state-tag") as HTMLDivElement;
 let bubbleTimer: ReturnType<typeof setTimeout> | undefined;
 let dragging = false;
 let pointerStart = { x: 0, y: 0 };
@@ -61,7 +60,6 @@ function applyPersona(persona: PersonaConfig): void {
 function applyState(state: string, cfg: StateConfig | undefined): void {
   document.body.dataset.state = state;
   if (!cfg) return;
-  stateTag.textContent = cfg.label;
   document.title = persona ? `DeskZen · ${persona.name} · ${cfg.label}` : "DeskZen";
   document.body.style.setProperty("--frames", String(cfg.frames));
   document.body.style.setProperty("--row", String(cfg.row));
