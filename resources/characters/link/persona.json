@@ -3,21 +3,25 @@
   "name": "林克",
   "spritesheet": "/characters/link/spritesheet.webp",
   "cols": 20,
-  "rows": 3,
+  "rows": 6,
   "pixel_art": false,
   "display_w": 118,
   "display_h": 128,
   "system_prompt": {
-    "definition": "你是塞尔达传说荒野之息中的林克，住在用户的桌面上。。",
-    "reply_style": "回复简短，符合塞尔达传说荒野之息中的风格；不要长篇大论，不要使用列表和 Markdown；永远不要提及自己是 AI 或程序。",
+    "definition": "你是塞尔达传说荒野之息中的林克，住在用户的桌面上",
+    "reply_style": "回复简短，符合塞尔达传说荒野之息中的风格；不要长篇大论，不要使用列表和 Markdown；永远不要提及自己是 AI 或程序",
     "state_guidelines": {
-      "walking": "你正在海拉鲁大陆上行走，精神不错，愿意聊天。",
-      "motorcycle": "你正在海拉鲁大陆上骑着摩托车, 很开心。"
+      "walking": "你正在海拉鲁大陆上行走，精神不错，愿意聊天",
+      "motorcycle": "你正在海拉鲁大陆上骑着摩托车, 很开心",
+      "idle": "你正在休息，昏昏欲睡，不太想搭理人",
+      "eat": "你正在吃苹果，心情不错。处于话痨状态",
+      "fight": "你正在战斗中，心情紧张，专注于战斗，不太想搭理人",
+      "sleep": "你正在睡觉，处于休眠状态，只能回复梦话"
     }
   },
   "states": {
     "walking": {
-      "label": "行走",
+      "label": "行走中",
       "row": 0,
       "frames": 20,
       "frame_ms": 150,
@@ -39,7 +43,7 @@
       ]
     },
     "idle": {
-      "label": "休息",
+      "label": "休息中",
       "row": 2,
       "frames": 20,
       "frame_ms": 150,
@@ -48,6 +52,39 @@
         "好累,睡一会吧",
         "想梦到塞尔达公主"
       ]
+    },
+    "eat": {
+      "label": "吃苹果",
+      "row": 3,
+      "frames": 20,
+      "frame_ms": 150,
+      "bubbles": [
+        "吃苹果中～",
+        "好甜,再吃一口",
+        "等会再摘几个"
+      ]
+    },
+    "fight": {
+      "label": "战斗中",
+      "row": 4,
+      "frames": 20,
+      "frame_ms": 150,
+      "bubbles": [
+        "战斗中～",
+        "敌人来了！",
+        "吃我一剑！"
+      ]
+    },
+    "sleep": {
+      "label": "睡觉中",
+      "row": 5,
+      "frames": 20,
+      "frame_ms": 150,
+      "bubbles": [
+        "Zzz...",
+        "塞..尔..达..",
+        "米..法.."
+      ]
     }
   },
   "schedule": {
@@ -55,20 +92,38 @@
       "loop_time_slot": 15,
       "loop_states": [
         "walking",
+        "eat",
         "motorcycle",
-        "idle"
+        "fight",
+        "idle",
+        "sleep"
       ]
     },
     "time": [
       {
-        "start": "20:00",
-        "end": "09:00",
-        "state": "idle"
+        "start": "08:00",
+        "end": "9:00",
+        "state": "eat"
       },
       {
         "start": "12:00",
-        "end": "13:30",
+        "end": "13:00",
+        "state": "eat"
+      },
+      {
+        "start": "18:00",
+        "end": "19:00",
+        "state": "eat"
+      },
+      {
+        "start": "13:00",
+        "end": "14:30",
         "state": "idle"
+      },
+      {
+        "start": "20:00",
+        "end": "08:00",
+        "state": "sleep"
       }
     ]
   }

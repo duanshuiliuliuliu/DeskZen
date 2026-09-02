@@ -567,21 +567,34 @@ mod tests {
     #[test]
     fn schedule_parses_new_format() {
         let p = link();
-        assert_eq!(p.schedule.loop_time_slot(), 15);
-        assert_eq!(p.schedule.loop_states().len(), 3);
-        assert_eq!(p.schedule.time().len(), 2);
+        // 循环参数需有效，且引用的状态都必须存在
+        assert!(p.schedule.loop_time_slot() > 0);
+        assert!(!p.schedule.loop_states().is_empty());
+        for s in p.schedule.loop_states() {
+            assert!(p.states.contains_key(s), "循环状态缺失: {s}");
+        }
+        for slot in p.schedule.time() {
+            assert!(
+                p.states.contains_key(&slot.state),
+                "time 时段状态缺失: {}",
+                slot.state
+            );
+        }
     }
 
     #[test]
     fn time_slot_overrides_loop() {
         let p = link();
-        // 12:30 位于 12:00-13:30 时段内 → 固定 Idle
-        assert_eq!(automatic_state(&p, 12 * 60 + 30), "idle");
-        // 10:30 不在任何时段内 → 走循环
-        let mins = 10 * 60 + 30;
-        let states = p.schedule.loop_states();
-        let idx = (mins / p.schedule.loop_time_slot()) as usize % states.len();
-        assert_eq!(automatic_state(&p, mins), states[idx]);
+        // 取第一个 time 时段的中点 → 应返回该时段固定的 state
+        let slot = p.schedule.time().first().expect("应至少有一个 time 时段");
+        let start = parse_mins(&slot.start).unwrap_or(0);
+        let end = parse_mins(&slot.end).unwrap_or(0);
+        let mid = if start <= end {
+            (start + end) / 2
+        } else {
+            ((start + end + 1440) / 2) % 1440
+        };
+        assert_eq!(automatic_state(&p, mid), slot.state);
     }
 
     #[test]

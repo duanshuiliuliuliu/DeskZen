@@ -141,7 +141,8 @@ async function sendMessage(text: string, image: string | null = null): Promise<v
       messages: history,
       clipboardImage: image,
     });
-    pending.textContent = reply.trim() || "（我好像没看清，再发一张看看？）";
+    const fallback = image ? "我没看清，再发一次看看" : "我没听清，再说一次";
+    pending.textContent = reply.trim() || fallback;
     pending.classList.remove("typing");
     history.push({ role: "assistant", content: reply });
     // 只保留最近 20 条，避免上下文无限膨胀

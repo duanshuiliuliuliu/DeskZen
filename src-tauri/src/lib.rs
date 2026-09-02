@@ -344,7 +344,11 @@ async fn chat_send(
     } else {
         &cfg.model
     };
-    let reply = llm::chat_completion(&cfg, model, &llm_messages).await?;
+    let mut reply = llm::chat_completion(&cfg, model, &llm_messages).await?;
+    // 模型偶发返回空内容时重试一次
+    if reply.trim().is_empty() {
+        reply = llm::chat_completion(&cfg, model, &llm_messages).await?;
+    }
     let _ = app.emit(
         "bubble",
         engine::BubbleEvent {
