@@ -234,7 +234,7 @@ impl StateEngine {
     /// 删除导入角色：先删除磁盘目录，再从注册表移除。
     /// 内置角色（如 link）不允许删除。返回被删除角色的显示名。
     pub fn remove_persona(&self, id: &str) -> Result<String, String> {
-        if !id.starts_with("petdex-") {
+        if !(id.starts_with("petdex-") || id.starts_with("local-")) {
             return Err("内置角色不可删除".into());
         }
         if !id

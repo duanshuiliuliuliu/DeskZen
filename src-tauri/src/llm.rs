@@ -6,9 +6,6 @@ use tauri::{AppHandle, Manager};
 pub struct LlmConfig {
     pub base_url: String,
     pub model: String,
-    /// 视觉模型：用于“问屏幕”等截图问答。为空时回退到 `model`。
-    #[serde(default)]
-    pub vision_model: String,
     pub api_key: String,
 }
 
@@ -17,7 +14,6 @@ impl Default for LlmConfig {
         Self {
             base_url: "https://api.deepseek.com".into(),
             model: "deepseek-v4-flash".into(),
-            vision_model: "deepseek-v4-flash-vision-exp".into(),
             api_key: String::new(),
         }
     }
@@ -111,9 +107,6 @@ pub fn load_config(app: &AppHandle) -> LlmConfig {
                 }
                 if !disk.model.is_empty() {
                     cfg.model = disk.model;
-                }
-                if !disk.vision_model.is_empty() {
-                    cfg.vision_model = disk.vision_model;
                 }
                 if !disk.api_key.is_empty() {
                     cfg.api_key = disk.api_key;

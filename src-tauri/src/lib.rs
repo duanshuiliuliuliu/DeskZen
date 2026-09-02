@@ -40,6 +40,7 @@ struct PersonaInfo {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             passthrough: Mutex::new(false),
             persona_menu_item: Mutex::new(None),
@@ -90,6 +91,7 @@ pub fn run() {
             switch_persona,
             list_personas,
             petdex::import_petdex_pet,
+            petdex::import_local_character,
             petdex::delete_persona,
             get_llm_config,
             save_llm_config,
@@ -244,7 +246,6 @@ fn list_personas(engine: tauri::State<'_, engine::StateEngine>) -> Vec<PersonaIn
 struct LlmConfigView {
     base_url: String,
     model: String,
-    vision_model: String,
     api_key: String,
 }
 
@@ -254,7 +255,6 @@ fn get_llm_config(app: AppHandle) -> LlmConfigView {
     LlmConfigView {
         base_url: cfg.base_url,
         model: cfg.model,
-        vision_model: cfg.vision_model,
         api_key: cfg.api_key,
     }
 }
@@ -264,7 +264,6 @@ fn save_llm_config(
     app: AppHandle,
     base_url: String,
     model: String,
-    vision_model: String,
     api_key: String,
 ) -> Result<(), String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
@@ -272,7 +271,6 @@ fn save_llm_config(
     let cfg = llm::LlmConfig {
         base_url,
         model,
-        vision_model,
         api_key,
     };
     let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
@@ -320,7 +318,6 @@ async fn chat_send(
         .filter(|m| m.role == "user" || m.role == "assistant")
         .collect();
 
-    let mut has_image = false;
     if let Some(img) = clipboard_image {
         if !img.is_empty() {
             llm::attach_image_to_last_user(&mut llm_messages, img);
@@ -328,7 +325,6 @@ async fn chat_send(
                 "\n\n【本次回答】用户给你看了一张图片（屏幕截图或粘贴的图片）。\
                  请以图片内容作为依据回答；若问题与图片无关或看不清，请如实说明。",
             );
-            has_image = true;
         }
     }
     llm_messages.insert(
@@ -339,11 +335,7 @@ async fn chat_send(
         },
     );
 
-    let model = if has_image && !cfg.vision_model.is_empty() {
-        &cfg.vision_model
-    } else {
-        &cfg.model
-    };
+    let model = &cfg.model;
     let mut reply = llm::chat_completion(&cfg, model, &llm_messages).await?;
     // 模型偶发返回空内容时重试一次
     if reply.trim().is_empty() {

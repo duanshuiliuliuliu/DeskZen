@@ -17,7 +17,6 @@ const messages = document.getElementById("chat-messages") as HTMLDivElement;
 const form = document.getElementById("chat-form") as HTMLFormElement;
 const input = document.getElementById("chat-input") as HTMLInputElement;
 const titleEl = document.getElementById("chat-title") as HTMLSpanElement;
-const avatarEl = document.getElementById("chat-avatar") as HTMLSpanElement;
 const closeBtn = document.getElementById("chat-close") as HTMLButtonElement;
 const sendBtn = document.querySelector("#chat-form .chat-send") as HTMLButtonElement;
 const screenBtn = document.getElementById("chat-screen") as HTMLButtonElement;
@@ -225,6 +224,6 @@ try {
 }
 if (persona) {
   titleEl.textContent = persona.name;
-  avatarEl.textContent = persona.name.slice(0, 1);
+  input.placeholder = `和${persona.name}说点什么…`;
 }
 void fitToContent();

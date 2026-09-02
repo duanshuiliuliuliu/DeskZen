@@ -463,11 +463,13 @@ body.settings-body {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  scroll-snap-type: y proximity;
+  scroll-behavior: smooth;
   padding: 18px 20px 24px;
 }
 
-.settings-panel.hidden {
-  display: none;
+.settings-panel {
+  scroll-snap-align: start;
 }
 
 .settings-header {

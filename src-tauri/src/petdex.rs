@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     io::Read,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -143,6 +143,142 @@ pub fn delete_persona(
         engine.switch_persona(&app, "link")?;
     }
     Ok(())
+}
+
+// ---------- 本地导入（zip / 文件夹） ----------
+
+/// 从本地 zip 或文件夹读取 persona.json 与 spritesheet.webp 的内容
+fn read_local_pack(path: &Path) -> Result<(Vec<u8>, Vec<u8>), String> {
+    use std::io::Cursor;
+    if path.is_dir() {
+        let pj = find_file_recursive(path, "persona.json")
+            .ok_or_else(|| "文件夹内缺少 persona.json".to_string())?;
+        let spr = find_file_recursive(path, "spritesheet.webp")
+            .ok_or_else(|| "文件夹内缺少 spritesheet.webp".to_string())?;
+        let pj = fs::read(&pj).map_err(|e| format!("读取 persona.json 失败: {e}"))?;
+        let spr = fs::read(&spr).map_err(|e| format!("读取 spritesheet 失败: {e}"))?;
+        Ok((pj, spr))
+    } else if path.is_file() {
+        let bytes = fs::read(path).map_err(|e| format!("读取文件失败: {e}"))?;
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+            .map_err(|e| format!("zip 解析失败: {e}"))?;
+        let mut pj = None;
+        let mut spr = None;
+        for i in 0..archive.len() {
+            let mut f = archive
+                .by_index(i)
+                .map_err(|e| format!("zip 读取失败: {e}"))?;
+            let base = f
+                .name()
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(f.name())
+                .to_ascii_lowercase();
+            if base == "persona.json" && pj.is_none() {
+                let mut buf = Vec::with_capacity(f.size() as usize);
+                f.read_to_end(&mut buf)
+                    .map_err(|e| format!("读取 persona.json 失败: {e}"))?;
+                pj = Some(buf);
+            } else if base == "spritesheet.webp" && spr.is_none() {
+                let mut buf = Vec::with_capacity(f.size() as usize);
+                f.read_to_end(&mut buf)
+                    .map_err(|e| format!("读取 spritesheet 失败: {e}"))?;
+                spr = Some(buf);
+            }
+        }
+        Ok((
+            pj.ok_or_else(|| "zip 内缺少 persona.json".to_string())?,
+            spr.ok_or_else(|| "zip 内缺少 spritesheet.webp".to_string())?,
+        ))
+    } else {
+        Err("路径不是文件也不是文件夹".into())
+    }
+}
+
+/// 递归查找目录下的文件（按文件名匹配，忽略大小写）
+fn find_file_recursive(dir: &Path, name: &str) -> Option<PathBuf> {
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Some(f) = find_file_recursive(&p, name) {
+                return Some(f);
+            }
+        } else if p
+            .file_name()
+            .map(|f| f.to_string_lossy().eq_ignore_ascii_case(name))
+            .unwrap_or(false)
+        {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// 校验 WebP：RIFF....WEBP
+fn validate_webp(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Ok(())
+    } else {
+        Err("spritesheet 不是有效的 WebP 图片".into())
+    }
+}
+
+/// 从 id/name 生成安全的 slug
+fn sanitize_slug(id: &str, name: &str) -> String {
+    let s = if id.trim().is_empty() { name } else { id };
+    let s: String = s
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let s = s.trim_matches('-').to_string();
+    if s.is_empty() {
+        "char".to_string()
+    } else if s.len() > 40 {
+        s[..40].to_string()
+    } else {
+        s
+    }
+}
+
+/// 从本地 zip / 文件夹导入角色：校验 persona.json 格式与 WebP 后写入并注册
+#[tauri::command]
+pub async fn import_local_character(
+    app: AppHandle,
+    path: String,
+    engine: tauri::State<'_, StateEngine>,
+) -> Result<ImportedPet, String> {
+    let (pj_bytes, spr_bytes) = read_local_pack(Path::new(&path))?;
+    let mut persona: PersonaConfig =
+        serde_json::from_slice(&pj_bytes).map_err(|e| format!("persona.json 格式错误: {e}"))?;
+    validate_webp(&spr_bytes)?;
+
+    let id = format!("local-{}", sanitize_slug(&persona.id, &persona.name));
+    persona.id = id.clone();
+    if persona.name.trim().is_empty() {
+        persona.name = persona.id.clone();
+    }
+
+    let dir = engine.characters_dir()?.join(&id);
+    fs::create_dir_all(&dir).map_err(|e| format!("创建角色目录失败: {e}"))?;
+    let sprite_path = dir.join("spritesheet.webp");
+    fs::write(&sprite_path, &spr_bytes).map_err(|e| format!("写入精灵图失败: {e}"))?;
+    persona.spritesheet = sprite_path.to_string_lossy().into_owned();
+    let persona_json = serde_json::to_string_pretty(&persona)
+        .map_err(|e| format!("生成角色配置失败: {e}"))?;
+    fs::write(dir.join("persona.json"), &persona_json)
+        .map_err(|e| format!("写入角色配置失败: {e}"))?;
+
+    engine.register_persona(persona.clone());
+    if let Err(e) = engine.switch_persona(&app, &id) {
+        let _ = fs::remove_dir_all(&dir);
+        return Err(e);
+    }
+    crate::add_persona_menu_item(&app, &id, &persona.name)?;
+    Ok(ImportedPet {
+        id,
+        name: persona.name,
+    })
 }
 
 fn http_client() -> reqwest::Client {

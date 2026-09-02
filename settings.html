@@ -40,20 +40,27 @@
           </section>
 
           <section class="settings-group">
+            <h2>从本地导入</h2>
+            <p class="settings-hint">支持 zip 压缩包或文件夹，需包含 persona.json 与 spritesheet.webp。</p>
+            <button id="local-import" class="btn btn-primary" type="button">从本地导入</button>
+            <p id="local-import-status" class="settings-hint"></p>
+          </section>
+
+          <section class="settings-group">
             <h2>已导入角色</h2>
             <div id="imported-list" class="imported-list"></div>
             <p id="imported-hint" class="settings-hint"></p>
           </section>
         </section>
 
-        <section id="panel-llm" class="settings-panel hidden">
+        <section id="panel-llm" class="settings-panel">
           <header class="settings-header">
             <h1>大模型设置</h1>
             <span id="settings-status" class="settings-status"></span>
           </header>
 
           <section class="settings-group">
-            <h2>DeepSeek 网关</h2>
+            <h2>模型网关</h2>
             <label class="settings-field">
               <span>接口地址</span>
               <input id="base-url" type="text" />
@@ -63,15 +70,11 @@
               <input id="model" type="text" />
             </label>
             <label class="settings-field">
-              <span>视觉模型（截图问答用）</span>
-              <input id="vision-model" type="text" placeholder="deepseek-v4-flash-vision-exp" />
-            </label>
-            <label class="settings-field">
               <span>API Key</span>
               <input id="api-key" type="password" placeholder="sk-…" autocomplete="off" />
             </label>
             <button id="llm-save" class="btn btn-primary">保存模型配置</button>
-            <p class="settings-hint">聊天框的“📷 问屏幕”会把当前屏幕截图发给大模型；请使用支持图像输入的视觉模型（默认 deepseek-v4-flash-vision-exp）。</p>
+            <p class="settings-hint">发送图片时，请使用支持图像输入的视觉模型。</p>
           </section>
         </section>
 
