@@ -255,6 +255,45 @@ body.chat-body {
   }
 }
 
+.chat-attach {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px 6px;
+}
+
+.chat-attach.hidden {
+  display: none;
+}
+
+.chat-attach-img {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid rgba(205, 175, 125, 0.55);
+  box-shadow: 0 1px 3px rgba(90, 60, 20, 0.1);
+}
+
+.chat-attach-remove {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(200, 170, 120, 0.2);
+  color: #7d5f2f;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat-attach-remove:hover {
+  background: rgba(190, 140, 70, 0.35);
+}
+
 .chat-form {
   display: flex;
   gap: 8px;
@@ -342,7 +381,7 @@ body.chat-body {
   transform: none;
 }
 
-.msg-screen-tag {
+.msg-tag {
   display: inline-flex;
   align-items: center;
   justify-content: center;

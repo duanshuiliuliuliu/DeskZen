@@ -96,6 +96,7 @@ pub fn run() {
             get_passthrough,
             set_passthrough,
             show_persona_menu,
+            capture_screen,
             reposition_chat,
             quit_app
         ])
@@ -307,25 +308,28 @@ async fn chat_send(
     app: AppHandle,
     messages: Vec<llm::LlmMessage>,
     engine: tauri::State<'_, engine::StateEngine>,
-    use_screenshot: Option<bool>,
+    clipboard_image: Option<String>,
 ) -> Result<ChatReply, String> {
     let state = engine.current_state();
     let cfg = llm::load_config(&app);
     let persona = engine.persona();
     let mut system = engine::build_system_prompt(&persona, &state);
-    let with_screenshot = use_screenshot.unwrap_or(false);
 
     let mut llm_messages: Vec<llm::LlmMessage> = messages
         .into_iter()
         .filter(|m| m.role == "user" || m.role == "assistant")
         .collect();
-    if with_screenshot {
-        let data_url = screen::capture_current_monitor_data_url(&app)?;
-        llm::attach_image_to_last_user(&mut llm_messages, data_url);
-        system.push_str(
-            "\n\n【本次回答】用户给你看了一张当前屏幕的截图。\
-             请以截图上的内容作为依据回答；若问题与截图无关或看不清，请如实说明。",
-        );
+
+    let mut has_image = false;
+    if let Some(img) = clipboard_image {
+        if !img.is_empty() {
+            llm::attach_image_to_last_user(&mut llm_messages, img);
+            system.push_str(
+                "\n\n【本次回答】用户给你看了一张图片（屏幕截图或粘贴的图片）。\
+                 请以图片内容作为依据回答；若问题与图片无关或看不清，请如实说明。",
+            );
+            has_image = true;
+        }
     }
     llm_messages.insert(
         0,
@@ -335,7 +339,7 @@ async fn chat_send(
         },
     );
 
-    let model = if with_screenshot && !cfg.vision_model.is_empty() {
+    let model = if has_image && !cfg.vision_model.is_empty() {
         &cfg.vision_model
     } else {
         &cfg.model
@@ -349,6 +353,12 @@ async fn chat_send(
         },
     );
     Ok(ChatReply { reply, state })
+}
+
+/// 点击「📷」：截取当前屏幕并返回 base64 data URL，供前端作为预览、待用户发送
+#[tauri::command]
+async fn capture_screen(app: AppHandle) -> Result<String, String> {
+    screen::capture_current_monitor_data_url(&app)
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
