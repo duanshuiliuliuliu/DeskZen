@@ -42,18 +42,34 @@ let dragging = false;
 let pointerStart = { x: 0, y: 0 };
 
 /** 应用角色外观：精灵图、行数、显示尺寸、渲染模式 */
+function setCharSize(w: number, h: number): void {
+  character.style.width = `${w}px`;
+  character.style.height = `${h}px`;
+  character.style.setProperty("--char-w", String(w));
+}
+
 function applyPersona(persona: PersonaConfig): void {
   document.body.style.setProperty("--cols", String(persona.cols));
   document.body.style.setProperty("--rows", String(persona.rows));
-  character.style.setProperty("--char-w", String(persona.display_w));
   // 内置角色用站点路径；petdex 导入角色存在磁盘上，需经 asset 协议加载
   const spriteUrl = persona.spritesheet.startsWith("/")
     ? persona.spritesheet
     : convertFileSrc(persona.spritesheet);
   character.style.backgroundImage = `url("${spriteUrl}")`;
-  character.style.width = `${persona.display_w}px`;
-  character.style.height = `${persona.display_h}px`;
   character.style.imageRendering = persona.pixel_art ? "pixelated" : "auto";
+  if (persona.display_w > 0 && persona.display_h > 0) {
+    setCharSize(persona.display_w, persona.display_h);
+  } else {
+    // 未配置显示尺寸：用精灵图实际尺寸 ÷ cols/rows 计算
+    const img = new Image();
+    img.onload = () => {
+      const w = Math.round(img.naturalWidth / persona.cols);
+      const h = Math.round(img.naturalHeight / persona.rows);
+      setCharSize(w, h);
+    };
+    img.onerror = () => setCharSize(1, 1);
+    img.src = spriteUrl;
+  }
 }
 
 /** 切换角色状态：CSS 变量驱动 spritesheet 的行列位置与帧动画参数 */

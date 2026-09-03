@@ -5,8 +5,8 @@
   "cols": 20,
   "rows": 6,
   "pixel_art": false,
-  "display_w": 118,
-  "display_h": 128,
+  "display_w": 116,
+  "display_h": 125,
   "system_prompt": {
     "definition": "你是塞尔达传说荒野之息中的林克，住在用户的桌面上",
     "reply_style": "回复简短，符合塞尔达传说荒野之息中的风格；不要长篇大论，不要使用列表和 Markdown；永远不要提及自己是 AI 或程序",
@@ -88,17 +88,32 @@
     }
   },
   "schedule": {
-    "loop": {
-      "loop_time_slot": 15,
-      "loop_states": [
-        "walking",
-        "eat",
-        "motorcycle",
-        "fight",
-        "idle",
-        "sleep"
-      ]
-    },
+    "loop": [
+      {
+        "state": "walking",
+        "duration": 20
+      },
+      {
+        "state": "motorcycle",
+        "duration": 20
+      },
+      {
+        "state": "fight",
+        "duration": 20
+      },
+      {
+        "state": "idle",
+        "duration": 20
+      },
+      {
+        "state": "eat",
+        "duration": 20
+      },
+      {
+        "state": "sleep",
+        "duration": 20
+      }
+    ],
     "time": [
       {
         "start": "08:00",

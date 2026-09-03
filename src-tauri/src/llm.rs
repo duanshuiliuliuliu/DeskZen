@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-/// DeepSeek（OpenAI 兼容）配置
+/// LLM（OpenAI 兼容）配置：可指向任意兼容接口。
+/// 默认值仅为示例（DeepSeek），用户可在设置/llm.json 里改成 OpenAI、Ollama 等任意接口。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
     pub base_url: String,
@@ -13,13 +14,13 @@ impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             base_url: "https://api.deepseek.com".into(),
-            model: "deepseek-v4-flash".into(),
+            model: "deepseek-v4-flash-vision-exp".into(),
             api_key: String::new(),
         }
     }
 }
 
-/// 消息内容：既可以是纯文本（兼容旧配置），也可以是多模态内容数组（文本 + 图片）。
+/// 消息内容：纯文本或多模态内容数组（文本 + 图片）。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Content {
@@ -95,10 +96,10 @@ struct Choice {
     message: LlmMessage,
 }
 
-/// 读取 LLM 配置：优先级 环境变量 DESKZEN_DEEPSEEK_KEY > AppData 下 llm.json > 默认值
+/// 读取 LLM 配置：优先级 环境变量 DESKZEN_API_KEY > AppData 下 llm.json > 默认值
 pub fn load_config(app: &AppHandle) -> LlmConfig {
     let mut cfg = LlmConfig::default();
-        if let Ok(dir) = app.path().app_config_dir() {
+    if let Ok(dir) = app.path().app_config_dir() {
         let file = dir.join("llm.json");
         if let Ok(content) = std::fs::read_to_string(file) {
             if let Ok(disk) = serde_json::from_str::<LlmConfig>(&content) {
@@ -114,10 +115,9 @@ pub fn load_config(app: &AppHandle) -> LlmConfig {
             }
         }
     }
-    if let Ok(key) = std::env::var("DESKZEN_DEEPSEEK_KEY") {
-        if !key.is_empty() {
-            cfg.api_key = key;
-        }
+    let key = std::env::var("DESKZEN_API_KEY").unwrap_or_default();
+    if !key.is_empty() {
+        cfg.api_key = key;
     }
     cfg
 }
@@ -129,7 +129,7 @@ pub async fn chat_completion(
     messages: &[LlmMessage],
 ) -> Result<String, String> {
     if cfg.api_key.is_empty() {
-        return Err("尚未配置 DeepSeek API Key。请在 AppData/com.deskzen.app/llm.json 或环境变量 DESKZEN_DEEPSEEK_KEY 中配置。".into());
+        return Err("尚未配置 API Key。请在 AppData/com.deskzen.app/llm.json 或环境变量 DESKZEN_API_KEY 中配置。".into());
     }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -149,14 +149,14 @@ pub async fn chat_completion(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("请求 DeepSeek 失败：{e}"))?;
+        .map_err(|e| format!("请求 LLM 接口失败：{e}"))?;
     let status = resp.status();
     let text = resp
         .text()
         .await
         .map_err(|e| format!("读取响应失败：{e}"))?;
     if !status.is_success() {
-        return Err(format!("DeepSeek 返回错误（{status}）：{}", truncate(&text, 300)));
+        return Err(format!("LLM 接口返回错误（{status}）：{}", truncate(&text, 300)));
     }
     let parsed: ChatResponse =
         serde_json::from_str(&text).map_err(|e| format!("响应解析失败：{e}"))?;
@@ -165,7 +165,7 @@ pub async fn chat_completion(
         .into_iter()
         .next()
         .map(|c| c.message.content.as_text().trim().to_string())
-        .ok_or_else(|| "DeepSeek 返回了空响应".into())
+        .ok_or_else(|| "LLM 返回了空响应".into())
 }
 
 /// 把一张截图（data URL）附加到最后一条用户消息上，构成多模态内容。
@@ -226,7 +226,7 @@ mod tests {
             ]),
         };
         let body = ChatRequest {
-            model: "deepseek-v4-flash-vision-exp",
+            model: "vision-model",
             messages: &[msg],
             temperature: 0.8,
             max_tokens: 512,
@@ -242,7 +242,7 @@ mod tests {
         );
     }
 
-    /// 纯文本消息（历史记录里常见）应序列化为字符串，保持向后兼容。
+    /// 纯文本消息应序列化为字符串。
     #[test]
     fn content_text_serializes_as_string() {
         let msg = LlmMessage {
@@ -253,10 +253,13 @@ mod tests {
         assert_eq!(json["content"], serde_json::json!("你好"));
     }
 
-    /// 真实调用 DeepSeek，验证网关代码路径（读取 AppData 中的 llm.json，不硬编码 key）
+    /// 真实调用 LLM，验证网关代码路径（读取 AppData 中的 llm.json）。
+    /// 需要真实配置与网络，默认忽略；可用 `cargo test -- --ignored` 手动运行。
+    #[ignore]
     #[tokio::test]
     async fn chat_completion_works() {
-        let path = std::path::Path::new(r"C:\Users\Baosong.Nan\AppData\Roaming\com.deskzen.app\llm.json");
+        let appdata = std::env::var("APPDATA").expect("APPDATA 未设置");
+        let path = std::path::Path::new(&appdata).join("com.deskzen.app\\llm.json");
         let content = std::fs::read_to_string(path).expect("llm.json 不存在，请先配置 API Key");
         let cfg: LlmConfig = serde_json::from_str(&content).expect("llm.json 解析失败");
         assert!(!cfg.api_key.is_empty(), "llm.json 中缺少 api_key");
@@ -273,7 +276,7 @@ mod tests {
         ];
         let reply = chat_completion(&cfg, &cfg.model, &messages)
             .await
-            .expect("DeepSeek 调用失败");
+            .expect("LLM 调用失败");
         assert!(!reply.trim().is_empty());
         println!("reply: {reply}");
     }

@@ -33,8 +33,11 @@ let capturing = false;
 
 /** 让气泡高度贴合内容，并重新贴到角色附近 */
 async function fitToContent(): Promise<void> {
+  // 宽度跟随窗口（lib.rs 定义一次），高度按内容自适应
+  const scale = await win.scaleFactor();
+  const w = (await win.innerSize()).toLogical(scale).width;
   const h = Math.min(Math.max(chatRoot.offsetHeight + 12, 150), 480);
-  await win.setSize(new LogicalSize(340, h));
+  await win.setSize(new LogicalSize(w, h));
   await invoke("reposition_chat");
 }
 
@@ -53,15 +56,15 @@ function renderAttach(): void {
 function addMessage(
   role: "user" | "bot",
   text: string,
-  tag: "screen" | "image" | null = null,
+  withImage = false,
 ): void {
   const div = document.createElement("div");
   div.className = `msg msg-${role}`;
   div.textContent = text;
-  if (tag) {
+  if (withImage) {
     const el = document.createElement("span");
     el.className = "msg-tag";
-    el.textContent = tag === "screen" ? "📷" : "🖼";
+    el.textContent = "🖼";
     div.appendChild(el);
   }
   messages.appendChild(div);
@@ -125,7 +128,7 @@ async function sendMessage(text: string, image: string | null = null): Promise<v
     question = trimmed;
   }
   input.value = "";
-  addMessage("user", question, image ? "image" : null);
+  addMessage("user", question, !!image);
   history.push({ role: "user", content: question });
   // 点发送即清除预览（图片已随本次消息一起提交，不影响 image 变量）
   pendingImage = null;

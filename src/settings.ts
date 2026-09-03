@@ -24,9 +24,10 @@ const importedList = $("imported-list") as HTMLDivElement;
 const importedHint = $("imported-hint") as HTMLElement;
 const navItems = document.querySelectorAll<HTMLButtonElement>(".nav-item");
 const settingsContent = document.querySelector(".settings-content") as HTMLElement;
-const panels: Record<"role" | "llm", HTMLElement> = {
+const panels: Record<"role" | "llm" | "about", HTMLElement> = {
   role: $("panel-role"),
   llm: $("panel-llm"),
+  about: $("panel-about"),
 };
 
 /** Petdex 链接校验：仅接受 https://petdex.dev/pets/{slug} */
@@ -43,7 +44,7 @@ function setLocalImportStatus(text: string, error = false): void {
 }
 
 /** 滚动到指定面板并高亮侧边栏 */
-function activatePanel(name: "role" | "llm", scroll = true): void {
+function activatePanel(name: "role" | "llm" | "about", scroll = true): void {
   for (const btn of navItems) {
     btn.classList.toggle("active", btn.dataset.panel === name);
   }
@@ -55,16 +56,16 @@ function activatePanel(name: "role" | "llm", scroll = true): void {
 for (const btn of navItems) {
   btn.addEventListener("click", () => {
     const name = btn.dataset.panel;
-    if (name === "role" || name === "llm") activatePanel(name);
+    if (name === "role" || name === "llm" || name === "about") activatePanel(name);
   });
 }
 
 // 滚动时高亮当前面板（内容滚动会吸附到每个设置区块）
 settingsContent.addEventListener("scroll", () => {
   const rectTop = settingsContent.getBoundingClientRect().top;
-  let current: "role" | "llm" = "role";
+  let current: "role" | "llm" | "about" = "role";
   let best = -Infinity;
-  for (const name of ["role", "llm"] as const) {
+  for (const name of ["role", "llm", "about"] as const) {
     const d = panels[name].getBoundingClientRect().top - rectTop;
     if (d <= 80 && d > best) {
       best = d;

@@ -30,10 +30,9 @@ body {
 .character {
   position: absolute;
   left: 50%;
+  /* 与 Rust 端 SPRITE_BOTTOM(=24) 同步 */
   bottom: 24px;
   transform: translateX(-50%);
-  width: 128px;
-  height: 128px;
   background-image: url("/characters/link/spritesheet.webp");
   background-size: calc(var(--cols) * 100%) calc(var(--rows) * 100%);
   background-position-x: 0%;
@@ -98,7 +97,7 @@ body.chat-body {
 #chat-root {
   position: relative;
   box-sizing: border-box;
-  width: 340px;
+  width: 100%;
   margin: 0 0 12px; /* 底部留出尖角空间 */
   padding: 10px 12px 8px;
   border-radius: 16px;
@@ -522,6 +521,26 @@ body.settings-body {
 
 .settings-hint.error {
   color: #b0564a;
+}
+
+.about-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.about-list p {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  color: #5b4a2c;
+}
+
+.about-list p span {
+  min-width: 60px;
+  color: #a08a5f;
 }
 
 .imported-list {

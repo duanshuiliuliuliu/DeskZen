@@ -22,6 +22,7 @@ xcap = "0.9"
 png = "0.17"
 base64 = "0.22"
 tauri-plugin-dialog = "2"
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 
 [profile.release]
 codegen-units = 1

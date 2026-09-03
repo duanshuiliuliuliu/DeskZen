@@ -10,12 +10,12 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
 
 | 功能 | 说明 |
 |---|---|
-| 生活状态引擎 | 每个角色独立的状态机：默认按 `loop_states` 每 `loop_time_slot` 分钟循环；`time` 时段内固定为对应状态，每 30 秒计算并广播状态变化 |
+| 生活状态引擎 | 每个角色独立的状态机：默认按 `loop`（逐状态 `{state,duration}`）循环；`time` 时段内固定为对应状态，每 30 秒计算并广播状态变化 |
 | 多角色运行时切换 | 内置林克；托盘「更换角色」子菜单即时切换（✓ 标记当前角色） |
 | Petdex 角色导入 | 从 petdex.dev 链接下载 zip 包（或直接资源），自动生成角色配置并持久化 |
 | 角色删除 | 设置界面一键删除导入角色，删除当前角色时自动回退到默认角色 |
-| 桌面角色动画 | spritesheet + CSS steps 帧动画（内置林克 20×3，3 种状态各占一行） |
-| 对话面板 | 双击角色打开，跟随角色的对话气泡（尖角指向角色、高度自适应），接入 DeepSeek |
+| 桌面角色动画 | spritesheet + CSS steps 帧动画（内置林克 20×6，6 种状态各占一行） |
+| 对话面板 | 双击角色打开，跟随角色的对话气泡（尖角指向角色、高度自适应），接入 OpenAI 兼容大模型 |
 | 状态气泡 | 状态切换 / 收到回复时角色头顶弹出轻量气泡，超时自动消失 |
 | 角色右键菜单 | 右键角色弹出「下个状态 / 隐藏」：循环切换角色动画状态（按 spritesheet 行序），或隐藏角色窗口 |
 | 点击穿透 | 可选整窗点击穿透，不遮挡下层操作 |
@@ -28,7 +28,7 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
 核心引擎，决定角色的行为与回复逻辑，全部在 Rust 主进程运行。
 
 - 多角色支持：内置角色 + 用户导入角色，运行时切换。
-- 状态机驱动：默认在 `loop_states` 中按 `loop_time_slot`（分钟）循环；`time` 配置的时段内固定为对应状态（支持跨午夜），时段外回到循环。
+- 状态机驱动：默认按 `loop` 列表（每项 `{state,duration}` 分钟）循环；`time` 配置的时段内固定为对应状态（支持跨午夜），时段外回到循环。
 - 内置角色状态由 persona.json 定义（林克：`walking`/`motorcycle`/`idle`）；Petdex 导入角色默认 9 个标准状态（`Idle`、`RunRight`、`RunLeft`、`Waving`、`Jumping`、`Failed`、`Waiting`、`Running`、`Review`，与 Petdex 规范一致，spritesheet 每状态一行）。
 - 状态与回复绑定：对话时 system prompt 注入「角色定义 + 回复风格 + 当前状态约束」，同一角色在不同状态下回复风格不同。
 - 状态切换气泡：状态变化时从该状态的气泡文本池随机弹出一条。
@@ -66,7 +66,7 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
    Tauri IPC（command / event）                   │
 ┌───────────────┴───────────────────────────────┴──────────────┐
 │ Rust 核心进程（常驻，低占用）                                 │
-│ 生活状态引擎 │ 气泡调度 │ LLM 网关(DeepSeek) │ Petdex 导入     │
+│ 生活状态引擎 │ 气泡调度 │ LLM 网关(OpenAI 兼容) │ Petdex 导入     │
 │ 窗口管理 │ 托盘 │ 角色持久化（用户数据目录扫描）                │
 └───────────────▲─────────────────────────────────────────────┘
    Tauri 窗口能力：透明无边框、点击穿透、按需创建/销毁窗口、asset 协议
@@ -92,7 +92,7 @@ DeskZen/
 ├─ resources/                                资源目录（Vite publicDir）
 │  ├─ characters/link/
 │  │  ├─ persona.json     角色配置（作息/状态/气泡/提示词）
-│  │  └─ spritesheet.webp 角色精灵图（20×3）
+│  │  └─ spritesheet.webp 角色精灵图（20×6）
 │  └─ icons/              应用图标（32/128/256 + ico）
 ├─ scripts/                                  开发与测试脚本
 │  ├─ gen_icons.py    从源 PNG 生成应用图标
@@ -103,7 +103,7 @@ DeskZen/
    │  ├─ main.rs / lib.rs   入口、窗口、托盘、命令
    │  ├─ engine.rs          生活状态引擎 + persona 注册/持久化
    │  ├─ petdex.rs          Petdex 导入/删除命令
-   │  └─ llm.rs             DeepSeek 网关
+   │  └─ llm.rs             LLM 网关（OpenAI 兼容）
    ├─ capabilities/         Tauri 权限
    └─ tauri.conf.json       窗口、asset 协议、打包配置
 ```
@@ -148,7 +148,7 @@ DeskZen/
 
 1. 双击角色 → `open_chat` 创建无边框透明气泡窗口并定位到角色上方，随内容自适应高度、跟随角色移动。
 2. 发送消息 → 前端把最近 20 条历史一起发给 `chat_send`。
-3. Rust 组装 system prompt（角色定义 + 回复风格 + 当前状态约束），调用 DeepSeek `deepseek-v4-flash`。
+3. Rust 组装 system prompt（角色定义 + 回复风格 + 当前状态约束），调用配置的大模型。
 4. 回复显示在对话窗，角色头顶弹出「收到！」气泡。
 
 ### 问屏幕（截图问答）
@@ -176,9 +176,9 @@ DeskZen/
 
 ## 配置
 
-### LLM（DeepSeek）
+### LLM 大模型配置（OpenAI 兼容）
 
-配置文件位于 `%APPDATA%\com.deskzen.app\llm.json`：
+支持任意 OpenAI 兼容接口（如 DeepSeek、OpenAI、Ollama 等），配置文件位于 `%APPDATA%\com.deskzen.app\llm.json`：
 
 ```json
 {
@@ -188,16 +188,16 @@ DeskZen/
 }
 ```
 
-配置优先级：环境变量 `DESKZEN_DEEPSEEK_KEY` > `llm.json` > 默认值。Key 不会进入前端代码和安装包，可通过设置界面填写保存。
+配置优先级：环境变量 `DESKZEN_API_KEY` > `llm.json` > 默认值。Key 不会进入前端代码和安装包，可通过设置界面填写保存。
 
 ### 角色
 
 内置角色：`resources/characters/<id>/`（随应用打包），含 `persona.json` 与 `spritesheet`：
 
 - `system_prompt`：角色定义、回复风格、各状态行为约束（注入 LLM）；
-- `spritesheet` / `cols` / `rows` / `pixel_art` / `display_w` / `display_h`：精灵图与渲染参数；
+- `spritesheet` / `cols` / `rows` / `pixel_art` / `display_w` / `display_h`：精灵图与渲染参数（`display_w`/`display_h` 可省略，缺省时按精灵图实际尺寸 ÷ `cols`/`rows` 自动计算）；
 - `states`：状态中文名、spritesheet 行/帧/帧时长、气泡文本池；
-- `schedule`：状态机配置 `{ "loop": { "loop_states": [...], "loop_time_slot": 分钟 }, "time": [ {start,end,state}... ] }`——默认按 `loop_states` 循环，`time` 时段内固定为对应状态（支持跨午夜）。
+- `schedule`：状态机配置 `{ "loop": [ {state,duration 分钟}... ], "time": [ {start,end,state}... ] }`——默认按 `loop` 逐状态循环，`time` 时段内固定为对应状态（支持跨午夜）。
 
 导入角色：`%APPDATA%\com.deskzen.app\characters\petdex-{slug}\`，与内置角色同构（`persona.json` + `spritesheet` + 原始 `pet.json`），启动时自动扫描加载。
 
@@ -216,7 +216,7 @@ npm run tauri build -- --no-bundle  # 仅生成 deskzen.exe，不打包安装包
 
 ## 测试
 
-- Rust 单元测试：在 `src-tauri/` 下运行 `cargo test --lib`，覆盖 Petdex 链接解析、zip 解压、persona 生成、DeepSeek 网关。
+- Rust 单元测试：在 `src-tauri/` 下运行 `cargo test --lib`，覆盖 Petdex 链接解析、zip 解压、persona 生成、LLM 网关。
 - 端到端冒烟测试（`scripts/`，需先以 CDP 调试端口启动应用）：
   - `petdex_e2e.mjs`：导入命令 + 精灵图加载；
   - `petdex_ui_e2e.mjs`：设置界面导入流程 + 前端校验；
@@ -231,7 +231,7 @@ npm run tauri build -- --no-bundle  # 仅生成 deskzen.exe，不打包安装包
 | 基础角色 + 多状态帧动画 | ✅ 完成（林克，3 种动画状态） |
 | 状态机按本地时间切换 | ✅ 完成 |
 | 状态切换随机气泡 | ✅ 完成 |
-| 对话面板 + LLM + 状态注入 | ✅ 完成（DeepSeek deepseek-v4-flash） |
+| 对话面板 + LLM + 状态注入 | ✅ 完成（OpenAI 兼容大模型） |
 | 多角色运行时切换 | ✅ 完成（托盘「更换角色」子菜单） |
 | Petdex 角色导入 / 删除 | ✅ 完成（zip 下载解压 + 前端校验 + 持久化） |
 | 设置界面侧边栏 | ✅ 完成（角色设置 / 大模型设置） |

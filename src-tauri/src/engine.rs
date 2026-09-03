@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
     time::Duration,
@@ -24,7 +24,9 @@ pub struct PersonaConfig {
     /// 是否像素画（决定放大渲染方式）
     pub pixel_art: bool,
     /// 角色在窗口中的显示尺寸
+    #[serde(default)]
     pub display_w: u32,
+    #[serde(default)]
     pub display_h: u32,
     pub system_prompt: SystemPromptConfig,
     pub states: HashMap<String, StateConfig>,
@@ -53,52 +55,31 @@ pub struct StateConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum ScheduleConfig {
-    /// 新格式：循环状态 + time 时段配置
-    Config {
-        #[serde(default)]
-        r#loop: LoopConfig,
-        /// 时间段配置：在指定时间段内固定为对应状态
-        #[serde(default)]
-        time: Vec<TimeSlot>,
-    },
-    /// 旧格式（兼容）：直接是 {start,end,state} 数组，转换为全部是 time 时段、无循环
-    Legacy(Vec<TimeSlot>),
+pub struct ScheduleConfig {
+    /// 循环状态（逐状态时长）
+    #[serde(default)]
+    pub r#loop: Vec<LoopEntry>,
+    /// 时间段配置：在指定时间段内固定为对应状态
+    #[serde(default)]
+    pub time: Vec<TimeSlot>,
 }
 
 impl ScheduleConfig {
-    pub fn loop_states(&self) -> &[String] {
-        match self {
-            ScheduleConfig::Config { r#loop, .. } => &r#loop.loop_states,
-            ScheduleConfig::Legacy(_) => &[],
-        }
-    }
-
-    pub fn loop_time_slot(&self) -> u32 {
-        match self {
-            ScheduleConfig::Config { r#loop, .. } => r#loop.loop_time_slot,
-            ScheduleConfig::Legacy(_) => 0,
-        }
+    pub fn loop_entries(&self) -> &[LoopEntry] {
+        &self.r#loop
     }
 
     pub fn time(&self) -> &[TimeSlot] {
-        match self {
-            ScheduleConfig::Config { time, .. } => time,
-            ScheduleConfig::Legacy(time) => time,
-        }
+        &self.time
     }
-
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct LoopConfig {
-    /// 每个循环状态的时长（分钟）
+pub struct LoopEntry {
+    pub state: String,
+    /// 该状态循环时长（分钟）
     #[serde(default)]
-    pub loop_time_slot: u32,
-    /// 循环状态列表（按顺序循环）
-    #[serde(default)]
-    pub loop_states: Vec<String>,
+    pub duration: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -367,10 +348,13 @@ impl StateEngine {
         let mins = now_minutes(&now);
         let expire_at = if let Some(slot) = find_active_slot(&persona.schedule, mins) {
             Some(slot_end_datetime(&now, slot))
-        } else if persona.schedule.loop_time_slot() > 0 {
-            Some(now + chrono::Duration::minutes(persona.schedule.loop_time_slot() as i64))
         } else {
-            None
+            let dur = loop_duration(&persona.schedule, &next);
+            if dur > 0 {
+                Some(now + chrono::Duration::minutes(dur as i64))
+            } else {
+                None
+            }
         };
         *self.manual_state.lock().unwrap() = Some(ManualOverride {
             state: next.clone(),
@@ -437,13 +421,32 @@ fn find_active_slot<'a>(schedule: &'a ScheduleConfig, mins: u32) -> Option<&'a T
 
 /// 依据墙钟时间在循环状态中取当前状态
 fn loop_state_at(schedule: &ScheduleConfig, mins: u32) -> Option<String> {
-    let states = schedule.loop_states();
-    let slot = schedule.loop_time_slot();
-    if states.is_empty() || slot == 0 {
+    let entries = schedule.loop_entries();
+    if entries.is_empty() {
         return None;
     }
-    let idx = (mins / slot) as usize % states.len();
-    Some(states[idx].clone())
+    let total: u64 = entries.iter().map(|e| e.duration as u64).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut idx = (mins as u64) % total;
+    for e in entries {
+        if idx < e.duration as u64 {
+            return Some(e.state.clone());
+        }
+        idx -= e.duration as u64;
+    }
+    None
+}
+
+/// 某循环状态在 loop 里的时长（分钟）；不在循环里或未配置则返回 0
+fn loop_duration(schedule: &ScheduleConfig, state: &str) -> u32 {
+    schedule
+        .loop_entries()
+        .iter()
+        .find(|e| e.state == state)
+        .map(|e| e.duration)
+        .unwrap_or(0)
 }
 
 /// 自动状态：time 时段优先，否则循环，最后兜底
@@ -462,15 +465,36 @@ fn automatic_state(persona: &PersonaConfig, mins: u32) -> String {
         .unwrap_or_else(|| "Awake".into())
 }
 
+/// 计算角色的有效显示尺寸：优先用配置文件；为 0（未配置）时按精灵图实际尺寸 ÷ cols/rows 计算。
+pub fn effective_display_size(persona: &PersonaConfig) -> (u32, u32) {
+    let (w, h) = (persona.display_w, persona.display_h);
+    if w > 0 && h > 0 {
+        return (w, h);
+    }
+    // 内置角色 spritesheet 是站点路径(/…)，无法直接读文件；导入角色是磁盘路径
+    if !persona.spritesheet.starts_with('/') {
+        if let Ok(p) = Path::new(&persona.spritesheet).canonicalize() {
+            if let Ok((sw, sh)) = image::image_dimensions(&p) {
+                let cols = persona.cols.max(1) as u32;
+                let rows = persona.rows.max(1) as u32;
+                let cw = ((sw as f64 / cols as f64).round() as u32).max(1);
+                let ch = ((sh as f64 / rows as f64).round() as u32).max(1);
+                return (cw, ch);
+            }
+        }
+    }
+    (w.max(1), h.max(1))
+}
+
 /// “下一个状态”：优先取循环列表中的下一个；当前不在循环列表则取循环第一个；
 /// 若无循环配置，按 spritesheet 行号排序取下一个。
 fn next_loop_state(persona: &PersonaConfig, current: &str) -> String {
-    let states = persona.schedule.loop_states();
-    if !states.is_empty() {
-        let idx = states.iter().position(|s| s == current);
+    let entries = persona.schedule.loop_entries();
+    if !entries.is_empty() {
+        let idx = entries.iter().position(|e| e.state == current);
         return match idx {
-            Some(i) => states[(i + 1) % states.len()].clone(),
-            None => states[0].clone(),
+            Some(i) => entries[(i + 1) % entries.len()].state.clone(),
+            None => entries[0].state.clone(),
         };
     }
     // 无循环配置 → 按行号排序兜底
@@ -567,11 +591,12 @@ mod tests {
     #[test]
     fn schedule_parses_new_format() {
         let p = link();
-        // 循环参数需有效，且引用的状态都必须存在
-        assert!(p.schedule.loop_time_slot() > 0);
-        assert!(!p.schedule.loop_states().is_empty());
-        for s in p.schedule.loop_states() {
-            assert!(p.states.contains_key(s), "循环状态缺失: {s}");
+        // 循环需有逐状态条目，且引用的状态都必须存在
+        let entries = p.schedule.loop_entries();
+        assert!(!entries.is_empty());
+        for e in entries {
+            assert!(e.duration > 0, "循环时长必须大于 0");
+            assert!(p.states.contains_key(&e.state), "循环状态缺失: {}", e.state);
         }
         for slot in p.schedule.time() {
             assert!(
@@ -600,10 +625,49 @@ mod tests {
     #[test]
     fn next_loop_state_cycles() {
         let p = link();
-        let states = p.schedule.loop_states();
-        assert_eq!(next_loop_state(&p, &states[0]), states[1]);
-        assert_eq!(next_loop_state(&p, &states[states.len() - 1]), states[0]);
+        let entries = p.schedule.loop_entries();
+        assert_eq!(next_loop_state(&p, &entries[0].state), entries[1].state);
+        assert_eq!(
+            next_loop_state(&p, &entries[entries.len() - 1].state),
+            entries[0].state
+        );
         // 当前不在循环列表（如未知状态）→ 取循环第一个
-        assert_eq!(next_loop_state(&p, "unknown"), states[0]);
+        assert_eq!(next_loop_state(&p, "unknown"), entries[0].state);
+    }
+
+    #[test]
+    fn loop_state_at_follows_durations() {
+        let p = link();
+        let entries = p.schedule.loop_entries();
+        // 第 0 分钟 → 第一个状态；第 duration 分钟 → 第二个；首个总时长处 → 回到第一个
+        assert_eq!(loop_state_at(&p.schedule, 0), Some(entries[0].state.clone()));
+        assert_eq!(
+            loop_state_at(&p.schedule, entries[0].duration),
+            Some(entries[1].state.clone())
+        );
+        let total: u64 = entries.iter().map(|e| e.duration as u64).sum();
+        assert_eq!(
+            loop_state_at(&p.schedule, total as u32),
+            Some(entries[0].state.clone())
+        );
+    }
+
+    #[test]
+    fn effective_display_uses_config() {
+        let p = link();
+        // link 显式配置了 192/208，应直接返回
+        assert_eq!(effective_display_size(&p), (192, 208));
+    }
+
+    #[test]
+    fn effective_display_computes_from_sprite() {
+        let mut p = link();
+        p.display_w = 0;
+        p.display_h = 0;
+        // 用仓库内真实 spritesheet 路径（文件系统可读）：3840/20=192, 1248/6=208
+        let sprite = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../resources/characters/link/spritesheet.webp");
+        p.spritesheet = sprite.to_string_lossy().into_owned();
+        assert_eq!(effective_display_size(&p), (192, 208));
     }
 }

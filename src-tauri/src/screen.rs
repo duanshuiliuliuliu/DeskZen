@@ -9,7 +9,7 @@ use tauri::{AppHandle, Manager};
 const HIDE_SETTLE_MS: u64 = 200;
 
 /// 捕获“当前屏幕”的截图，编码为 PNG，并以 base64 data URL 返回，
-/// 供多模态大模型（如 deepseek-v4-flash-vision-exp）在聊天中理解屏幕内容。
+/// 供多模态大模型在聊天中理解屏幕内容。
 pub fn capture_current_monitor_data_url(app: &AppHandle) -> Result<String, String> {
     let monitor = target_monitor(app)?;
 

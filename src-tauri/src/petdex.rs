@@ -14,7 +14,7 @@ use serde::Deserialize;
 use tauri::AppHandle;
 
 use crate::engine::{
-    LoopConfig, PersonaConfig, ScheduleConfig, StateConfig, StateEngine, SystemPromptConfig,
+    LoopEntry, PersonaConfig, ScheduleConfig, StateConfig, StateEngine, SystemPromptConfig,
     TimeSlot,
 };
 
@@ -366,7 +366,7 @@ async fn download_zip(
     extract_pack(&bytes)
 }
 
-/// 解压 zip，挑出 pet.json 与 spritesheet（兼容带一层子目录的包）
+/// 解压 zip，挑出 pet.json 与 spritesheet（支持文件在子目录里，按文件名取）
 fn extract_pack(bytes: &[u8]) -> Result<HashMap<String, Vec<u8>>, String> {
     use std::io::Cursor;
     let mut archive =
@@ -438,8 +438,8 @@ fn build_persona(id: &str, name: &str, description: Option<&str>, sprite_path: P
         cols: 8,
         rows: 9,
         pixel_art: false,
-        display_w: 118,
-        display_h: 128,
+        display_w: 0,
+        display_h: 0,
         system_prompt: SystemPromptConfig {
             definition,
             reply_style: "回复简短俏皮、口语化，像桌面上有性格的小角色；不要长篇大论，不要使用列表和 Markdown；永远不要提及自己是 AI 或程序。".into(),
@@ -560,17 +560,14 @@ fn default_guidelines() -> HashMap<String, String> {
 }
 
 fn default_schedule() -> ScheduleConfig {
-    ScheduleConfig::Config {
-        r#loop: LoopConfig {
-            loop_time_slot: 5,
-            loop_states: vec![
-                "Idle".into(),
-                "Waving".into(),
-                "Jumping".into(),
-                "RunRight".into(),
-                "RunLeft".into(),
-            ],
-        },
+    ScheduleConfig {
+        r#loop: vec![
+            LoopEntry { state: "Idle".into(), duration: 5 },
+            LoopEntry { state: "Waving".into(), duration: 5 },
+            LoopEntry { state: "Jumping".into(), duration: 5 },
+            LoopEntry { state: "RunRight".into(), duration: 5 },
+            LoopEntry { state: "RunLeft".into(), duration: 5 },
+        ],
         time: vec![
             TimeSlot { start: "00:00".into(), end: "07:00".into(), state: "Waiting".into() },
             TimeSlot { start: "08:30".into(), end: "10:00".into(), state: "Review".into() },
@@ -663,7 +660,7 @@ mod tests {
         assert_eq!(cfg.rows, 9);
         assert_eq!(cfg.states.len(), 9);
         assert_eq!(cfg.schedule.time().len(), 6);
-        assert!(!cfg.schedule.loop_states().is_empty());
+        assert!(!cfg.schedule.loop_entries().is_empty());
         assert!(cfg.system_prompt.definition.contains("robot-cat"));
     }
 }

@@ -14,6 +14,9 @@ use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder,
 };
 
+/// 角色精灵在角色窗口内的底距（与 styles.css `.character { bottom: 24px }` 同步）
+const SPRITE_BOTTOM: i32 = 24;
+
 /// 应用级共享状态
 pub struct AppState {
     /// 是否处于整窗点击穿透模式
@@ -62,10 +65,12 @@ pub fn run() {
             if let Some(monitor) = app.primary_monitor()? {
                 let pos = monitor.position();
                 let size = monitor.size();
-                let _ = persona.set_position(PhysicalPosition::new(
-                    pos.x + size.width as i32 - 240 - 40,
-                    pos.y + size.height as i32 - 280 - 70,
-                ));
+                if let Ok(p_size) = persona.outer_size() {
+                    let _ = persona.set_position(PhysicalPosition::new(
+                        pos.x + size.width as i32 - p_size.width as i32 - 40,
+                        pos.y + size.height as i32 - p_size.height as i32 - 70,
+                    ));
+                }
             }
             persona.show()?;
 
@@ -175,8 +180,10 @@ fn place_chat_bubble(app: &AppHandle) {
     let Ok(p_size) = persona.outer_size() else { return };
     let Ok(c_size) = chat.outer_size() else { return };
     let gap: i32 = 6;
-    // 角色精灵头顶的屏幕纵坐标（精灵高 128、底距 24）
-    let char_top = p_pos.y + p_size.height as i32 - 24 - 128;
+    // 角色精灵头顶的屏幕纵坐标（底距 24 + 精灵高 display_h）
+    let persona_cfg = app.state::<engine::StateEngine>().persona();
+    let display_h = engine::effective_display_size(&persona_cfg).1 as i32;
+    let char_top = p_pos.y + p_size.height as i32 - SPRITE_BOTTOM - display_h;
     // 默认放在角色上方，水平居中；气泡底贴近精灵头顶（重叠角色窗上半透明区）
     let mut x = p_pos.x + (p_size.width as i32 - c_size.width as i32) / 2;
     let mut y = char_top - c_size.height as i32 - gap;
@@ -300,7 +307,7 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
-/// 对话入口：组装 persona/state system prompt + 历史消息，调用 DeepSeek
+/// 对话入口：组装 persona/state system prompt + 历史消息，调用大模型
 #[tauri::command]
 async fn chat_send(
     app: AppHandle,
