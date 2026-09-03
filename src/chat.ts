@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { LogicalSize } from "@tauri-apps/api/dpi";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./styles.css";
 
@@ -229,4 +230,10 @@ if (persona) {
   titleEl.textContent = persona.name;
   input.placeholder = `和${persona.name}说点什么…`;
 }
+// 角色窗口可能切换了角色（对话窗是隐藏而非销毁），需同步标题与占位
+void listen<PersonaConfig>("persona-changed", (e) => {
+  persona = e.payload;
+  titleEl.textContent = persona.name;
+  input.placeholder = `和${persona.name}说点什么…`;
+});
 void fitToContent();

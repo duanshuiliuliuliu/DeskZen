@@ -193,10 +193,7 @@ async function importFromPath(path: string): Promise<void> {
 }
 
 localImportBtn.addEventListener("click", async () => {
-  const path = await open({
-    multiple: false,
-    filters: [{ name: "角色包", extensions: ["zip"] }],
-  });
+  const path = await open({ directory: true, multiple: false });
   if (typeof path === "string") await importFromPath(path);
 });
 

@@ -80,7 +80,8 @@ function applyState(state: string, cfg: StateConfig | undefined): void {
   document.body.style.setProperty("--frames", String(cfg.frames));
   document.body.style.setProperty("--row", String(cfg.row));
   const rows = persona?.rows ?? 3;
-  character.style.backgroundPositionY = `${(cfg.row / (rows - 1)) * 100}%`;
+  const rowDivisor = Math.max(rows - 1, 1);
+  character.style.backgroundPositionY = `${(cfg.row / rowDivisor) * 100}%`;
   character.style.animationName = cfg.frames > 1 ? "sprite-cycle" : "none";
   character.style.animationDuration = `${cfg.frames * cfg.frame_ms}ms`;
 }
