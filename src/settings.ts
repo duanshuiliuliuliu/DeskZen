@@ -124,6 +124,12 @@ async function refresh(): Promise<void> {
   baseUrl.value = cfg.base_url;
   model.value = cfg.model;
   apiKey.value = cfg.api_key;
+  // 后端返回的是打码 Key（含 *）：直接保存不会覆盖原 Key；重新输入完整 Key 才会替换
+  const masked = cfg.api_key.includes("*");
+  apiKey.title = masked
+    ? "已保存的 Key 以打码形式显示；重新输入完整 Key 可替换"
+    : "";
+  apiKey.placeholder = masked ? "" : "sk-...";
   passthrough.checked = await invoke<boolean>("get_passthrough");
 }
 

@@ -256,13 +256,31 @@ struct LlmConfigView {
     api_key: String,
 }
 
+/// API Key 打码后回传前端：保留前 3 后 4 位，中间以 **** 填充；
+/// 过短（≤8 位）时整体显示为 ****。空 Key 原样返回。
+fn mask_api_key(key: &str) -> String {
+    let n = key.chars().count();
+    if n == 0 {
+        return String::new();
+    }
+    if n <= 8 {
+        return "****".into();
+    }
+    let chars: Vec<char> = key.chars().collect();
+    format!(
+        "{}****{}",
+        chars[..3].iter().collect::<String>(),
+        chars[n - 4..].iter().collect::<String>()
+    )
+}
+
 #[tauri::command]
 fn get_llm_config(app: AppHandle) -> LlmConfigView {
     let cfg = llm::load_config(&app);
     LlmConfigView {
         base_url: cfg.base_url,
         model: cfg.model,
-        api_key: cfg.api_key,
+        api_key: mask_api_key(&cfg.api_key),
     }
 }
 
@@ -275,6 +293,12 @@ fn save_llm_config(
 ) -> Result<(), String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // 前端回传的是打码值（含 *，用户未重新输入）→ 沿用磁盘上已保存的 Key
+    let api_key = if api_key.contains('*') {
+        llm::load_config(&app).api_key
+    } else {
+        api_key
+    };
     let cfg = llm::LlmConfig {
         base_url,
         model,
@@ -358,10 +382,15 @@ async fn chat_send(
     Ok(ChatReply { reply, state })
 }
 
-/// 点击「📷」：截取当前屏幕并返回 base64 data URL，供前端作为预览、待用户发送
+/// 点击「📷」：截取当前屏幕并返回 base64 data URL，供前端作为预览、待用户发送。
+/// 抓屏含同步 sleep 与编码，放到阻塞线程池执行，避免卡住 async 运行时。
 #[tauri::command]
 async fn capture_screen(app: AppHandle) -> Result<String, String> {
-    screen::capture_current_monitor_data_url(&app)
+    tauri::async_runtime::spawn_blocking(move || {
+        screen::capture_current_monitor_data_url(&app)
+    })
+    .await
+    .map_err(|e| format!("截图任务执行失败：{e}"))?
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {

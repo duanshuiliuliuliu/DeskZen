@@ -31,6 +31,8 @@ let history: { role: "user" | "assistant"; content: string }[] = [];
 let sending = false;
 let pendingImage: string | null = null;
 let capturing = false;
+// 会话代数：切换角色时 +1；进行中的旧请求结果若已过期则丢弃
+let chatEpoch = 0;
 
 /** 让气泡高度贴合内容，并重新贴到角色附近 */
 async function fitToContent(): Promise<void> {
@@ -138,12 +140,14 @@ async function sendMessage(text: string, image: string | null = null): Promise<v
   sendBtn.disabled = true;
   screenBtn.disabled = true;
   const pending = addTypingIndicator();
+  const epoch = chatEpoch;
   void fitToContent();
   try {
     const { reply } = await invoke<ChatReply>("chat_send", {
       messages: history,
       clipboardImage: image,
     });
+    if (epoch !== chatEpoch) return; // 期间切换了角色，丢弃旧会话的回复
     const fallback = image ? "我没看清，再发一次看看" : "我没听清，再说一次";
     pending.textContent = reply.trim() || fallback;
     pending.classList.remove("typing");
@@ -153,6 +157,7 @@ async function sendMessage(text: string, image: string | null = null): Promise<v
       history = history.slice(history.length - 20);
     }
   } catch (err) {
+    if (epoch !== chatEpoch) return; // 期间切换了角色，丢弃旧会话的错误
     pending.textContent = `出错了：${String(err)}`;
     pending.classList.remove("typing");
     history.pop(); // 撤回本次用户消息，允许重试
@@ -230,10 +235,20 @@ if (persona) {
   titleEl.textContent = persona.name;
   input.placeholder = `和${persona.name}说点什么…`;
 }
-// 角色窗口可能切换了角色（对话窗是隐藏而非销毁），需同步标题与占位
+// 角色窗口可能切换了角色（对话窗是隐藏而非销毁），需同步标题与占位；
+// 同时清空旧角色的对话上下文，避免历史混入新角色的 system prompt
 void listen<PersonaConfig>("persona-changed", (e) => {
   persona = e.payload;
   titleEl.textContent = persona.name;
   input.placeholder = `和${persona.name}说点什么…`;
+  history = [];
+  pendingImage = null;
+  chatEpoch += 1;
+  renderAttach();
+  messages.textContent = "";
+  const tip = document.createElement("div");
+  tip.className = "msg msg-system";
+  tip.textContent = `已切换到「${persona.name}」，开始新对话`;
+  messages.appendChild(tip);
 });
 void fitToContent();

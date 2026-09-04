@@ -226,6 +226,15 @@ body.chat-body {
   box-shadow: 0 1px 3px rgba(120, 90, 30, 0.08);
 }
 
+/* 系统提示（如切换角色后的“开始新对话”） */
+.msg-system {
+  align-self: center;
+  background: transparent;
+  color: #a08a5f;
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
 .msg.typing {
   color: #a08a5f;
   font-style: italic;

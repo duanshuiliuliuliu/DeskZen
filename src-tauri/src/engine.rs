@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        {Arc, Mutex},
+    },
     thread,
     time::Duration,
 };
@@ -457,11 +460,12 @@ fn automatic_state(persona: &PersonaConfig, mins: u32) -> String {
     if let Some(s) = loop_state_at(&persona.schedule, mins) {
         return s;
     }
-    persona
-        .states
-        .keys()
-        .next()
-        .cloned()
+    // 兜底：按 spritesheet 行号取第一个状态（与 next_loop_state 的排序一致）；
+    // 仅当角色完全没有定义状态时才使用硬编码值。
+    let mut keys: Vec<&String> = persona.states.keys().collect();
+    keys.sort_by_key(|k| persona.states[*k].row);
+    keys.first()
+        .map(|k| (*k).clone())
         .unwrap_or_else(|| "Awake".into())
 }
 
@@ -565,16 +569,32 @@ fn parse_mins(value: &str) -> Option<u32> {
     Some(h * 60 + m)
 }
 
-/// 简易伪随机：按当前纳秒时间从文本池取一条，避免引入 rand 依赖
+/// xorshift64 状态（惰性以纳秒时间做种子），避免引入 rand 依赖
+static RNG_STATE: AtomicU64 = AtomicU64::new(0);
+
+/// 简易伪随机：推进 xorshift64 状态后从文本池取一条，避免连续命中同一文本
 fn pick(list: &[String]) -> Option<String> {
     if list.is_empty() {
         return None;
     }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_nanos() as usize;
-    Some(list[nanos % list.len()].clone())
+    let mut s = RNG_STATE.load(Ordering::Relaxed);
+    if s == 0 {
+        s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        if s == 0 {
+            s = 0x9E37_79B9_7F4A_7C15;
+        }
+    }
+    s ^= s << 13;
+    s ^= s >> 7;
+    s ^= s << 17;
+    if s == 0 {
+        s = 0x9E37_79B9_7F4A_7C15;
+    }
+    RNG_STATE.store(s, Ordering::Relaxed);
+    Some(list[(s as usize) % list.len()].clone())
 }
 
 #[cfg(test)]
@@ -655,8 +675,9 @@ mod tests {
     #[test]
     fn effective_display_uses_config() {
         let p = link();
-        // link 显式配置了 192/208，应直接返回
-        assert_eq!(effective_display_size(&p), (192, 208));
+        // 显式配置了 display_w/display_h 时应直接返回配置值（而非从精灵图计算）
+        assert!(p.display_w > 0 && p.display_h > 0, "link 应显式配置显示尺寸");
+        assert_eq!(effective_display_size(&p), (p.display_w, p.display_h));
     }
 
     #[test]

@@ -129,7 +129,7 @@ DeskZen/
 
 ### 角色切换
 
-托盘「更换角色」子菜单 → `switch_persona`：更新引擎当前角色并广播 `persona-changed` / `state-changed`，动画、作息、LLM 人设同步切换。
+托盘「更换角色」子菜单 → `switch_persona`：更新引擎当前角色并广播 `persona-changed` / `state-changed`，动画、作息、LLM 人设同步切换；对话窗同步清空上一角色的对话历史并显示「开始新对话」提示，避免旧上下文混入新角色的 system prompt。
 
 ### Petdex 导入流程
 
@@ -178,7 +178,7 @@ DeskZen/
 
 ### LLM 大模型配置（OpenAI 兼容）
 
-支持任意 OpenAI 兼容接口（如 DeepSeek、OpenAI、Ollama 等），配置文件位于 `%APPDATA%\com.deskzen.app\llm.json`：
+支持任意 OpenAI 兼容接口（如 DeepSeek、OpenAI、Ollama 等），配置文件位于 `%APPDATA%\com.deskzen.app\llm.json`。设置界面中 API Key 以打码形式显示（保留前 3 后 4 位），直接保存不会覆盖已存 Key，重新输入完整 Key 才会替换。
 
 ```json
 {
