@@ -19,10 +19,9 @@ chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 xcap = "0.9"
-png = "0.17"
 base64 = "0.22"
 tauri-plugin-dialog = "2"
-image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg"] }
 
 [profile.release]
 codegen-units = 1

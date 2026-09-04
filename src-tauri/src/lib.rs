@@ -367,10 +367,18 @@ async fn chat_send(
     );
 
     let model = &cfg.model;
-    let mut reply = llm::chat_completion(&cfg, model, &llm_messages).await?;
+    let mut reply = llm::chat_completion_stream(&cfg, model, &llm_messages, |delta| {
+        let _ = app.emit("chat-delta", delta);
+    })
+    .await?;
     // 模型偶发返回空内容时重试一次
     if reply.trim().is_empty() {
-        reply = llm::chat_completion(&cfg, model, &llm_messages).await?;
+        // 重试前通知前端重置输入区（回到“正在输入…”），避免上一轮残留的增量污染新流。
+        let _ = app.emit("chat-reset", ());
+        reply = llm::chat_completion_stream(&cfg, model, &llm_messages, |delta| {
+            let _ = app.emit("chat-delta", delta);
+        })
+        .await?;
     }
     let _ = app.emit(
         "bubble",

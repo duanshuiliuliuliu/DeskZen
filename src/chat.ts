@@ -141,8 +141,31 @@ async function sendMessage(text: string, image: string | null = null): Promise<v
   screenBtn.disabled = true;
   const pending = addTypingIndicator();
   const epoch = chatEpoch;
+  let streamStarted = false;
+  // 订阅流式增量：首个增量到来时撤下“正在输入…”，随后逐字追加。
+  // 回调必须校验 epoch，角色切换后旧会话的增量（连同旧请求）一律丢弃。
+  let unlistenDelta: (() => void) | null = null;
+  let unlistenReset: (() => void) | null = null;
   void fitToContent();
   try {
+    unlistenDelta = await listen<string>("chat-delta", (e) => {
+      if (epoch !== chatEpoch) return; // 过期会话的增量丢弃
+      const delta = e.payload;
+      if (!streamStarted) {
+        pending.textContent = "";
+        pending.classList.remove("typing");
+        streamStarted = true;
+      }
+      pending.textContent += delta;
+      messages.scrollTop = messages.scrollHeight;
+    });
+    // 空回复重试前由后端发出：把输入区重置为“正在输入…”，避免残留旧流。
+    unlistenReset = await listen("chat-reset", () => {
+      if (epoch !== chatEpoch) return;
+      pending.textContent = "正在输入…";
+      pending.classList.add("typing");
+      streamStarted = false;
+    });
     const { reply } = await invoke<ChatReply>("chat_send", {
       messages: history,
       clipboardImage: image,
@@ -162,6 +185,8 @@ async function sendMessage(text: string, image: string | null = null): Promise<v
     pending.classList.remove("typing");
     history.pop(); // 撤回本次用户消息，允许重试
   } finally {
+    unlistenDelta?.();
+    unlistenReset?.();
     sending = false;
     sendBtn.disabled = false;
     screenBtn.disabled = false;
