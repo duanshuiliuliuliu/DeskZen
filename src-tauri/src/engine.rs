@@ -572,7 +572,7 @@ fn parse_mins(value: &str) -> Option<u32> {
 /// xorshift64 状态（惰性以纳秒时间做种子），避免引入 rand 依赖
 static RNG_STATE: AtomicU64 = AtomicU64::new(0);
 
-/// 简易伪随机：推进 xorshift64 状态后从文本池取一条，避免连续命中同一文本
+/// 简易伪随机：推进 xorshift64 状态后从文本池取一条，减少连续命中同一文本（PRNG，非去重）
 fn pick(list: &[String]) -> Option<String> {
     if list.is_empty() {
         return None;
