@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./styles.css";
 
@@ -11,6 +12,8 @@ function $(id: string): HTMLElement {
 const baseUrl = $("base-url") as HTMLInputElement;
 const model = $("model") as HTMLInputElement;
 const apiKey = $("api-key") as HTMLInputElement;
+const temperature = $("temperature") as HTMLInputElement;
+const maxTokens = $("max-tokens") as HTMLInputElement;
 const statusEl = $("settings-status");
 const passthrough = $("passthrough") as HTMLInputElement;
 const saveBtn = $("llm-save") as HTMLButtonElement;
@@ -120,10 +123,14 @@ async function refresh(): Promise<void> {
     base_url: string;
     model: string;
     api_key: string;
+    temperature: number;
+    max_tokens: number;
   }>("get_llm_config");
   baseUrl.value = cfg.base_url;
   model.value = cfg.model;
   apiKey.value = cfg.api_key;
+  temperature.value = String(cfg.temperature);
+  maxTokens.value = String(cfg.max_tokens);
   // 后端返回的是打码 Key（含 *）：直接保存不会覆盖原 Key；重新输入完整 Key 才会替换
   const masked = cfg.api_key.includes("*");
   apiKey.title = masked
@@ -140,6 +147,8 @@ saveBtn.addEventListener("click", async () => {
       baseUrl: baseUrl.value.trim(),
       model: model.value.trim(),
       apiKey: apiKey.value.trim(),
+      temperature: temperature.value.trim() === "" ? 0.8 : Number(temperature.value),
+      maxTokens: maxTokens.value.trim() === "" ? 512 : Number(maxTokens.value),
     });
     statusEl.textContent = "已保存";
   } catch (err) {
@@ -205,3 +214,7 @@ localImportBtn.addEventListener("click", async () => {
 
 void refresh();
 void refreshImported();
+
+// 等前端就绪再显示设置窗，避免 WebView2 未渲染时闪现空白窗口（白屏闪烁）。
+void getCurrentWindow().show();
+void getCurrentWindow().setFocus();

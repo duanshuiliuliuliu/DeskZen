@@ -25,6 +25,13 @@ const CLEAN_DEPS = ['1', 'true', 'on', 'yes'].includes(
   (process.env.CLEAN_DEPS ?? '').toLowerCase(),
 );
 
+// dev 模式使用 tauri.dev.conf.json：它与主配置一致，但 CSP 保留
+// ws://localhost:1420（Vite HMR 需要，生产配置已移除）。
+// 相对路径基于 cwd=项目根（见下方 spawn）解析，Tauri CLI 支持 -c/--config 合并。
+const extraArgs = command === 'dev'
+  ? ['--config', 'src-tauri/tauri.dev.conf.json']
+  : [];
+
 // GitHub 加速镜像模板：Tauri 打包时用它替换默认的 GitHub 下载地址，避免 WiX / NSIS 下载超时。
 // 占位符：<owner>/<repo>/<version>/<asset>。如需换镜像，改这一行即可；已有显式设置则不覆盖。
 const GITHUB_MIRROR_TEMPLATE =
@@ -70,7 +77,14 @@ async function cleanDeps() {
   }
 }
 
-const child = spawn(process.execPath, [tauriCli, ...args], {
+const cliArgs = [...args];
+// 把 --config 放在子命令之后、任何其它参数（含 `--` 之后透传给应用的 runner 参数）之前，
+// 确保它被 tauri CLI 当作自身选项解析。
+if (command === 'dev') {
+  cliArgs.splice(1, 0, ...extraArgs);
+}
+
+const child = spawn(process.execPath, [tauriCli, ...cliArgs], {
   cwd: projectRoot,
   stdio: 'inherit',
 });

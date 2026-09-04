@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        {Arc, Mutex},
+        {Arc, Condvar, Mutex},
     },
     thread,
     time::Duration,
@@ -128,6 +128,13 @@ pub struct StateEngine {
     last_state: Arc<Mutex<Option<String>>>,
     /// 手动指定的状态覆盖（右键“下个状态”）；到期后自动恢复日程计算
     manual_state: Arc<Mutex<Option<ManualOverride>>>,
+    /// 当前角色的有效显示尺寸缓存：拖动/贴气泡时频繁读取，避免每次都克隆整个 persona
+    /// 或对导入角色读磁盘做 image_dimensions。
+    display_size: Arc<Mutex<(u32, u32)>>,
+    /// 后台节拍线程的唤醒信号：switch_persona / next_state 修改配置后 notify，
+    /// 让线程立即醒来重算下一次切换时刻，避免睡到旧的 next_transition_at。
+    wake_lock: Arc<Mutex<()>>,
+    wake_cond: Arc<Condvar>,
 }
 
 impl StateEngine {
@@ -156,12 +163,16 @@ impl StateEngine {
             .get("link")
             .cloned()
             .expect("缺少默认角色 link");
+        let display = effective_display_size(&persona);
         Self {
             app,
             personas: Arc::new(Mutex::new(personas)),
             persona: Arc::new(Mutex::new(persona)),
             last_state: Arc::new(Mutex::new(None)),
             manual_state: Arc::new(Mutex::new(None)),
+            display_size: Arc::new(Mutex::new(display)),
+            wake_lock: Arc::new(Mutex::new(())),
+            wake_cond: Arc::new(Condvar::new()),
         }
     }
 
@@ -195,6 +206,19 @@ impl StateEngine {
 
     pub fn persona_id(&self) -> String {
         self.persona.lock().unwrap().id.clone()
+    }
+
+    /// 当前角色的有效显示尺寸（缓存值），供贴气泡等高频 UI 计算使用。
+    pub fn display_size(&self) -> (u32, u32) {
+        *self.display_size.lock().unwrap()
+    }
+
+    /// 唤醒后台节拍线程：switch_persona / next_state 在修改 persona / manual_state 后调用，
+    /// 让它在新的日程/覆盖下重新计算下一次切换时刻，避免睡到旧的 next_transition_at。
+    /// 只锁 wake_lock（不持有 persona / manual_state），与线程侧锁序保持一致，避免死锁。
+    fn notify_wake(&self) {
+        let _guard = self.wake_lock.lock().unwrap();
+        self.wake_cond.notify_one();
     }
 
     /// 用户导入角色的持久化目录（%APPDATA%\com.deskzen.app\characters\）
@@ -265,7 +289,10 @@ impl StateEngine {
             *cur = persona.clone();
             *self.last_state.lock().unwrap() = None;
             *self.manual_state.lock().unwrap() = None;
+            *self.display_size.lock().unwrap() = effective_display_size(&persona);
         }
+        // 修改完成后唤醒节拍线程，使新日程表立即生效（否则线程仍睡在旧 next_transition_at）。
+        self.notify_wake();
         let state = self.resolve_state(&persona, chrono::Local::now());
         let _ = app.emit("persona-changed", persona);
         let _ = app.emit(
@@ -297,14 +324,39 @@ impl StateEngine {
         }
     }
 
-    /// 后台节拍线程：每 30 秒检查一次状态，变化时广播并弹出对应气泡
+    /// 后台节拍线程：睡到下一个切换时刻（manual 到期 / 时段结束 / loop 边界），
+    /// 醒来检查状态，变化时广播并弹出对应气泡；单次睡眠最多 15 分钟。
     pub fn start(&self) {
         let app = self.app.clone();
         let persona = Arc::clone(&self.persona);
         let last_state = Arc::clone(&self.last_state);
         let manual_state = Arc::clone(&self.manual_state);
+        let wake_lock = Arc::clone(&self.wake_lock);
+        let wake_cond = Arc::clone(&self.wake_cond);
         thread::spawn(move || loop {
-            thread::sleep(Duration::from_secs(30));
+            // 先算出下一次状态切换时刻，再用带超时的 Condvar 等待（+1s 缓冲，避免边界竞态）。
+            // 单次睡眠不超过 15 分钟：防止时钟漂移 / DST 导致久睡不醒，醒来重算即可。
+            // 持有 wake_lock 计算并进入 wait：switch_persona / next_state 的 notify
+            // 必然在本线程进入等待后送达，不会丢失唤醒（唤醒后统一走下面的重算）。
+            let now = chrono::Local::now();
+            let wake = wake_lock.lock().unwrap();
+            let next = {
+                let p = persona.lock().unwrap();
+                let m = manual_state.lock().unwrap();
+                next_transition_at(&p, &m, &now)
+            };
+            let mut sleep_dur = (next - now)
+                .to_std()
+                .unwrap_or(Duration::from_secs(0));
+            sleep_dur += Duration::from_secs(1);
+            let cap = Duration::from_secs(15 * 60);
+            if sleep_dur > cap {
+                sleep_dur = cap;
+            }
+            // 超时或被 notify 唤醒都返回；释放锁后继续下面的状态检测。
+            let (guard, _) = wake_cond.wait_timeout(wake, sleep_dur).unwrap();
+            drop(guard);
+
             let now = chrono::Local::now();
             let (state, persona) = {
                 let p = persona.lock().unwrap();
@@ -342,28 +394,35 @@ impl StateEngine {
     /// 切换到“下一个状态”（按 spritesheet 行号排序循环），并手动锁定该状态。
     /// 返回切换后的状态 id。
     pub fn next_state(&self) -> String {
-        let persona = self.persona.lock().unwrap();
-        let now = chrono::Local::now();
-        let current = self.resolve_state(&persona, now);
-        let next = next_loop_state(&persona, &current);
-        // 到期时间：time 时段内 → 到该时段结束；否则若启用循环 → 到一个 slot；
-        // 都没有 → 无到期（手动锁定）。
-        let mins = now_minutes(&now);
-        let expire_at = if let Some(slot) = find_active_slot(&persona.schedule, mins) {
-            Some(slot_end_datetime(&now, slot))
-        } else {
-            let dur = loop_duration(&persona.schedule, &next);
-            if dur > 0 {
-                Some(now + chrono::Duration::minutes(dur as i64))
+        // 先在作用域内读取 persona 并算出下一个状态/到期时刻，随后释放 persona 锁，
+        // 再写覆盖并 notify（避免在持有 persona 锁时再锁 wake_lock）。
+        let (next, expire_at, current) = {
+            let persona = self.persona.lock().unwrap();
+            let now = chrono::Local::now();
+            let current = self.resolve_state(&persona, now);
+            let next = next_loop_state(&persona, &current);
+            // 到期时间：time 时段内 → 到该时段结束；否则若启用循环 → 到一个 slot；
+            // 都没有 → 无到期（手动锁定）。
+            let mins = now_minutes(&now);
+            let expire_at = if let Some(slot) = find_active_slot(&persona.schedule, mins) {
+                Some(slot_end_datetime(&now, slot))
             } else {
-                None
-            }
+                let dur = loop_duration(&persona.schedule, &next);
+                if dur > 0 {
+                    Some(now + chrono::Duration::minutes(dur as i64))
+                } else {
+                    None
+                }
+            };
+            (next, expire_at, current)
         };
         *self.manual_state.lock().unwrap() = Some(ManualOverride {
             state: next.clone(),
             expire_at,
         });
         *self.last_state.lock().unwrap() = Some(next.clone());
+        // 新的手动覆盖带到期时间 → 唤醒线程，使该到期时刻尽早接管。
+        self.notify_wake();
         let _ = self.app.emit(
             "state-changed",
             StateChanged {
@@ -543,6 +602,69 @@ fn slot_end_datetime(
     }
 }
 
+/// 计算下一次 loop 状态切换的时刻：按「当日分钟数 % 总时长」得到当前循环位置，
+/// 推进到下一个条目边界。返回 now 之后最近的边界时刻（跨天时自然落到次日）。
+fn next_loop_boundary_time(
+    schedule: &ScheduleConfig,
+    now: &chrono::DateTime<chrono::Local>,
+) -> Option<chrono::DateTime<chrono::Local>> {
+    let entries = schedule.loop_entries();
+    if entries.is_empty() {
+        return None;
+    }
+    let total: u64 = entries.iter().map(|e| e.duration as u64).sum();
+    if total == 0 {
+        return None;
+    }
+    let pos = (now_minutes(now) as u64) % total;
+    let mut acc: u64 = 0;
+    for e in entries {
+        acc += e.duration as u64;
+        if acc > pos {
+            let offset_min = acc - pos;
+            // 直接用 now + 剩余分钟数：跨天时 chrono 自动进位到次日对应时刻
+            return Some(*now + chrono::Duration::minutes(offset_min as i64));
+        }
+    }
+    None
+}
+
+/// 计算下一次可能的状态切换时刻（取所有候选的最早者）：
+/// manual 到期、当前 time 时段结束、下一个 loop 边界；都不可得则 now + 30s 兜底。
+fn next_transition_at(
+    persona: &PersonaConfig,
+    manual: &Option<ManualOverride>,
+    now: &chrono::DateTime<chrono::Local>,
+) -> chrono::DateTime<chrono::Local> {
+    let mut candidates: Vec<chrono::DateTime<chrono::Local>> = Vec::new();
+
+    // manual 到期
+    if let Some(ov) = manual {
+        if let Some(exp) = ov.expire_at {
+            if *now < exp {
+                candidates.push(exp);
+            }
+        }
+    }
+    // 当前 time 时段结束
+    let mins = now_minutes(now);
+    if let Some(slot) = find_active_slot(&persona.schedule, mins) {
+        let end = slot_end_datetime(now, slot);
+        if *now < end {
+            candidates.push(end);
+        }
+    }
+    // 下一个 loop 边界
+    if let Some(boundary) = next_loop_boundary_time(&persona.schedule, now) {
+        candidates.push(boundary);
+    }
+
+    candidates
+        .into_iter()
+        .min()
+        .unwrap_or_else(|| *now + chrono::Duration::seconds(30))
+}
+
 /// 根据 persona 定义与当前状态组装 LLM system prompt
 pub fn build_system_prompt(persona: &PersonaConfig, state: &str) -> String {
     let sp = &persona.system_prompt;
@@ -690,5 +812,74 @@ mod tests {
             .join("../resources/characters/link/spritesheet.webp");
         p.spritesheet = sprite.to_string_lossy().into_owned();
         assert_eq!(effective_display_size(&p), (192, 208));
+    }
+
+    /// 构造今天指定 HH:MM（秒为 0）的本地时刻，供 next_transition_at 测试用。
+    fn local_at(h: u32, m: u32) -> chrono::DateTime<chrono::Local> {
+        use chrono::TimeZone;
+        let date = chrono::Local::now().date_naive();
+        chrono::Local
+            .from_local_datetime(&date.and_hms_opt(h, m, 0).unwrap())
+            .single()
+            .unwrap()
+    }
+
+    #[test]
+    fn next_transition_uses_loop_boundary_in_time_slot() {
+        let p = link();
+        // 12:30 落在 [12:00-13:00] 时段：loop 边界(now+10=12:40)早于时段结束(13:00)
+        let now = local_at(12, 30);
+        assert_eq!(
+            next_transition_at(&p, &None, &now),
+            now + chrono::Duration::minutes(10)
+        );
+    }
+
+    #[test]
+    fn next_transition_uses_time_slot_end() {
+        let p = link();
+        // 14:29 落在 [13:00-14:30] 时段：时段结束(14:30)早于 next loop 边界(14:40)
+        let now = local_at(14, 29);
+        assert_eq!(next_transition_at(&p, &None, &now), local_at(14, 30));
+    }
+
+    #[test]
+    fn next_transition_uses_manual_expiry() {
+        let p = link();
+        // 09:00 无时段：manual 到期(09:05)最早，早于 next loop 边界(09:20)
+        let now = local_at(9, 0);
+        let manual = Some(ManualOverride {
+            state: "idle".into(),
+            expire_at: Some(local_at(9, 5)),
+        });
+        assert_eq!(
+            next_transition_at(&p, &manual, &now),
+            local_at(9, 5)
+        );
+    }
+
+    #[test]
+    fn next_transition_crosses_midnight_boundary() {
+        let p = link();
+        // 23:50 在跨午夜 sleep 时段内：loop 边界(now+10=次日 00:00)早于时段结束(次日 08:00)
+        let now = local_at(23, 50);
+        assert_eq!(
+            next_transition_at(&p, &None, &now),
+            now + chrono::Duration::minutes(10)
+        );
+    }
+
+    #[test]
+    fn next_transition_falls_back_to_30s() {
+        let mut p = link();
+        p.schedule = ScheduleConfig {
+            r#loop: vec![],
+            time: vec![],
+        };
+        let now = local_at(9, 0);
+        assert_eq!(
+            next_transition_at(&p, &None, &now),
+            now + chrono::Duration::seconds(30)
+        );
     }
 }

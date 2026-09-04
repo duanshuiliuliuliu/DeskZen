@@ -181,8 +181,7 @@ fn place_chat_bubble(app: &AppHandle) {
     let Ok(c_size) = chat.outer_size() else { return };
     let gap: i32 = 6;
     // 角色精灵头顶的屏幕纵坐标（底距 24 + 精灵高 display_h）
-    let persona_cfg = app.state::<engine::StateEngine>().persona();
-    let display_h = engine::effective_display_size(&persona_cfg).1 as i32;
+    let display_h = app.state::<engine::StateEngine>().display_size().1 as i32;
     let char_top = p_pos.y + p_size.height as i32 - SPRITE_BOTTOM - display_h;
     // 默认放在角色上方，水平居中；气泡底贴近精灵头顶（重叠角色窗上半透明区）
     let mut x = p_pos.x + (p_size.width as i32 - c_size.width as i32) / 2;
@@ -224,6 +223,8 @@ async fn open_settings(app: AppHandle) -> Result<(), String> {
         .inner_size(560.0, 620.0)
         .min_inner_size(420.0, 500.0)
         .center()
+        // 先隐藏创建，等前端就绪后再显示，避免 WebView2 未渲染时闪现空白窗口。
+        .visible(false)
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -254,6 +255,8 @@ struct LlmConfigView {
     base_url: String,
     model: String,
     api_key: String,
+    temperature: f32,
+    max_tokens: u32,
 }
 
 /// API Key 打码后回传前端：保留前 3 后 4 位，中间以 **** 填充；
@@ -281,6 +284,8 @@ fn get_llm_config(app: AppHandle) -> LlmConfigView {
         base_url: cfg.base_url,
         model: cfg.model,
         api_key: mask_api_key(&cfg.api_key),
+        temperature: cfg.temperature,
+        max_tokens: cfg.max_tokens,
     }
 }
 
@@ -290,6 +295,8 @@ fn save_llm_config(
     base_url: String,
     model: String,
     api_key: String,
+    temperature: f32,
+    max_tokens: u32,
 ) -> Result<(), String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -303,6 +310,8 @@ fn save_llm_config(
         base_url,
         model,
         api_key,
+        temperature: llm::clamp_temperature(temperature),
+        max_tokens: llm::clamp_max_tokens(max_tokens),
     };
     let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("llm.json"), json).map_err(|e| e.to_string())?;

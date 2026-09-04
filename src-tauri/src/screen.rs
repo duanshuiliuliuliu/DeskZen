@@ -7,11 +7,74 @@ use tauri::{AppHandle, Manager};
 /// 太短（如 80ms）在部分机器上会抓到“隐藏前旧帧”，导致窗口仍出现在截图里；
 /// 200ms 是被验证能稳定拿到干净画面的值。若要更“无感”，只能降低，但会有拍到窗口的风险。
 const HIDE_SETTLE_MS: u64 = 200;
+/// 设置 SetWindowDisplayAffinity 后给合成器生效的缓冲时长（窗口仍显示，只是对截屏排除）。
+const AFFINITY_SETTLE_MS: u64 = 100;
 
 /// 预览图最长边：超过则按比例缩小，保证 IPC 传回的字符串不会过大。
 const PREVIEW_MAX_DIM: u32 = 1280;
 /// 预览 JPEG 质量（0~100），与前端 `downscaleToJpeg` 的 0.85 保持一致。
 const PREVIEW_JPEG_QUALITY: u8 = 85;
+
+/// Windows：SetWindowDisplayAffinity 的 affinity 取值。
+#[cfg(windows)]
+const WDA_NONE: i32 = 0x0;
+#[cfg(windows)]
+const WDA_EXCLUDEFROMCAPTURE: i32 = 0x11;
+
+// Windows：链接 user32 的 SetWindowDisplayAffinity（返回 BOOL/i32）。
+// 让目标窗口对截屏/录屏不可见，但屏幕上看仍是正常显示，从而避免隐藏窗口导致的闪烁。
+#[cfg(windows)]
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn SetWindowDisplayAffinity(hwnd: *mut std::ffi::c_void, dwAffinity: i32) -> i32;
+}
+
+/// 决定对哪些窗口设置「截屏排除」：纯逻辑（返回标签列表），便于说明与测试；
+/// 实际可设置哪些窗口取决于它们此刻是否可见（见 set_capture_exclusion）。
+#[cfg(windows)]
+fn capture_exclusion_labels() -> &'static [&'static str] {
+    &["persona", "chat"]
+}
+
+/// 尝试对可见的 persona/chat 窗口设置 SetWindowDisplayAffinity(EXCLUDEFROMCAPTURE)。
+/// 返回成功设置的窗口句柄；若任一窗口获取句柄或设置失败，则先恢复已设置的窗口并返回 None，
+/// 由调用方回退到「隐藏 + 截图 + 恢复」路径。没有可见窗口时返回 Some(空)。
+#[cfg(windows)]
+fn set_capture_exclusion(app: &AppHandle) -> Option<Vec<*mut std::ffi::c_void>> {
+    let mut hwnds: Vec<*mut std::ffi::c_void> = Vec::new();
+    for label in capture_exclusion_labels() {
+        if let Some(win) = app.get_webview_window(label) {
+            if win.is_visible().unwrap_or(false) {
+                match win.hwnd() {
+                    Ok(hwnd) => {
+                        let rc =
+                            unsafe { SetWindowDisplayAffinity(hwnd.0, WDA_EXCLUDEFROMCAPTURE) };
+                        if rc == 0 {
+                            restore_capture_exclusion(&hwnds);
+                            return None;
+                        }
+                        hwnds.push(hwnd.0);
+                    }
+                    Err(_) => {
+                        restore_capture_exclusion(&hwnds);
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+    Some(hwnds)
+}
+
+/// 恢复之前用 set_capture_exclusion 设置的窗口 affinity 为 WDA_NONE。
+#[cfg(windows)]
+fn restore_capture_exclusion(hwnds: &[*mut std::ffi::c_void]) {
+    for &hwnd in hwnds {
+        unsafe {
+            SetWindowDisplayAffinity(hwnd, WDA_NONE);
+        }
+    }
+}
 
 /// 把截图缩放为最长边 ≤1280 的 JPEG 并编码为 base64 data URL。
 /// 若原图最长边已 ≤1280，则仅编码 JPEG，不做缩放（幂等，供前端预览直接使用）。
@@ -44,6 +107,21 @@ fn encode_preview_data_url(image: &image::RgbaImage) -> Result<String, String> {
 /// 供多模态大模型在聊天中理解屏幕内容。
 pub fn capture_current_monitor_data_url(app: &AppHandle) -> Result<String, String> {
     let monitor = target_monitor(app)?;
+
+    // Windows 优先用 SetWindowDisplayAffinity(EXCLUDEFROMCAPTURE)：窗口仍显示但不出现在截图里，
+    // 无需隐藏窗口，因而无闪烁。任一窗口设置失败（或非 Windows）回退到下方隐藏路径。
+    #[cfg(windows)]
+    {
+        if let Some(hwnds) = set_capture_exclusion(app) {
+            // 给合成器一点生效缓冲。
+            std::thread::sleep(Duration::from_millis(AFFINITY_SETTLE_MS));
+            let captured = monitor.capture_image();
+            // 无论 capture 成功与否都要恢复 affinity，避免泄漏设置状态。
+            restore_capture_exclusion(&hwnds);
+            let image = captured.map_err(|e| format!("屏幕截图失败：{e}"))?;
+            return encode_preview_data_url(&image);
+        }
+    }
 
     // 先隐藏角色窗与对话窗，避免它们挡住要截的屏幕内容；截完再恢复。
     let hidden = hide_app_windows(app);
@@ -137,5 +215,12 @@ mod tests {
             (1280, 720),
             "缩放后尺寸不对"
         );
+    }
+
+    /// Windows 下决定对哪些窗口设置截屏排除：纯逻辑，直接断言窗口标签收集结果。
+    #[cfg(all(test, windows))]
+    #[test]
+    fn capture_exclusion_targets_persona_and_chat() {
+        assert_eq!(capture_exclusion_labels(), &["persona", "chat"]);
     }
 }

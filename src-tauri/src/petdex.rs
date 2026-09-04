@@ -11,7 +11,7 @@ use reqwest::{
     Url,
 };
 use serde::Deserialize;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::engine::{
     LoopEntry, PersonaConfig, ScheduleConfig, StateConfig, StateEngine, SystemPromptConfig,
@@ -21,6 +21,17 @@ use crate::engine::{
 const PETDEX_SITE: &str = "https://petdex.dev";
 const PETDEX_REFERER: &str = "https://petdex.dev/";
 const PETDEX_USER_AGENT: &str = concat!("DeskZen/", env!("CARGO_PKG_VERSION"));
+/// 下载响应与 zip 解压的单个文件大小上限（64 MB）：防超大文件 / zip 炸弹把内容读入内存。
+const MAX_PACK_BYTES: usize = 64 * 1024 * 1024;
+
+/// 校验实际大小是否超过上限；超限返回中文错误（含上限值）。
+fn ensure_size_within_limit(size: usize, limit: usize) -> Result<(), String> {
+    if size > limit {
+        Err(format!("文件大小超过上限 {limit} 字节"))
+    } else {
+        Ok(())
+    }
+}
 
 #[derive(serde::Serialize)]
 pub struct ImportedPet {
@@ -65,7 +76,6 @@ struct PetJson {
 pub async fn import_petdex_pet(
     app: AppHandle,
     url: String,
-    engine: tauri::State<'_, StateEngine>,
 ) -> Result<ImportedPet, String> {
     let slug = parse_petdex_slug(&url)?;
     let client = http_client();
@@ -87,46 +97,55 @@ pub async fn import_petdex_pet(
         }
     };
 
-    let pet_json_bytes = pack
-        .remove("pet.json")
-        .ok_or_else(|| "包内缺少 pet.json".to_string())?;
-    let sprite = pack
-        .remove(&format!("spritesheet.{sprite_ext}"))
-        .or_else(|| pack.remove("spritesheet.webp"))
-        .or_else(|| pack.remove("spritesheet.png"))
-        .ok_or_else(|| format!("包内缺少 spritesheet.{sprite_ext}"))?;
+    // 下载保持 async；zip 解压、pet.json 解析、写盘与注册都是阻塞操作，
+    // 整体移入 spawn_blocking 避免卡住 async 运行时。引擎在阻塞线程内重新获取。
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let pet_json_bytes = pack
+            .remove("pet.json")
+            .ok_or_else(|| "包内缺少 pet.json".to_string())?;
+        let sprite = pack
+            .remove(&format!("spritesheet.{sprite_ext}"))
+            .or_else(|| pack.remove("spritesheet.webp"))
+            .or_else(|| pack.remove("spritesheet.png"))
+            .ok_or_else(|| format!("包内缺少 spritesheet.{sprite_ext}"))?;
 
-    let source: PetJson =
-        serde_json::from_slice(&pet_json_bytes).map_err(|e| format!("pet.json 解析失败: {e}"))?;
-    let name = source
-        .display_name
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| pet.display_name.clone());
-    let id = format!("petdex-{slug}");
+        let source: PetJson = serde_json::from_slice(&pet_json_bytes)
+            .map_err(|e| format!("pet.json 解析失败: {e}"))?;
+        let name = source
+            .display_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| pet.display_name.clone());
+        let id = format!("petdex-{slug}");
 
-    // 写入用户数据目录：%APPDATA%\com.deskzen.app\characters\{id}\
-    let pet_dir = engine.characters_dir()?.join(&id);
-    fs::create_dir_all(&pet_dir).map_err(|e| format!("创建角色目录失败: {e}"))?;
-    let sprite_name = format!("spritesheet.{sprite_ext}");
-    let sprite_path = pet_dir.join(&sprite_name);
-    fs::write(&sprite_path, &sprite).map_err(|e| format!("写入精灵图失败: {e}"))?;
-    fs::write(pet_dir.join("pet.json"), &pet_json_bytes).map_err(|e| format!("写入 pet.json 失败: {e}"))?;
+        let engine = app_handle.state::<StateEngine>();
+        // 写入用户数据目录：%APPDATA%\com.deskzen.app\characters\{id}\
+        let pet_dir = engine.characters_dir()?.join(&id);
+        fs::create_dir_all(&pet_dir).map_err(|e| format!("创建角色目录失败: {e}"))?;
+        let sprite_name = format!("spritesheet.{sprite_ext}");
+        let sprite_path = pet_dir.join(&sprite_name);
+        fs::write(&sprite_path, &sprite).map_err(|e| format!("写入精灵图失败: {e}"))?;
+        fs::write(pet_dir.join("pet.json"), &pet_json_bytes)
+            .map_err(|e| format!("写入 pet.json 失败: {e}"))?;
 
-    let persona = build_persona(&id, &name, source.description.as_deref(), sprite_path);
-    let persona_json = serde_json::to_string_pretty(&persona)
-        .map_err(|e| format!("生成角色配置失败: {e}"))?;
-    fs::write(pet_dir.join("persona.json"), &persona_json)
-        .map_err(|e| format!("写入角色配置失败: {e}"))?;
+        let persona = build_persona(&id, &name, source.description.as_deref(), sprite_path);
+        let persona_json = serde_json::to_string_pretty(&persona)
+            .map_err(|e| format!("生成角色配置失败: {e}"))?;
+        fs::write(pet_dir.join("persona.json"), &persona_json)
+            .map_err(|e| format!("写入角色配置失败: {e}"))?;
 
-    // 运行时注册 + 立即切换展示 + 托盘“更换角色”菜单追加（追加时会刷新 ✓ 标记）
-    engine.register_persona(persona.clone());
-    engine.switch_persona(&app, &id)?;
-    crate::add_persona_menu_item(&app, &id, &persona.name)?;
+        // 运行时注册 + 立即切换展示 + 托盘“更换角色”菜单追加（追加时会刷新 ✓ 标记）
+        engine.register_persona(persona.clone());
+        engine.switch_persona(&app_handle, &id)?;
+        crate::add_persona_menu_item(&app_handle, &id, &persona.name)?;
 
-    Ok(ImportedPet {
-        id,
-        name: persona.name,
+        Ok::<ImportedPet, String>(ImportedPet {
+            id,
+            name: persona.name,
+        })
     })
+    .await
+    .map_err(|e| format!("导入任务执行失败: {e}"))?
 }
 
 /// 删除已导入的角色（仅允许 petdex- 前缀的导入角色）
@@ -168,6 +187,8 @@ fn read_local_pack(path: &Path) -> Result<(Vec<u8>, Vec<u8>), String> {
             let mut f = archive
                 .by_index(i)
                 .map_err(|e| format!("zip 读取失败: {e}"))?;
+            // 用 central directory 元数据对单文件做上限检查，防止 zip 炸弹把超大声明读入内存
+            ensure_size_within_limit(f.size() as usize, MAX_PACK_BYTES)?;
             let base = f
                 .name()
                 .rsplit(['/', '\\'])
@@ -248,7 +269,12 @@ pub async fn import_local_character(
     path: String,
     engine: tauri::State<'_, StateEngine>,
 ) -> Result<ImportedPet, String> {
-    let (pj_bytes, spr_bytes) = read_local_pack(Path::new(&path))?;
+    // read_local_pack 会读整个 zip / 递归扫描文件夹，是阻塞操作，移入 spawn_blocking。
+    let path_buf = PathBuf::from(&path);
+    let read_result = tauri::async_runtime::spawn_blocking(move || read_local_pack(&path_buf))
+        .await
+        .map_err(|e| format!("导入任务执行失败: {e}"))?;
+    let (pj_bytes, spr_bytes) = read_result?;
     let mut persona: PersonaConfig =
         serde_json::from_slice(&pj_bytes).map_err(|e| format!("persona.json 格式错误: {e}"))?;
     validate_webp(&spr_bytes)?;
@@ -376,6 +402,8 @@ fn extract_pack(bytes: &[u8]) -> Result<HashMap<String, Vec<u8>>, String> {
         let mut file = archive
             .by_index(i)
             .map_err(|e| format!("zip 读取失败: {e}"))?;
+        // 用 central directory 元数据对单文件做上限检查，防止 zip 炸弹把超大声明读入内存
+        ensure_size_within_limit(file.size() as usize, MAX_PACK_BYTES)?;
         let base = file
             .name()
             .rsplit(['/', '\\'])
@@ -418,10 +446,17 @@ async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, Str
     if !status.is_success() {
         return Err(format!("下载失败 (HTTP {status}): {url}"));
     }
-    resp.bytes()
+    // 预检 content-length：Some 且超限直接报错，避免把超大响应读入内存
+    if let Some(len) = resp.content_length() {
+        ensure_size_within_limit(len as usize, MAX_PACK_BYTES)?;
+    }
+    let bytes = resp
+        .bytes()
         .await
-        .map(|b| b.to_vec())
-        .map_err(|e| format!("读取下载内容失败: {e}"))
+        .map_err(|e| format!("读取下载内容失败: {e}"))?;
+    // 下载完成后校验实际字节数（content-length 可能缺失或与实际不符）
+    ensure_size_within_limit(bytes.len(), MAX_PACK_BYTES)?;
+    Ok(bytes.to_vec())
 }
 
 /// 把 petdex 的 pet.json 简单表述 + 固定 8x9 网格约定，映射为 DeskZen persona 配置
@@ -644,6 +679,19 @@ mod tests {
         let pack = extract_pack(&buf).unwrap();
         assert_eq!(pack.get("pet.json").unwrap(), br#"{"displayName":"Doraemon"}"#);
         assert_eq!(pack.get("spritesheet.webp").unwrap(), b"webp-data");
+    }
+
+    #[test]
+    fn size_limit_rejects_oversize() {
+        // 未超限（含恰好等于上限）允许通过
+        assert!(ensure_size_within_limit(MAX_PACK_BYTES, MAX_PACK_BYTES).is_ok());
+        assert!(ensure_size_within_limit(10, MAX_PACK_BYTES).is_ok());
+        // 超限时报错，且错误信息包含上限值
+        let err = ensure_size_within_limit(MAX_PACK_BYTES + 1, MAX_PACK_BYTES).unwrap_err();
+        assert!(
+            err.contains(&MAX_PACK_BYTES.to_string()),
+            "错误信息应包含上限值: {err}"
+        );
     }
 
     #[test]

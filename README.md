@@ -10,7 +10,7 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
 
 | 功能 | 说明 |
 |---|---|
-| 生活状态引擎 | 每个角色独立的状态机：默认按 `loop`（逐状态 `{state,duration}`）循环；`time` 时段内固定为对应状态，每 30 秒计算并广播状态变化 |
+| 生活状态引擎 | 每个角色独立的状态机：默认按 `loop`（逐状态 `{state,duration}`）循环；`time` 时段内固定为对应状态；后台线程按「下一个切换时刻」定时唤醒（manual 到期 / 时段结束 / loop 边界），变化时广播状态 |
 | 多角色运行时切换 | 内置林克；托盘「更换角色」子菜单即时切换（✓ 标记当前角色） |
 | Petdex 角色导入 | 从 petdex.dev 链接下载 zip 包（或直接资源），自动生成角色配置并持久化 |
 | 角色删除 | 设置界面一键删除导入角色，删除当前角色时自动回退到默认角色 |
@@ -124,7 +124,7 @@ DeskZen/
 ### 状态引擎流程
 
 1. 启动时加载角色：编译期内嵌的内置角色（`resources/characters/link/persona.json`）+ 扫描用户数据目录（`%APPDATA%\com.deskzen.app\characters\*\persona.json`）中已导入的角色。
-2. Rust 引擎每 30 秒按本地时间计算当前状态，变化时广播 `state-changed` 事件并弹出对应气泡。
+2. Rust 引擎按「下一个切换时刻」（manual 到期 / 时段结束 / loop 边界）定时唤醒，按本地时间计算当前状态，变化时广播 `state-changed` 事件并弹出对应气泡。
 3. 前端收到事件后切换 spritesheet 行（动画）；切换角色时广播 `persona-changed` 让前端重新渲染。
 
 ### 角色切换
@@ -172,7 +172,7 @@ DeskZen/
 设置窗口（560×620）为侧边栏布局，两个板块：
 
 - **角色设置**：点击穿透开关；从 Petdex 导入（链接输入 + 前端校验 + 导入状态）；已导入角色列表（删除）。
-- **大模型设置**：接口地址、模型、API Key、保存按钮与保存状态。
+- **大模型设置**：接口地址、模型、API Key、温度（0.0~2.0）、最大输出 Token（64~4096）、保存按钮与保存状态。
 
 ## 配置
 
@@ -184,11 +184,13 @@ DeskZen/
 {
   "base_url": "https://api.deepseek.com",
   "model": "deepseek-v4-flash",
-  "api_key": "sk-..."
+  "api_key": "sk-...",
+  "temperature": 0.8,
+  "max_tokens": 512
 }
 ```
 
-配置优先级：环境变量 `DESKZEN_API_KEY` > `llm.json` > 默认值。Key 不会进入前端代码和安装包，可通过设置界面填写保存。
+`temperature`（0.0~2.0，默认 0.8）与 `max_tokens`（64~4096，默认 512）可省略或仅用默认值；越界值会被夹到范围内，`temperature` 为 NaN 时回退默认。配置优先级：环境变量 `DESKZEN_API_KEY` > `llm.json` > 默认值。Key 不会进入前端代码和安装包，可通过设置界面填写保存。旧版缺少这两个字段的 `llm.json` 依然兼容（按默认值回退）。
 
 ### 角色
 

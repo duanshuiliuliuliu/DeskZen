@@ -3,6 +3,35 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+/// temperature 允许范围（OpenAI 兼容接口惯例）
+const TEMPERATURE_MIN: f32 = 0.0;
+const TEMPERATURE_MAX: f32 = 2.0;
+/// max_tokens 允许范围
+const MAX_TOKENS_MIN: u32 = 64;
+const MAX_TOKENS_MAX: u32 = 4096;
+
+fn default_temperature() -> f32 {
+    0.8
+}
+
+fn default_max_tokens() -> u32 {
+    512
+}
+
+/// 把 temperature 夹到允许范围；NaN 视作无效，回退默认值。
+pub fn clamp_temperature(value: f32) -> f32 {
+    if value.is_nan() {
+        default_temperature()
+    } else {
+        value.clamp(TEMPERATURE_MIN, TEMPERATURE_MAX)
+    }
+}
+
+/// 把 max_tokens 夹到允许范围。
+pub fn clamp_max_tokens(value: u32) -> u32 {
+    value.clamp(MAX_TOKENS_MIN, MAX_TOKENS_MAX)
+}
+
 /// 复用全局 HTTP 客户端，避免每次请求都重建连接池与空闲管理。
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -21,6 +50,12 @@ pub struct LlmConfig {
     pub base_url: String,
     pub model: String,
     pub api_key: String,
+    /// 采样温度（0.0~2.0），序列化默认 0.8，保证旧 llm.json 兼容。
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    /// 单次回复最大 token 数（64~4096），序列化默认 512。
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
 }
 
 impl Default for LlmConfig {
@@ -29,6 +64,8 @@ impl Default for LlmConfig {
             base_url: "https://api.deepseek.com".into(),
             model: "deepseek-v4-flash-vision-exp".into(),
             api_key: String::new(),
+            temperature: default_temperature(),
+            max_tokens: default_max_tokens(),
         }
     }
 }
@@ -127,6 +164,13 @@ pub fn load_config(app: &AppHandle) -> LlmConfig {
                 if !disk.api_key.is_empty() {
                     cfg.api_key = disk.api_key;
                 }
+                // 范围校验：越界/NaN 时采用默认值
+                if (TEMPERATURE_MIN..=TEMPERATURE_MAX).contains(&disk.temperature) {
+                    cfg.temperature = disk.temperature;
+                }
+                if (MAX_TOKENS_MIN..=MAX_TOKENS_MAX).contains(&disk.max_tokens) {
+                    cfg.max_tokens = disk.max_tokens;
+                }
             }
         }
     }
@@ -152,8 +196,8 @@ pub async fn chat_completion(
     let body = ChatRequest {
         model,
         messages,
-        temperature: 0.8,
-        max_tokens: 512,
+        temperature: cfg.temperature,
+        max_tokens: cfg.max_tokens,
         stream: false,
     };
     let resp = client
@@ -199,8 +243,8 @@ pub async fn chat_completion_stream(
     let body = ChatRequest {
         model,
         messages,
-        temperature: 0.8,
-        max_tokens: 512,
+        temperature: cfg.temperature,
+        max_tokens: cfg.max_tokens,
         stream: true,
     };
     let mut resp = client
@@ -369,6 +413,24 @@ mod tests {
             parse_sse_delta("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}"),
             None
         );
+    }
+
+    /// 旧版 llm.json 缺 temperature/max_tokens 字段时，应按默认值反序列化；
+    /// clamp 函数能把越界/NaN 值收敛到允许范围。
+    #[test]
+    fn llm_config_defaults_and_clamps() {
+        let old: LlmConfig =
+            serde_json::from_str(r#"{"base_url":"u","model":"m","api_key":"k"}"#).unwrap();
+        assert_eq!(old.temperature, 0.8);
+        assert_eq!(old.max_tokens, 512);
+
+        assert_eq!(clamp_temperature(3.5), 2.0);
+        assert_eq!(clamp_temperature(-1.0), 0.0);
+        assert_eq!(clamp_temperature(f32::NAN), 0.8);
+        assert_eq!(clamp_temperature(0.8), 0.8);
+        assert_eq!(clamp_max_tokens(10000), 4096);
+        assert_eq!(clamp_max_tokens(10), 64);
+        assert_eq!(clamp_max_tokens(512), 512);
     }
 
     /// 真实调用 LLM，验证网关代码路径（读取 AppData 中的 llm.json）。
