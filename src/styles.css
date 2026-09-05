@@ -404,7 +404,33 @@ body.chat-body {
 
 /* ---- 设置窗口 ---- */
 body.settings-body {
-  background: #f6f2e9;
+  /* 设计令牌：设置页全量使用，消灭散落的硬编码颜色/字号 */
+  --text-primary: #5b4a2c;   /* 正文/设置项/输入框文字 */
+  --text-secondary: #8a7a58; /* 次要说明/标签/组标题 */
+  --accent: #d9a441;
+  --accent-hover: #c9922f;
+  --danger: #b0564a;
+  --surface: #fff;
+  --surface-muted: #fdfaf3;
+  --border: #ddd2b8;
+  --border-strong: #e8dfc9;
+
+  /* 高频淡色面 / 深色侧栏也纳入令牌，避免游离硬编码 */
+  --page-bg: #f6f2e9;
+  --accent-soft: #f7efdb;
+  --accent-tint: #faf3e2;
+  --danger-border: #e0b9b2;
+  --danger-soft: #fbeae7;
+  --drop-border: #cbb88e;
+  --sidebar-bg: linear-gradient(180deg, #6b4f2a 0%, #543e1e 100%);
+  --sidebar-text: #f3e6c8;
+  --sidebar-brand: #ffe9c4;
+  --sidebar-nav: #e8d8b5;
+  --sidebar-line: rgba(255, 233, 196, 0.18);
+  --sidebar-hover: rgba(255, 233, 196, 0.12);
+
+  font-size: 13px;
+  background: var(--page-bg);
   overflow: hidden;
 }
 
@@ -414,12 +440,12 @@ body.settings-body {
 }
 
 .settings-sidebar {
-  width: 132px;
+  width: 76px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  background: linear-gradient(180deg, #6b4f2a 0%, #543e1e 100%);
-  color: #f3e6c8;
+  background: var(--sidebar-bg);
+  color: var(--sidebar-text);
   padding: 18px 0 20px;
   user-select: none;
   -webkit-user-select: none;
@@ -429,24 +455,24 @@ body.settings-body {
   font-size: 16px;
   font-weight: 700;
   letter-spacing: 1px;
-  color: #ffe9c4;
-  padding: 0 18px 16px;
-  border-bottom: 1px solid rgba(255, 233, 196, 0.18);
+  color: var(--sidebar-brand);
+  padding: 0 14px 16px;
+  border-bottom: 1px solid var(--sidebar-line);
 }
 
 .settings-nav {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 14px 10px;
+  padding: 14px 8px;
 }
 
 .nav-item {
-  padding: 10px 12px;
+  padding: 10px 0; /* 去掉水平内边距：缩进交由 .settings-nav 的 padding 控制，窄栏内不换行 */
   border: none;
   border-radius: 10px;
   background: transparent;
-  color: #e8d8b5;
+  color: var(--sidebar-nav);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
@@ -456,11 +482,11 @@ body.settings-body {
 }
 
 .nav-item:hover {
-  background: rgba(255, 233, 196, 0.12);
+  background: var(--sidebar-hover);
 }
 
 .nav-item.active {
-  background: #d9a441;
+  background: var(--accent);
   color: #fff;
   font-weight: 600;
 }
@@ -489,17 +515,17 @@ body.settings-body {
 
 .settings-header h1 {
   font-size: 17px;
-  color: #6b4f2a;
+  color: var(--text-primary);
 }
 
 .settings-status {
   font-size: 12px;
-  color: #8a7a58;
+  color: var(--text-secondary);
 }
 
 .settings-group {
-  background: #fff;
-  border: 1px solid #e8dfc9;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
   border-radius: 12px;
   padding: 14px;
   margin-bottom: 14px;
@@ -507,29 +533,34 @@ body.settings-body {
 
 .settings-group h2 {
   font-size: 13px;
-  color: #a08a5f;
+  color: var(--text-secondary);
   margin-bottom: 10px;
+}
+
+/* 组内最后一个元素不留多余下边距，让内边距统一负责组底留白 */
+.settings-group > *:last-child {
+  margin-bottom: 0;
 }
 
 .settings-sub {
   font-size: 12px;
   font-weight: 600;
-  color: #8a7a58;
+  color: var(--text-secondary);
   margin: 12px 0 8px;
   padding-top: 10px;
-  border-top: 1px dashed #e8dfc9;
+  border-top: 1px dashed var(--border-strong);
 }
 
 .settings-hint {
   font-size: 12px;
-  color: #8a7a58;
+  color: var(--text-secondary);
   margin-top: 8px;
   line-height: 1.5;
   word-break: break-all;
 }
 
 .settings-hint.error {
-  color: #b0564a;
+  color: var(--danger);
 }
 
 .about-list {
@@ -544,12 +575,12 @@ body.settings-body {
   gap: 8px;
   margin: 0;
   font-size: 13px;
-  color: #5b4a2c;
+  color: var(--text-primary);
 }
 
 .about-list p span {
   min-width: 60px;
-  color: #a08a5f;
+  color: var(--text-secondary);
 }
 
 .imported-list {
@@ -564,32 +595,74 @@ body.settings-body {
   justify-content: space-between;
   gap: 10px;
   padding: 8px 10px;
-  background: #fbf7ec;
-  border: 1px solid #eee3cb;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-strong);
   border-radius: 10px;
+}
+
+/* 当前角色行：主色边框 + 淡金底，突出区分 */
+.imported-item.active {
+  border-color: var(--accent);
+  background: var(--accent-tint);
 }
 
 .imported-name {
   font-size: 13px;
-  color: #5b4a2c;
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.imported-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.imported-use {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.imported-use:hover {
+  background: var(--accent-soft);
+}
+
+.imported-use:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.imported-current {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+}
+
 .imported-del {
   flex-shrink: 0;
   padding: 4px 10px;
-  border: 1px solid #e0b9b2;
+  border: 1px solid var(--danger-border);
   border-radius: 999px;
-  background: #fff;
-  color: #b0564a;
+  background: var(--surface);
+  color: var(--danger);
   font-size: 12px;
   cursor: pointer;
 }
 
 .imported-del:hover {
-  background: #fbeae7;
+  background: var(--danger-soft);
 }
 
 .imported-del:disabled {
@@ -599,17 +672,32 @@ body.settings-body {
 
 .settings-row {
   display: flex;
+  align-items: center;
+  justify-content: space-between; /* 标签在左、控件在右 */
   gap: 10px;
+  font-size: 13px;
+  color: var(--text-primary);
   margin-bottom: 10px;
+}
+
+.settings-row > span {
+  font-size: 13px;
+}
+
+/* 缩放行：标签与下拉框紧凑相邻（不再 space-between 拉满整行，控件跟在标签后面） */
+.settings-row-zoom {
+  justify-content: flex-start;
+  gap: 12px;
 }
 
 .settings-check {
   display: flex;
   align-items: center;
+  justify-content: flex-start; /* 覆盖 settings-row 的 space-between：勾选框+文字靠左成组 */
   gap: 8px;
   font-size: 13px;
-  color: #555;
-  margin-bottom: 0;
+  color: var(--text-primary);
+  margin-bottom: 10px; /* 与 settings-row 一致，保证勾选行与下一行等距 */
 }
 
 .settings-field {
@@ -620,59 +708,119 @@ body.settings-body {
 .settings-field span {
   display: block;
   font-size: 12px;
-  color: #8a7a58;
+  color: var(--text-secondary);
   margin-bottom: 4px;
 }
 
 .settings-field input {
   width: 100%;
   padding: 8px 10px;
-  border: 1px solid #ddd2b8;
+  border: 1px solid var(--border);
   border-radius: 8px;
   font-size: 13px;
   outline: none;
-  background: #fdfaf3;
-  color: #333;
+  background: var(--surface-muted);
+  color: var(--text-primary);
 }
 
 .settings-field input:focus {
-  border-color: #d9a441;
+  border-color: var(--accent);
+}
+
+/* 角色缩放下拉框：对齐 .settings-field input 的米色系圆角风格 */
+.settings-row select {
+  width: 110px; /* 定宽紧凑下拉，不再拉伸占满整行 */
+  flex: none;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  outline: none;
+  background: var(--surface-muted);
+  color: var(--text-primary);
+}
+
+.settings-row select:focus {
+  border-color: var(--accent);
 }
 
 .btn {
   padding: 8px 14px;
-  border: 1px solid #ddd2b8;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  color: #5b4a2c;
+  background: var(--surface);
+  color: var(--text-primary);
   font-size: 13px;
   cursor: pointer;
 }
 
 .btn:hover {
-  background: #f7efdb;
+  background: var(--accent-soft);
 }
 
 .btn-primary {
-  background: #d9a441;
-  border-color: #d9a441;
+  background: var(--accent);
+  border-color: var(--accent);
   color: #fff;
   width: 100%;
 }
 
 .btn-primary:hover {
-  background: #c9922f;
+  background: var(--accent-hover);
 }
 
 .btn-danger {
-  background: #fff;
-  border-color: #e0b9b2;
-  color: #b0564a;
+  background: var(--surface);
+  border-color: var(--danger-border);
+  color: var(--danger);
   width: 100%;
 }
 
 .btn-danger:hover {
-  background: #fbeae7;
+  background: var(--danger-soft);
+}
+
+/* 按钮组：把并排按钮放进 flex 容器，等宽排布并留出间隙 */
+.btn-group {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px; /* 本地导入拖拽区已有下边距，这里只需细微间距 */
+}
+
+/* 覆盖 .btn-primary 的 width:100%，让组内两按钮等宽并排而非块式堆叠 */
+.btn-group .btn {
+  flex: 1;
+  width: auto;
+}
+
+/* ---- 本地导入拖拽区 ---- */
+.local-import-drop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 18px 14px;
+  margin-bottom: 12px;
+  border: 1px dashed var(--drop-border);
+  border-radius: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+  background: var(--surface-muted);
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+/* 悬停或拖入悬停时高亮：边框变主色、背景轻微加深，提示“松手即导入” */
+.local-import-drop:hover,
+.local-import-drop.drag-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.local-import-drop-icon {
+  font-size: 18px;
 }
 
 .settings-footer {

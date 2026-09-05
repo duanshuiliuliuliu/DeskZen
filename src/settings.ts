@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./styles.css";
 
@@ -16,15 +17,20 @@ const temperature = $("temperature") as HTMLInputElement;
 const maxTokens = $("max-tokens") as HTMLInputElement;
 const statusEl = $("settings-status");
 const passthrough = $("passthrough") as HTMLInputElement;
+const personaZoom = $("persona-zoom") as HTMLSelectElement;
+const personaZoomStatus = $("persona-zoom-status") as HTMLElement;
 const saveBtn = $("llm-save") as HTMLButtonElement;
 const quitBtn = $("quit-app") as HTMLButtonElement;
 const petdexUrl = $("petdex-url") as HTMLInputElement;
 const petdexImportBtn = $("petdex-import") as HTMLButtonElement;
 const petdexStatus = $("petdex-status") as HTMLElement;
 const localImportBtn = $("local-import") as HTMLButtonElement;
+const localImportZipBtn = $("local-import-zip") as HTMLButtonElement;
+const localImportDrop = $("local-import-drop") as HTMLDivElement;
 const localImportStatus = $("local-import-status") as HTMLElement;
 const importedList = $("imported-list") as HTMLDivElement;
 const importedHint = $("imported-hint") as HTMLElement;
+const importedStatus = $("imported-status") as HTMLElement;
 const navItems = document.querySelectorAll<HTMLButtonElement>(".nav-item");
 const settingsContent = document.querySelector(".settings-content") as HTMLElement;
 const panels: Record<"role" | "llm" | "about", HTMLElement> = {
@@ -36,6 +42,40 @@ const panels: Record<"role" | "llm" | "about", HTMLElement> = {
 /** Petdex 链接校验：仅接受 https://petdex.dev/pets/{slug} */
 const PETDEX_URL_RE = /^https:\/\/petdex\.dev\/pets\/[a-z0-9][a-z0-9-]{0,62}\/?$/i;
 
+/** 角色缩放可选档位：与后端 [0.5, 2.0] 范围一致，步进 25%。 */
+const ZOOM_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+
+/** 在档位里取最接近的值：prefs.json 可能被手改成非档位值（如 1.1），回显时收敛到最近档位。 */
+function closestZoom(value: number): number {
+  return ZOOM_OPTIONS.reduce(
+    (best, opt) => (Math.abs(opt - value) < Math.abs(best - value) ? opt : best),
+    ZOOM_OPTIONS[0],
+  );
+}
+
+function setZoomStatus(text: string, error = false): void {
+  personaZoomStatus.textContent = text;
+  personaZoomStatus.classList.toggle("error", error);
+}
+
+/** 上次 get_llm_config 返回的打码 Key；用于判断输入是否仍是未改动的打码值（仅影响提示文案） */
+let loadedMaskedKey = "";
+
+/** 拖放事件订阅句柄，页面卸载时调用以释放（settings 窗口是可复用/关闭后重建的） */
+let unlistenDragDrop: (() => void) | undefined;
+
+/** 根据当前输入是否等于已加载的打码值刷新提示文案；用精确比较而非 contains("*")，
+ *  避免真实 Key 恰好含 * 时被误判为打码值。 */
+function updateMaskHint(): void {
+  const masked = loadedMaskedKey !== "" && apiKey.value === loadedMaskedKey;
+  apiKey.title = masked
+    ? "已保存的 Key 以打码形式显示；重新输入完整 Key 可替换"
+    : "";
+  apiKey.placeholder = masked ? "" : "sk-...";
+}
+
+apiKey.addEventListener("input", updateMaskHint);
+
 function setPetdexStatus(text: string, error = false): void {
   petdexStatus.textContent = text;
   petdexStatus.classList.toggle("error", error);
@@ -44,6 +84,12 @@ function setPetdexStatus(text: string, error = false): void {
 function setLocalImportStatus(text: string, error = false): void {
   localImportStatus.textContent = text;
   localImportStatus.classList.toggle("error", error);
+}
+
+/** 角色列表区状态提示（设为当前 / 删除结果） */
+function setImportedStatus(text: string, error = false): void {
+  importedStatus.textContent = text;
+  importedStatus.classList.toggle("error", error);
 }
 
 /** 滚动到指定面板并高亮侧边栏 */
@@ -80,40 +126,75 @@ settingsContent.addEventListener("scroll", () => {
   }
 });
 
-/** 展示已导入（petdex- / local- 前缀）的角色列表 */
+/** 展示全部角色（内置 + 导入），高亮当前行；导入角色提供「设为当前」「删除」 */
 async function refreshImported(): Promise<void> {
   const personas = await invoke<{ id: string; name: string }[]>("list_personas");
-  const imported = personas.filter(
-    (p) => p.id.startsWith("petdex-") || p.id.startsWith("local-"),
-  );
+  const currentId = await invoke<string>("get_current_persona_id");
   importedList.textContent = "";
-  if (imported.length === 0) {
-    importedHint.textContent = "还没有导入角色，可粘贴 Petdex 链接或从本地导入";
+  if (personas.length === 0) {
+    importedHint.textContent = "暂无导入角色，可在下方导入";
     return;
   }
   importedHint.textContent = "";
-  for (const p of imported) {
+  for (const p of personas) {
+    const isImported = p.id.startsWith("petdex-") || p.id.startsWith("local-");
+    const isCurrent = p.id === currentId;
     const row = document.createElement("div");
-    row.className = "imported-item";
+    row.className = `imported-item${isCurrent ? " active" : ""}`;
+
     const name = document.createElement("span");
     name.className = "imported-name";
     name.textContent = p.name;
-    const del = document.createElement("button");
-    del.type = "button";
-    del.className = "imported-del";
-    del.textContent = "删除";
-    del.addEventListener("click", async () => {
-      del.disabled = true;
-      try {
-        await invoke("delete_persona", { id: p.id });
-        setPetdexStatus(`已删除角色：${p.name}`);
-      } catch (err) {
-        setPetdexStatus(`删除失败：${String(err)}`, true);
-      } finally {
-        await refreshImported();
-      }
-    });
-    row.append(name, del);
+
+    const actions = document.createElement("span");
+    actions.className = "imported-actions";
+
+    // 内置角色（id 无 petdex-/local- 前缀）只显示名字；当前角色加「当前」徽标
+    if (isCurrent) {
+      const badge = document.createElement("span");
+      badge.className = "imported-current";
+      badge.textContent = "当前";
+      actions.appendChild(badge);
+    }
+
+    if (isImported) {
+      const use = document.createElement("button");
+      use.type = "button";
+      use.className = "imported-use";
+      use.textContent = "设为当前";
+      use.disabled = isCurrent;
+      use.addEventListener("click", async () => {
+        use.disabled = true;
+        try {
+          await invoke("switch_persona", { id: p.id });
+          setImportedStatus(`已切换至「${p.name}」`);
+        } catch (err) {
+          setImportedStatus(`切换失败：${String(err)}`, true);
+        } finally {
+          await refreshImported();
+        }
+      });
+      actions.appendChild(use);
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "imported-del";
+      del.textContent = "删除";
+      del.addEventListener("click", async () => {
+        del.disabled = true;
+        try {
+          await invoke("delete_persona", { id: p.id });
+          setImportedStatus(`已删除角色：${p.name}`);
+        } catch (err) {
+          setImportedStatus(`删除失败：${String(err)}`, true);
+        } finally {
+          await refreshImported();
+        }
+      });
+      actions.appendChild(del);
+    }
+
+    row.append(name, actions);
     importedList.appendChild(row);
   }
 }
@@ -129,15 +210,13 @@ async function refresh(): Promise<void> {
   baseUrl.value = cfg.base_url;
   model.value = cfg.model;
   apiKey.value = cfg.api_key;
+  loadedMaskedKey = cfg.api_key;
   temperature.value = String(cfg.temperature);
   maxTokens.value = String(cfg.max_tokens);
-  // 后端返回的是打码 Key（含 *）：直接保存不会覆盖原 Key；重新输入完整 Key 才会替换
-  const masked = cfg.api_key.includes("*");
-  apiKey.title = masked
-    ? "已保存的 Key 以打码形式显示；重新输入完整 Key 可替换"
-    : "";
-  apiKey.placeholder = masked ? "" : "sk-...";
+  updateMaskHint();
   passthrough.checked = await invoke<boolean>("get_passthrough");
+  const prefs = await invoke<{ zoom: number }>("get_prefs");
+  personaZoom.value = String(closestZoom(prefs.zoom));
 }
 
 saveBtn.addEventListener("click", async () => {
@@ -158,6 +237,16 @@ saveBtn.addEventListener("click", async () => {
 
 passthrough.addEventListener("change", () => {
   void invoke("set_passthrough", { enabled: passthrough.checked });
+});
+
+personaZoom.addEventListener("change", async () => {
+  const zoom = parseFloat(personaZoom.value);
+  try {
+    await invoke("set_zoom", { zoom });
+    setZoomStatus(`已缩放至 ${Math.round(zoom * 100)}%`);
+  } catch (err) {
+    setZoomStatus(`缩放设置失败：${String(err)}`, true);
+  }
 });
 
 quitBtn.addEventListener("click", () => {
@@ -191,9 +280,12 @@ petdexImportBtn.addEventListener("click", async () => {
 });
 
 /** 从本地 zip / 文件夹导入 */
-async function importFromPath(path: string): Promise<void> {
+async function importFromPath(
+  path: string,
+  pendingMessage = "正在导入…",
+): Promise<void> {
   localImportBtn.disabled = true;
-  setLocalImportStatus("正在导入…");
+  setLocalImportStatus(pendingMessage);
   try {
     const pet = await invoke<{ id: string; name: string }>("import_local_character", {
       path,
@@ -211,6 +303,42 @@ localImportBtn.addEventListener("click", async () => {
   const path = await open({ directory: true, multiple: false });
   if (typeof path === "string") await importFromPath(path);
 });
+
+localImportZipBtn.addEventListener("click", async () => {
+  const path = await open({
+    multiple: false,
+    filters: [{ name: "角色资源包", extensions: ["zip"] }],
+  });
+  if (typeof path === "string") await importFromPath(path);
+});
+
+// 用 Tauri 的拖放事件而非 HTML5 drop：系统拖拽会被 WebView 拦截，HTML5 拿不到路径。
+void getCurrentWebview()
+  .onDragDropEvent((event) => {
+    const { type } = event.payload;
+    if (type === "enter" || type === "over") {
+      // 拖入中：高亮提示“松手即导入”
+      localImportDrop.classList.add("drag-over");
+      return;
+    }
+    localImportDrop.classList.remove("drag-over");
+    if (type === "drop") {
+      // 拖入多文件时只取第一个，避免误导入；路径为空则忽略
+      const path = event.payload.paths[0];
+      if (!path) return;
+      const fileName = path.split(/[\\/]/).pop() || path;
+      void importFromPath(path, `正在导入：${fileName}…`);
+    }
+  })
+  .then((unlisten) => {
+    unlistenDragDrop = unlisten;
+  })
+  .catch(() => {
+    // 监听注册失败时静默降级：拖拽入口不可用，但两个按钮仍可导入，不影响其他功能。
+  });
+
+// 页面卸载时释放拖放监听，避免窗口关闭/重建后残留监听器
+window.addEventListener("pagehide", () => unlistenDragDrop?.());
 
 void refresh();
 void refreshImported();

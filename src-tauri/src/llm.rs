@@ -36,8 +36,11 @@ pub fn clamp_max_tokens(value: u32) -> u32 {
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
+        // 客户端级总超时(120s)会覆盖整个请求生命周期，包括流式 body 的读取阶段：
+        // 慢模型生成长回复时会在“说到一半”被截断报错。这里只限制建连阶段(connect_timeout)，
+        // 流式读取时长交由服务端与前端超时机制控制，不再被总时长掐断。
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .connect_timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("HTTP 客户端创建失败")
     })

@@ -10,8 +10,8 @@
       <aside class="settings-sidebar">
         <div class="settings-logo">DeskZen</div>
         <nav class="settings-nav">
-          <button class="nav-item active" data-panel="role" type="button">角色设置</button>
-          <button class="nav-item" data-panel="llm" type="button">大模型设置</button>
+          <button class="nav-item active" data-panel="role" type="button">角色</button>
+          <button class="nav-item" data-panel="llm" type="button">大模型</button>
           <button class="nav-item" data-panel="about" type="button">关于</button>
         </nav>
       </aside>
@@ -23,34 +23,52 @@
           </header>
 
           <section class="settings-group">
+            <h2>已支持角色</h2>
+            <div id="imported-list" class="imported-list"></div>
+            <p id="imported-hint" class="settings-hint"></p>
+            <p id="imported-status" class="settings-hint"></p>
+          </section>
+
+          <section class="settings-group">
             <h2>桌面表现</h2>
             <label class="settings-row settings-check">
               <input type="checkbox" id="passthrough" />
               <span>点击穿透（鼠标穿过角色窗口，不挡住下层操作）</span>
             </label>
+            <label class="settings-row settings-row-zoom">
+              <span>角色缩放</span>
+              <select id="persona-zoom">
+                <option value="0.5">50%</option>
+                <option value="0.75">75%</option>
+                <option value="1">100%</option>
+                <option value="1.25">125%</option>
+                <option value="1.5">150%</option>
+                <option value="1.75">175%</option>
+                <option value="2">200%</option>
+              </select>
+            </label>
+            <p id="persona-zoom-status" class="settings-hint"></p>
           </section>
 
           <section class="settings-group">
-            <h2>从 Petdex 导入</h2>
+            <h2>角色导入</h2>
             <label class="settings-field">
               <span>Petdex 链接</span>
               <input id="petdex-url" type="url" placeholder="https://petdex.dev/pets/doraemon" autocomplete="off" />
             </label>
             <button id="petdex-import" class="btn btn-primary">导入角色</button>
             <p id="petdex-status" class="settings-hint"></p>
-          </section>
-
-          <section class="settings-group">
-            <h2>从本地导入</h2>
-            <p class="settings-hint">选择一个包含 persona.json 与 spritesheet.webp 的文件夹。</p>
-            <button id="local-import" class="btn btn-primary" type="button">从本地导入</button>
+            <div class="settings-sub">从本地导入</div>
+            <p class="settings-hint">选择一个包含 persona.json 与 spritesheet.webp 的文件夹，或直接选择打包好的 zip 文件。</p>
+            <div id="local-import-drop" class="local-import-drop">
+              <span class="local-import-drop-icon">📦</span>
+              <span>将角色文件夹或 zip 拖到此处导入</span>
+            </div>
+            <div class="btn-group">
+              <button id="local-import" class="btn btn-primary" type="button">从本地文件夹导入</button>
+              <button id="local-import-zip" class="btn btn-primary" type="button">从本地 zip 导入</button>
+            </div>
             <p id="local-import-status" class="settings-hint"></p>
-          </section>
-
-          <section class="settings-group">
-            <h2>已导入角色</h2>
-            <div id="imported-list" class="imported-list"></div>
-            <p id="imported-hint" class="settings-hint"></p>
           </section>
         </section>
 

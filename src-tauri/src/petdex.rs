@@ -88,7 +88,7 @@ pub async fn import_petdex_pet(
     };
 
     // 优先按用户描述的 zip 包下载；zip 不可用时回退到两个文件直连
-    let mut pack = match download_zip(&client, &pet).await {
+    let pack = match download_zip(&client, &pet).await {
         Ok(p) => p,
         Err(_) => {
             let pet_json = fetch_bytes(&client, &pet.pet_json_url).await?;
@@ -101,51 +101,77 @@ pub async fn import_petdex_pet(
     // 整体移入 spawn_blocking 避免卡住 async 运行时。引擎在阻塞线程内重新获取。
     let app_handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let pet_json_bytes = pack
-            .remove("pet.json")
-            .ok_or_else(|| "包内缺少 pet.json".to_string())?;
-        let sprite = pack
-            .remove(&format!("spritesheet.{sprite_ext}"))
-            .or_else(|| pack.remove("spritesheet.webp"))
-            .or_else(|| pack.remove("spritesheet.png"))
-            .ok_or_else(|| format!("包内缺少 spritesheet.{sprite_ext}"))?;
-
-        let source: PetJson = serde_json::from_slice(&pet_json_bytes)
-            .map_err(|e| format!("pet.json 解析失败: {e}"))?;
-        let name = source
-            .display_name
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| pet.display_name.clone());
-        let id = format!("petdex-{slug}");
-
-        let engine = app_handle.state::<StateEngine>();
-        // 写入用户数据目录：%APPDATA%\com.deskzen.app\characters\{id}\
-        let pet_dir = engine.characters_dir()?.join(&id);
-        fs::create_dir_all(&pet_dir).map_err(|e| format!("创建角色目录失败: {e}"))?;
-        let sprite_name = format!("spritesheet.{sprite_ext}");
-        let sprite_path = pet_dir.join(&sprite_name);
-        fs::write(&sprite_path, &sprite).map_err(|e| format!("写入精灵图失败: {e}"))?;
-        fs::write(pet_dir.join("pet.json"), &pet_json_bytes)
-            .map_err(|e| format!("写入 pet.json 失败: {e}"))?;
-
-        let persona = build_persona(&id, &name, source.description.as_deref(), sprite_path);
-        let persona_json = serde_json::to_string_pretty(&persona)
-            .map_err(|e| format!("生成角色配置失败: {e}"))?;
-        fs::write(pet_dir.join("persona.json"), &persona_json)
-            .map_err(|e| format!("写入角色配置失败: {e}"))?;
-
-        // 运行时注册 + 立即切换展示 + 托盘“更换角色”菜单追加（追加时会刷新 ✓ 标记）
-        engine.register_persona(persona.clone());
-        engine.switch_persona(&app_handle, &id)?;
-        crate::add_persona_menu_item(&app_handle, &id, &persona.name)?;
-
-        Ok::<ImportedPet, String>(ImportedPet {
-            id,
-            name: persona.name,
-        })
+        // 先算出本次写入的目标目录（含具体 id 的子目录），失败时据此精确清理，
+        // 确保不误删 characters 根目录里的其他角色。
+        let pet_dir = app_handle
+            .state::<StateEngine>()
+            .characters_dir()
+            .map(|d| d.join(format!("petdex-{slug}")))?;
+        let result = install_petdex_character(&app_handle, pack, pet, &slug, sprite_ext, &pet_dir);
+        if let Err(e) = &result {
+            // 写盘/注册/切换/加菜单任一步失败都会残留半成品目录（无 persona.json 会被下次
+            // 启动静默跳过，设置页既看不到也删不掉），这里整体清理；覆盖导入时旧版本已损坏，
+            // 一并清掉让用户可重试（可接受的取舍）。
+            let _ = fs::remove_dir_all(&pet_dir);
+            return Err(e.clone());
+        }
+        result
     })
     .await
     .map_err(|e| format!("导入任务执行失败: {e}"))?
+}
+
+/// petdex 导入主体：校验资源、生成 persona、写盘到 pet_dir、注册进引擎并立即切换与加托盘菜单。
+/// 返回后由调用方负责在失败时清理 pet_dir（本函数不自行清理，以保持单一职责）。
+fn install_petdex_character(
+    app: &AppHandle,
+    mut pack: HashMap<String, Vec<u8>>,
+    pet: InstallPet,
+    slug: &str,
+    sprite_ext: &str,
+    pet_dir: &Path,
+) -> Result<ImportedPet, String> {
+    let pet_json_bytes = pack
+        .remove("pet.json")
+        .ok_or_else(|| "包内缺少 pet.json".to_string())?;
+    let sprite = pack
+        .remove(&format!("spritesheet.{sprite_ext}"))
+        .or_else(|| pack.remove("spritesheet.webp"))
+        .or_else(|| pack.remove("spritesheet.png"))
+        .ok_or_else(|| format!("包内缺少 spritesheet.{sprite_ext}"))?;
+
+    let source: PetJson = serde_json::from_slice(&pet_json_bytes)
+        .map_err(|e| format!("pet.json 解析失败: {e}"))?;
+    let name = source
+        .display_name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| pet.display_name.clone());
+    let id = format!("petdex-{slug}");
+
+    let engine = app.state::<StateEngine>();
+    // 写入用户数据目录：%APPDATA%\com.deskzen.app\characters\{id}\
+    fs::create_dir_all(pet_dir).map_err(|e| format!("创建角色目录失败: {e}"))?;
+    let sprite_name = format!("spritesheet.{sprite_ext}");
+    let sprite_path = pet_dir.join(&sprite_name);
+    fs::write(&sprite_path, &sprite).map_err(|e| format!("写入精灵图失败: {e}"))?;
+    fs::write(pet_dir.join("pet.json"), &pet_json_bytes)
+        .map_err(|e| format!("写入 pet.json 失败: {e}"))?;
+
+    let persona = build_persona(&id, &name, source.description.as_deref(), sprite_path);
+    let persona_json = serde_json::to_string_pretty(&persona)
+        .map_err(|e| format!("生成角色配置失败: {e}"))?;
+    fs::write(pet_dir.join("persona.json"), &persona_json)
+        .map_err(|e| format!("写入角色配置失败: {e}"))?;
+
+    // 运行时注册 + 立即切换展示 + 托盘“更换角色”菜单追加（追加时会刷新 ✓ 标记）
+    engine.register_persona(persona.clone());
+    engine.switch_persona(app, &id)?;
+    crate::add_persona_menu_item(app, &id, &persona.name)?;
+
+    Ok(ImportedPet {
+        id,
+        name: persona.name,
+    })
 }
 
 /// 删除已导入的角色（仅允许 petdex- 前缀的导入角色）
@@ -277,6 +303,11 @@ pub async fn import_local_character(
     let (pj_bytes, spr_bytes) = read_result?;
     let mut persona: PersonaConfig =
         serde_json::from_slice(&pj_bytes).map_err(|e| format!("persona.json 格式错误: {e}"))?;
+    // 无状态定义的角色无法驱动状态机（engine 的 next_loop_state 等都会发生除零/空跳），
+    // 这里直接拒绝导入并给出明确提示，避免进入运行期才崩溃。
+    if persona.states.is_empty() {
+        return Err("角色配置缺少状态定义".to_string());
+    }
     validate_webp(&spr_bytes)?;
 
     let id = format!("local-{}", sanitize_slug(&persona.id, &persona.name));

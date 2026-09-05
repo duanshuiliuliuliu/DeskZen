@@ -41,11 +41,26 @@ let bubbleTimer: ReturnType<typeof setTimeout> | undefined;
 let dragging = false;
 let pointerStart = { x: 0, y: 0 };
 
+/** 角色精灵在角色窗口内的底距（与 styles.css `.character { bottom: 24px }`、Rust SPRITE_BOTTOM 同步） */
+const SPRITE_BOTTOM = 24;
+/** 气泡相对精灵头顶的间隙：内置林克 display_h=125 时 bottom=158（24+125+9），此处对齐该几何关系 */
+const BUBBLE_GAP = 9;
+
 /** 应用角色外观：精灵图、行数、显示尺寸、渲染模式 */
 function setCharSize(w: number, h: number): void {
   character.style.width = `${w}px`;
   character.style.height = `${h}px`;
   character.style.setProperty("--char-w", String(w));
+}
+
+/** 根据精灵显示高度把气泡摆到角色头顶上方；未配置显示尺寸时回退到 styles.css 的默认值(158px) */
+function applyBubblePosition(h: number): void {
+  if (h > 0) {
+    bubble.style.bottom = `${SPRITE_BOTTOM + h + BUBBLE_GAP}px`;
+  } else {
+    // 保留 CSS 默认值（内置林克），避免覆盖造成错位
+    bubble.style.removeProperty("bottom");
+  }
 }
 
 function applyPersona(persona: PersonaConfig): void {
@@ -59,6 +74,7 @@ function applyPersona(persona: PersonaConfig): void {
   character.style.imageRendering = persona.pixel_art ? "pixelated" : "auto";
   if (persona.display_w > 0 && persona.display_h > 0) {
     setCharSize(persona.display_w, persona.display_h);
+    applyBubblePosition(persona.display_h);
   } else {
     // 未配置显示尺寸：用精灵图实际尺寸 ÷ cols/rows 计算
     const img = new Image();
@@ -66,8 +82,12 @@ function applyPersona(persona: PersonaConfig): void {
       const w = Math.round(img.naturalWidth / persona.cols);
       const h = Math.round(img.naturalHeight / persona.rows);
       setCharSize(w, h);
+      applyBubblePosition(h);
     };
-    img.onerror = () => setCharSize(1, 1);
+    img.onerror = () => {
+      setCharSize(1, 1);
+      applyBubblePosition(0);
+    };
     img.src = spriteUrl;
   }
 }
@@ -153,6 +173,21 @@ async function init(): Promise<void> {
   await listen<BubblePayload>("bubble", (e) => {
     showBubble(e.payload.text);
   });
+
+  await listen<{ w: number; h: number }>("zoom-changed", (e) => {
+    // 缩放变化：直接用事件里的新显示尺寸重排精灵与气泡，无需重新拉取角色配置。
+    setCharSize(e.payload.w, e.payload.h);
+    applyBubblePosition(e.payload.h);
+    if (persona) {
+      // 同步本地 persona 的显示尺寸，保证之后再次 applyPersona 也使用缩放后的值。
+      persona.display_w = e.payload.w;
+      persona.display_h = e.payload.h;
+    }
+  });
+
+  // 所有事件监听就绪、初始配置也已拉取完毕后，再通知 Rust 广播启动事件
+  //（persona-changed / state-changed / 开场气泡），否则广播发生在监听器注册之前会被丢弃。
+  await invoke("frontend_ready");
 }
 
 void init();

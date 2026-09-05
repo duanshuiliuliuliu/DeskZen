@@ -1,26 +1,38 @@
 mod engine;
 mod llm;
 mod petdex;
+mod prefs;
 mod screen;
 
 use std::{
     collections::HashMap,
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
 };
 
 use tauri::{
     menu::{Menu, MenuEvent, MenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder,
 };
 
 /// 角色精灵在角色窗口内的底距（与 styles.css `.character { bottom: 24px }` 同步）
 const SPRITE_BOTTOM: i32 = 24;
+/// 角色窗口显示余量：水平每侧 ≥30px（气泡可能比精灵宽，需留横向空间）、顶部 ≥50px（气泡显示空间）。
+const H_MARGIN: i32 = 30;
+const TOP_MARGIN: i32 = 50;
+/// 窗口最小逻辑尺寸：与 tauri.conf.json 初始 240×280 一致，保证基准缩放下气泡不溢出、尺寸稳定。
+const MIN_WINDOW_W: i32 = 240;
+const MIN_WINDOW_H: i32 = 280;
 
 /// 应用级共享状态
 pub struct AppState {
     /// 是否处于整窗点击穿透模式
     pub passthrough: Mutex<bool>,
+    /// 前端是否已就绪：`frontend_ready` 被调用过一次后置真，防止重复广播开场事件
+    pub frontend_ready: AtomicBool,
     /// 托盘菜单里的“显示/隐藏角色”项，用于动态更新文案
     pub persona_menu_item: Mutex<Option<MenuItem<tauri::Wry>>>,
     /// 托盘“更换角色”子菜单项，id -> 菜单项
@@ -46,6 +58,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             passthrough: Mutex::new(false),
+            frontend_ready: AtomicBool::new(false),
             persona_menu_item: Mutex::new(None),
             persona_items: Mutex::new(HashMap::new()),
             persona_submenu: Mutex::new(None),
@@ -53,11 +66,13 @@ pub fn run() {
         .on_menu_event(handle_menu_event)
         .setup(|app| {
             let engine = engine::StateEngine::new(app.handle().clone());
-            engine.broadcast_state();
             app.manage(engine);
             app.state::<engine::StateEngine>().start();
 
             setup_tray(app.handle())?;
+
+            // 按持久化的 zoom 调整窗口尺寸，使重启后缩放立即生效（精灵尺寸由前端按 zoomed 值渲染）。
+            resize_persona_window(app.handle());
 
             // 等前端就绪后再显示，避免透明窗口启动白屏闪烁
             let persona = app.get_webview_window("persona").unwrap();
@@ -90,11 +105,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             engine::get_persona_config,
             engine::get_current_state,
+            engine::load_chat_history,
+            engine::save_chat_history,
             chat_send,
             open_chat,
             open_settings,
             switch_persona,
             list_personas,
+            frontend_ready,
             petdex::import_petdex_pet,
             petdex::import_local_character,
             petdex::delete_persona,
@@ -102,6 +120,9 @@ pub fn run() {
             save_llm_config,
             get_passthrough,
             set_passthrough,
+            get_prefs,
+            set_zoom,
+            get_current_persona_id,
             show_persona_menu,
             capture_screen,
             reposition_chat,
@@ -210,6 +231,35 @@ fn reposition_chat(app: AppHandle) {
     place_chat_bubble(&app);
 }
 
+/// 按当前角色「缩放后」的显示尺寸重设 persona 窗口，并保持精灵“地板”（底部中心点）不动：
+/// 窗口底部 y 固定（new_y = old_y + (old_h - new_h)），水平方向保持中心对齐（new_x = old_x + (old_w - new_w)/2），
+/// 使角色在缩放时看起来只是原地变大/变小，而不会水平漂移。窗口随尺寸增大上下、左右对称扩展。
+/// 坐标/尺寸统一用 Physical 像素，避免与 Logical 混用导致位置偏移。
+pub(crate) fn resize_persona_window(app: &AppHandle) {
+    let Some(persona) = app.get_webview_window("persona") else { return };
+    let (display_w, display_h) = app.state::<engine::StateEngine>().display_size();
+    let scale = persona.scale_factor().unwrap_or(1.0);
+    // 展示与气泡都在 CSS（逻辑）像素里；先算逻辑窗口尺寸，再乘 scale 转物理尺寸交给 set_size。
+    let win_w_log =
+        ((display_w as i32 + 2 * H_MARGIN).max(MIN_WINDOW_W)) as f64;
+    let win_h_log =
+        ((display_h as i32 + SPRITE_BOTTOM + TOP_MARGIN).max(MIN_WINDOW_H)) as f64;
+    let new_w = (win_w_log * scale).round() as i32;
+    let new_h = (win_h_log * scale).round() as i32;
+    if let (Ok(old_pos), Ok(old_size)) = (persona.outer_position(), persona.outer_size()) {
+        let new_x = old_pos.x + (old_size.width as i32 - new_w) / 2;
+        let new_y = old_pos.y + (old_size.height as i32 - new_h);
+        let _ = persona.set_position(PhysicalPosition::new(new_x, new_y));
+    }
+    let _ = persona.set_size(PhysicalSize::new(new_w, new_h));
+    // 对话窗若可见，按新尺寸重新贴附到角色附近。
+    if let Some(chat) = app.get_webview_window("chat") {
+        if chat.is_visible().unwrap_or(false) {
+            place_chat_bubble(app);
+        }
+    }
+}
+
 /// 打开（或聚焦）设置窗口
 #[tauri::command]
 async fn open_settings(app: AppHandle) -> Result<(), String> {
@@ -250,6 +300,12 @@ fn list_personas(engine: tauri::State<'_, engine::StateEngine>) -> Vec<PersonaIn
         .collect()
 }
 
+/// 当前角色 id（设置页角色列表高亮“当前”行用）
+#[tauri::command]
+fn get_current_persona_id(engine: tauri::State<'_, engine::StateEngine>) -> String {
+    engine.persona_id()
+}
+
 #[derive(serde::Serialize)]
 struct LlmConfigView {
     base_url: String,
@@ -277,6 +333,16 @@ fn mask_api_key(key: &str) -> String {
     )
 }
 
+/// 决定保存的 API Key：回传值恰好等于「现有 Key 的打码结果」且现有 Key 非空时，说明用户
+/// 未改动，沿用现有 Key；否则视为用户新输入（真实 Key 含 * 时也能被正确识别为新值保存）。
+fn decide_api_key(incoming: String, existing: &str) -> String {
+    if !existing.is_empty() && incoming == mask_api_key(existing) {
+        existing.to_string()
+    } else {
+        incoming
+    }
+}
+
 #[tauri::command]
 fn get_llm_config(app: AppHandle) -> LlmConfigView {
     let cfg = llm::load_config(&app);
@@ -300,12 +366,10 @@ fn save_llm_config(
 ) -> Result<(), String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    // 前端回传的是打码值（含 *，用户未重新输入）→ 沿用磁盘上已保存的 Key
-    let api_key = if api_key.contains('*') {
-        llm::load_config(&app).api_key
-    } else {
-        api_key
-    };
+    // 前端回传的是打码值（用户未重新输入）→ 沿用已保存的 Key。用“等于打码结果”精确比较，
+    // 而不是“含 *”：真实 Key 恰好含 * 时用 contains 会被误判为打码值而错误沿用旧 Key。
+    let existing = llm::load_config(&app).api_key;
+    let api_key = decide_api_key(api_key, &existing);
     let cfg = llm::LlmConfig {
         base_url,
         model,
@@ -335,9 +399,48 @@ fn set_passthrough(
     }
 }
 
+/// 读取全局缩放偏好（设置页回显当前档位）
+#[tauri::command]
+fn get_prefs(engine: tauri::State<'_, engine::StateEngine>) -> prefs::Prefs {
+    engine.prefs()
+}
+
+/// 设置全局缩放：clamp 校验、写盘、刷新显示尺寸缓存、重设窗口并广播新尺寸。
+/// 缩放作用于所有角色（全局），不改 persona.json 的基准 display_w/h。
+#[tauri::command]
+fn set_zoom(
+    app: AppHandle,
+    zoom: f64,
+    engine: tauri::State<'_, engine::StateEngine>,
+) -> Result<(), String> {
+    if !engine.apply_zoom(zoom) {
+        // 与当前值相同：无需写盘/重排（界面档位未变化）
+        return Ok(());
+    }
+    prefs::save_prefs(&app, &engine.prefs())?;
+    resize_persona_window(&app);
+    let (w, h) = engine.display_size();
+    let _ = app.emit("zoom-changed", engine::ZoomChanged { w, h });
+    Ok(())
+}
+
 #[tauri::command]
 fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+/// 前端在事件挂载完成后调用：把启动时的角色/状态/开场气泡广播给各窗口。
+/// setup 阶段 WebView 尚未注册监听，提前 broadcast 会被丢弃，因此推迟到前端就绪。
+#[tauri::command]
+fn frontend_ready(
+    engine: tauri::State<'_, engine::StateEngine>,
+    state: tauri::State<'_, AppState>,
+) {
+    // 用原子标志保证只广播一次：前端重载/重复调用时不重复弹开场气泡。
+    if state.frontend_ready.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    engine.broadcast_state();
 }
 
 /// 对话入口：组装 persona/state system prompt + 历史消息，调用大模型
@@ -388,6 +491,11 @@ async fn chat_send(
             let _ = app.emit("chat-delta", delta);
         })
         .await?;
+        if reply.trim().is_empty() {
+            // 第二次仍为空：不再把空字符串当正常回复返回（否则前端会把一条空 assistant 消息
+            // 写进 history，污染后续上下文）。改为报错走 catch：清掉打字、显示错误、撤回用户消息。
+            return Err("模型连续两次返回空回复，请检查模型或稍后重试".into());
+        }
     }
     let _ = app.emit(
         "bubble",
@@ -577,11 +685,19 @@ pub(crate) fn add_persona_menu_item(
     let item = MenuItem::with_id(app, format!("persona_{id}"), name, true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let state = app.state::<AppState>();
-    state
+    let old_item = state
         .persona_items
         .lock()
         .unwrap()
         .insert(id.to_string(), item.clone());
+    // 重复导入同一角色时，persona_items 虽然会覆盖旧菜单项，但旧项仍残留在“更换角色”
+    // 子菜单里，导致菜单出现两个同名项（删除时也只会移除一个）；这里先移除旧项，
+    // 保证 map 与子菜单始终一一对应（参考 remove_persona_menu_item 的做法）。
+    if let Some(old_item) = old_item {
+        if let Some(submenu) = state.persona_submenu.lock().unwrap().as_ref() {
+            let _ = submenu.remove(&old_item);
+        }
+    }
     if let Some(submenu) = state.persona_submenu.lock().unwrap().as_ref() {
         let _ = submenu.append(&item);
     }
@@ -603,4 +719,36 @@ pub(crate) fn remove_persona_menu_item(app: &AppHandle, id: &str) {
         let _ = submenu.remove(&item);
     }
     update_persona_menu_labels(app);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mask_api_key_masks_short_and_long() {
+        assert_eq!(mask_api_key(""), "");
+        assert_eq!(mask_api_key("short"), "****");
+        assert_eq!(mask_api_key("sk-1234567890abcdef"), "sk-****cdef");
+    }
+
+    #[test]
+    fn decide_api_key_reuses_only_exact_mask() {
+        let existing = "sk-1234567890abcdef";
+        // 回传与现有 Key 打码结果完全一致 → 沿用旧 Key（用户未改动）
+        assert_eq!(
+            decide_api_key(mask_api_key(existing).to_string(), existing),
+            existing.to_string()
+        );
+        // 回传一个恰好含 * 但并非打码结果的真实 Key → 视为新值保存（不被误判为打码）
+        assert_eq!(
+            decide_api_key("sk-12*34*567890".to_string(), existing),
+            "sk-12*34*567890".to_string()
+        );
+        // 现有 Key 为空 → 一律把回传值当作新值保存
+        assert_eq!(
+            decide_api_key("abc****wxyz".to_string(), ""),
+            "abc****wxyz".to_string()
+        );
+    }
 }

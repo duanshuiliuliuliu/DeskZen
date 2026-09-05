@@ -10,9 +10,12 @@ interface ChatReply {
 }
 
 interface PersonaConfig {
+  id: string;
   name: string;
   states: Record<string, { label: string }>;
 }
+
+type HistoryMessage = { role: "user" | "assistant"; content: string };
 
 const messages = document.getElementById("chat-messages") as HTMLDivElement;
 const form = document.getElementById("chat-form") as HTMLFormElement;
@@ -27,7 +30,7 @@ const attachImg = document.getElementById("chat-attach-img") as HTMLImageElement
 const attachRemove = document.getElementById("chat-attach-remove") as HTMLButtonElement;
 const win = getCurrentWindow();
 let persona: PersonaConfig | null = null;
-let history: { role: "user" | "assistant"; content: string }[] = [];
+let history: HistoryMessage[] = [];
 let sending = false;
 let pendingImage: string | null = null;
 let capturing = false;
@@ -72,6 +75,22 @@ function addMessage(
   }
   messages.appendChild(div);
   messages.scrollTop = messages.scrollHeight;
+}
+
+/** 把内存里的 history 逐条渲染到聊天区（user → 右侧，assistant → 左侧） */
+function renderHistoryMessages(): void {
+  for (const m of history) {
+    addMessage(m.role === "user" ? "user" : "bot", m.content);
+  }
+}
+
+/** 把当前 history 持久化到该角色名下；发送期间切过角色则丢弃（避免写串别人的历史） */
+function persistHistory(pid: string | undefined): void {
+  if (!pid) return;
+  if (persona?.id !== pid) return; // 会话已切到别的角色，丢弃这次保存
+  void invoke("save_chat_history", { personaId: pid, messages: history }).catch((err) => {
+    console.error("保存对话历史失败", err);
+  });
 }
 
 function addTypingIndicator(): HTMLDivElement {
@@ -122,6 +141,8 @@ async function readClipboardImage(file: File): Promise<string> {
 
 async function sendMessage(text: string, image: string | null = null): Promise<void> {
   if (sending) return;
+  // 用发送时的角色 id 持久化历史；期间切换了角色则由 persistHistory 跳过，避免写串。
+  const pid = persona?.id;
   const trimmed = text.trim();
   let question: string;
   if (image) {
@@ -179,11 +200,28 @@ async function sendMessage(text: string, image: string | null = null): Promise<v
     if (history.length > 20) {
       history = history.slice(history.length - 20);
     }
+    persistHistory(pid);
   } catch (err) {
     if (epoch !== chatEpoch) return; // 期间切换了角色，丢弃旧会话的错误
-    pending.textContent = `出错了：${String(err)}`;
-    pending.classList.remove("typing");
-    history.pop(); // 撤回本次用户消息，允许重试
+    if (streamStarted) {
+      // 已收到部分回复：把界面上的半截回复作为事实保留（末尾追加错误标注），
+      // history 保留用户消息并把半截回复记为 assistant，保证界面与上下文一致；
+      // 若此时 pop 用户消息，下一轮上下文会与界面对不上。
+      const partial = pending.textContent;
+      pending.textContent = `${partial}（回复中断：出错了）`;
+      pending.classList.remove("typing");
+      history.push({ role: "assistant", content: partial });
+      if (history.length > 20) {
+        history = history.slice(history.length - 20);
+      }
+      persistHistory(pid);
+    } else {
+      // 一个字都没收到：维持现状——显示错误并撤回本次用户消息，允许重试。
+      pending.textContent = `出错了：${String(err)}`;
+      pending.classList.remove("typing");
+      history.pop();
+      persistHistory(pid);
+    }
   } finally {
     unlistenDelta?.();
     unlistenReset?.();
@@ -259,10 +297,16 @@ try {
 if (persona) {
   titleEl.textContent = persona.name;
   input.placeholder = `和${persona.name}说点什么…`;
+  // 加载该角色各自持久化的对话历史并逐条渲染（启动首开不弹“已切换到”提示）
+  const h = await invoke<HistoryMessage[]>("load_chat_history", {
+    personaId: persona.id,
+  });
+  history = h;
+  renderHistoryMessages();
 }
 // 角色窗口可能切换了角色（对话窗是隐藏而非销毁），需同步标题与占位；
 // 同时清空旧角色的对话上下文，避免历史混入新角色的 system prompt
-void listen<PersonaConfig>("persona-changed", (e) => {
+void listen<PersonaConfig>("persona-changed", async (e) => {
   persona = e.payload;
   titleEl.textContent = persona.name;
   input.placeholder = `和${persona.name}说点什么…`;
@@ -275,5 +319,13 @@ void listen<PersonaConfig>("persona-changed", (e) => {
   tip.className = "msg msg-system";
   tip.textContent = `已切换到「${persona.name}」，开始新对话`;
   messages.appendChild(tip);
+  // 加载新角色各自持久化的历史；若加载期间又切了角色，丢弃这次过期结果
+  const h = await invoke<HistoryMessage[]>("load_chat_history", {
+    personaId: e.payload.id,
+  });
+  if (persona?.id !== e.payload.id) return;
+  history = h;
+  renderHistoryMessages();
+  void fitToContent();
 });
 void fitToContent();

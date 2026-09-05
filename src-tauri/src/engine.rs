@@ -12,6 +12,7 @@ use std::{
 use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
+use crate::llm::LlmMessage;
 
 /// 一个角色的完整配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -114,6 +115,13 @@ pub struct BubbleEvent {
     pub text: String,
 }
 
+/// 缩放变化后广播给前端的角色显示尺寸（已乘 zoom 的最终 pixel 尺寸）
+#[derive(Debug, Clone, Serialize)]
+pub struct ZoomChanged {
+    pub w: u32,
+    pub h: u32,
+}
+
 /// 内置角色：id -> 配置文件（编译期内嵌，运行时切换）
 const EMBEDDED_PERSONAS: &[(&str, &str)] = &[
     ("link", include_str!("../../resources/characters/link/persona.json")),
@@ -131,6 +139,8 @@ pub struct StateEngine {
     /// 当前角色的有效显示尺寸缓存：拖动/贴气泡时频繁读取，避免每次都克隆整个 persona
     /// 或对导入角色读磁盘做 image_dimensions。
     display_size: Arc<Mutex<(u32, u32)>>,
+    /// 全局缩放偏好（含 zoom）；放在引擎侧便于 switch_persona / get_persona_config 直接用。
+    prefs: Arc<Mutex<crate::prefs::Prefs>>,
     /// 后台节拍线程的唤醒信号：switch_persona / next_state 修改配置后 notify，
     /// 让线程立即醒来重算下一次切换时刻，避免睡到旧的 next_transition_at。
     wake_lock: Arc<Mutex<()>>,
@@ -163,7 +173,8 @@ impl StateEngine {
             .get("link")
             .cloned()
             .expect("缺少默认角色 link");
-        let display = effective_display_size(&persona);
+        let prefs = crate::prefs::load_prefs(&app);
+        let display = effective_display_size_zoomed(&persona, prefs.zoom);
         Self {
             app,
             personas: Arc::new(Mutex::new(personas)),
@@ -171,6 +182,7 @@ impl StateEngine {
             last_state: Arc::new(Mutex::new(None)),
             manual_state: Arc::new(Mutex::new(None)),
             display_size: Arc::new(Mutex::new(display)),
+            prefs: Arc::new(Mutex::new(prefs)),
             wake_lock: Arc::new(Mutex::new(())),
             wake_cond: Arc::new(Condvar::new()),
         }
@@ -211,6 +223,49 @@ impl StateEngine {
     /// 当前角色的有效显示尺寸（缓存值），供贴气泡等高频 UI 计算使用。
     pub fn display_size(&self) -> (u32, u32) {
         *self.display_size.lock().unwrap()
+    }
+
+    /// 当前缩放偏好（克隆），供 set_zoom / get_prefs 读取。
+    pub fn prefs(&self) -> crate::prefs::Prefs {
+        self.prefs.lock().unwrap().clone()
+    }
+
+    /// 应用全局缩放：clamp 校验（非 finite → 1.0，越界 → [0.5, 2.0]），更新内存 prefs 并刷新
+    /// display_size 缓存。返回是否真的发生变化（与当前相同则直接返回 false，避免无谓写盘/重排）。
+    pub fn apply_zoom(&self, zoom: f64) -> bool {
+        let zoom = if zoom.is_finite() {
+            zoom.clamp(crate::prefs::MIN_ZOOM, crate::prefs::MAX_ZOOM)
+        } else {
+            crate::prefs::default_zoom()
+        };
+        {
+            let mut p = self.prefs.lock().unwrap();
+            if p.zoom == zoom {
+                return false;
+            }
+            p.zoom = zoom;
+        }
+        self.refresh_display_size();
+        true
+    }
+
+    /// 重新计算当前角色的缩放后显示尺寸并写回缓存。各个锁按序获取、互不嵌套，
+    /// 符合项目“锁内不做耗时操作、先算后写”的约定，避免锁序问题。
+    pub fn refresh_display_size(&self) {
+        let zoom = self.prefs.lock().unwrap().zoom;
+        let persona = self.persona.lock().unwrap().clone();
+        *self.display_size.lock().unwrap() = effective_display_size_zoomed(&persona, zoom);
+    }
+
+    /// 返回给前端用的角色配置：display_w/display_h 替换为缩放后的显示尺寸（缓存值），
+    /// 其余字段保持基准语义。persona.json 本体（含 build_system_prompt 使用的
+    /// system_prompt/state 字段）不受影响，因此替换 display 不影响对话提示词。
+    pub fn persona_view(&self) -> PersonaConfig {
+        let mut p = self.persona();
+        let (w, h) = self.display_size();
+        p.display_w = w;
+        p.display_h = h;
+        p
     }
 
     /// 唤醒后台节拍线程：switch_persona / next_state 在修改 persona / manual_state 后调用，
@@ -255,6 +310,14 @@ impl StateEngine {
         if dir.exists() {
             std::fs::remove_dir_all(&dir).map_err(|e| format!("删除角色文件失败: {e}"))?;
         }
+        // 一并删除该角色的持久化对话历史（存在才删；删除失败不阻断主流程——避免“删角色后
+        // 重新导入同名角色想起上一世对话”的意外；极端下文件残留也不影响使用）。
+        if let Ok(conf) = self.app.path().app_config_dir() {
+            let history_file = conf.join("history").join(format!("{id}.json"));
+            if history_file.exists() {
+                let _ = std::fs::remove_file(&history_file);
+            }
+        }
         let name = self
             .personas
             .lock()
@@ -267,12 +330,26 @@ impl StateEngine {
 
     /// 所有可切换角色 (id, 显示名)
     pub fn list_personas(&self) -> Vec<(String, String)> {
-        self.personas
+        let mut sorted: Vec<(String, String)> = self
+            .personas
             .lock()
             .unwrap()
             .iter()
             .map(|(id, p)| (id.clone(), p.name.clone()))
-            .collect()
+            .collect();
+        // 直接遍历 HashMap 会让托盘“更换角色”菜单每次启动顺序随机；这里按
+        // 「内置角色在前（按内置列表固定顺序），导入角色按名称字典序」排序，让菜单稳定且更易找。
+        let embedded: Vec<&str> = EMBEDDED_PERSONAS.iter().map(|(id, _)| *id).collect();
+        sorted.sort_by(|a, b| {
+            let rank = |id: &str| embedded.iter().position(|e| *e == id);
+            match (rank(&a.0), rank(&b.0)) {
+                (Some(ai), Some(bi)) => ai.cmp(&bi),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.1.cmp(&b.1),
+            }
+        });
+        sorted
     }
 
     /// 运行时切换角色：更新配置与作息表，并广播事件让前端重新渲染
@@ -284,17 +361,20 @@ impl StateEngine {
             .get(id)
             .cloned()
             .ok_or_else(|| format!("角色不存在: {id}"))?;
+        let zoom = self.prefs.lock().unwrap().zoom;
+        let display = effective_display_size_zoomed(&persona, zoom);
         {
             let mut cur = self.persona.lock().unwrap();
             *cur = persona.clone();
             *self.last_state.lock().unwrap() = None;
             *self.manual_state.lock().unwrap() = None;
-            *self.display_size.lock().unwrap() = effective_display_size(&persona);
+            *self.display_size.lock().unwrap() = display;
         }
         // 修改完成后唤醒节拍线程，使新日程表立即生效（否则线程仍睡在旧 next_transition_at）。
         self.notify_wake();
         let state = self.resolve_state(&persona, chrono::Local::now());
-        let _ = app.emit("persona-changed", persona);
+        // 给前端的显示配置带 zoomed 尺寸，前端 applyPersona 据此零改动呈现缩放后的角色。
+        let _ = app.emit("persona-changed", self.persona_view());
         let _ = app.emit(
             "state-changed",
             StateChanged {
@@ -302,6 +382,8 @@ impl StateEngine {
                 previous: String::new(),
             },
         );
+        // 新角色缩放后尺寸可能不同：同步重设窗口并保持地板不动。
+        crate::resize_persona_window(&self.app);
         Ok(())
     }
 
@@ -309,7 +391,11 @@ impl StateEngine {
     pub fn broadcast_state(&self) {
         let persona = self.persona();
         let state = self.resolve_state(&persona, chrono::Local::now());
-        let _ = self.app.emit("persona-changed", persona.clone());
+        // 记录“该状态已广播过”，否则节拍线程醒来读到 last_state=None 会误判为状态变化，
+        // 再次 emit state-changed + 开场气泡，导致开局弹两次气泡。
+        *self.last_state.lock().unwrap() = Some(state.clone());
+        // 带 zoomed display 给前端，前端 applyPersona 不因广播而回到基准尺寸。
+        let _ = self.app.emit("persona-changed", self.persona_view());
         let _ = self.app.emit(
             "state-changed",
             StateChanged {
@@ -400,20 +486,12 @@ impl StateEngine {
             let persona = self.persona.lock().unwrap();
             let now = chrono::Local::now();
             let current = self.resolve_state(&persona, now);
-            let next = next_loop_state(&persona, &current);
-            // 到期时间：time 时段内 → 到该时段结束；否则若启用循环 → 到一个 slot；
-            // 都没有 → 无到期（手动锁定）。
-            let mins = now_minutes(&now);
-            let expire_at = if let Some(slot) = find_active_slot(&persona.schedule, mins) {
-                Some(slot_end_datetime(&now, slot))
-            } else {
-                let dur = loop_duration(&persona.schedule, &next);
-                if dur > 0 {
-                    Some(now + chrono::Duration::minutes(dur as i64))
-                } else {
-                    None
-                }
-            };
+            // states 为空（正常导入已在 petdex 侧校验，这里仅作防御）时没有可切换的下一状态，
+            // 停留在当前状态，避免进入后续手动覆盖逻辑时状态为空。
+            let next = next_loop_state(&persona, &current).unwrap_or_else(|| current.clone());
+            // 到期时间：time 时段内 → 到该时段结束；否则按 loop 时长；
+            // 都不适用（不在 loop/零时长）→ 30 分钟兜底，避免手动锁定永久卡死。
+            let expire_at = next_state_expire_at(&persona.schedule, &next, now);
             (next, expire_at, current)
         };
         *self.manual_state.lock().unwrap() = Some(ManualOverride {
@@ -436,12 +514,106 @@ impl StateEngine {
 
 #[tauri::command]
 pub fn get_persona_config(engine: tauri::State<'_, StateEngine>) -> PersonaConfig {
-    engine.persona()
+    // 返回带缩放后 display_w/h 的视图：前端 applyPersona 据此直接呈现缩放后的角色。
+    engine.persona_view()
 }
 
 #[tauri::command]
 pub fn get_current_state(engine: tauri::State<'_, StateEngine>) -> String {
     engine.current_state()
+}
+
+/// 对话历史文件最大加载字节数：超过则放弃加载（防手工塞入巨型文件拖慢启动）
+const HISTORY_MAX_BYTES: u64 = 5 * 1024 * 1024;
+/// 持久化保留的最近消息条数（与前端裁剪一致，双保险）
+const HISTORY_MAX_MESSAGES: usize = 20;
+
+/// 角色 id 合法性：仅字母数字与连字符（防路径穿越；与 remove_persona 校验一致）
+fn is_valid_history_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// 历史角色白名单：只保留 user/assistant，其余（如 system）丢弃
+fn is_valid_history_role(role: &str) -> bool {
+    role == "user" || role == "assistant"
+}
+
+/// 规范化历史：先过滤无用角色，再保留最近 20 条（与前端裁剪一致，双保险）。
+fn sanitize_history(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
+    let mut kept: Vec<LlmMessage> = messages
+        .into_iter()
+        .filter(|m| is_valid_history_role(&m.role))
+        .collect();
+    if kept.len() > HISTORY_MAX_MESSAGES {
+        kept = kept.split_off(kept.len() - HISTORY_MAX_MESSAGES);
+    }
+    kept
+}
+
+/// 历史文件路径：%APPDATA%\com.deskzen.app\history\{persona_id}.json
+fn history_file_path(app: &AppHandle, persona_id: &str) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    Ok(dir.join("history").join(format!("{persona_id}.json")))
+}
+
+/// 对话历史记录格式（含版本号，便于将来扩展）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HistoryRecord {
+    #[serde(default = "default_history_version")]
+    version: u32,
+    messages: Vec<LlmMessage>,
+}
+
+fn default_history_version() -> u32 {
+    1
+}
+
+/// 加载某角色的持久化对话历史；任何失败（目录/文件不存在、解析失败、文件过大）都返回空 Vec，
+/// 不报错——历史缺失不应打断对话。
+#[tauri::command]
+pub fn load_chat_history(app: AppHandle, persona_id: String) -> Vec<LlmMessage> {
+    if !is_valid_history_id(&persona_id) {
+        return Vec::new();
+    }
+    let Ok(path) = history_file_path(&app, &persona_id) else { return Vec::new() };
+    let Ok(meta) = std::fs::metadata(&path) else { return Vec::new() };
+    if meta.len() > HISTORY_MAX_BYTES {
+        return Vec::new();
+    }
+    let Ok(content) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let Ok(record) = serde_json::from_str::<HistoryRecord>(&content) else { return Vec::new() };
+    record
+        .messages
+        .into_iter()
+        .filter(|m| is_valid_history_role(&m.role))
+        .collect()
+}
+
+/// 保存某角色的持久化对话历史：id 校验、消息规范化（角色白名单 + 最近 20 条）、临时文件 + rename 原子写。
+#[tauri::command]
+pub fn save_chat_history(
+    app: AppHandle,
+    persona_id: String,
+    messages: Vec<LlmMessage>,
+) -> Result<(), String> {
+    if !is_valid_history_id(&persona_id) {
+        return Err("角色 id 不合法".into());
+    }
+    let messages = sanitize_history(messages);
+    let record = HistoryRecord {
+        version: 1,
+        messages,
+    };
+    let path = history_file_path(&app, &persona_id)?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| "历史文件路径不合法".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建历史目录失败: {e}"))?;
+    let tmp = dir.join(format!("{persona_id}.json.tmp"));
+    let json = serde_json::to_string_pretty(&record).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn now_minutes(now: &chrono::DateTime<chrono::Local>) -> u32 {
@@ -511,6 +683,27 @@ fn loop_duration(schedule: &ScheduleConfig, state: &str) -> u32 {
         .unwrap_or(0)
 }
 
+/// 计算右键“下个状态”被手动锁定后的到期时间：
+/// - 命中的 time 时段 → 到该时段结束；
+/// - 否则命中 loop 条目 → 到该条目时长；
+/// - 否则（不在 loop，或条目时长恰为 0，无法给出自然到期点）→ 用 30 分钟兜底。
+/// 兜底避免状态被手动锁死到切角色/重启；语义与 next_transition_at 的 30s 兜底一致（都是防久睡/锁死）。
+fn next_state_expire_at(
+    schedule: &ScheduleConfig,
+    next: &str,
+    now: chrono::DateTime<chrono::Local>,
+) -> Option<chrono::DateTime<chrono::Local>> {
+    if let Some(slot) = find_active_slot(schedule, now_minutes(&now)) {
+        return Some(slot_end_datetime(&now, slot));
+    }
+    let dur = loop_duration(schedule, next);
+    if dur > 0 {
+        Some(now + chrono::Duration::minutes(dur as i64))
+    } else {
+        Some(now + chrono::Duration::minutes(30))
+    }
+}
+
 /// 自动状态：time 时段优先，否则循环，最后兜底
 fn automatic_state(persona: &PersonaConfig, mins: u32) -> String {
     if let Some(slot) = find_active_slot(&persona.schedule, mins) {
@@ -549,22 +742,38 @@ pub fn effective_display_size(persona: &PersonaConfig) -> (u32, u32) {
     (w.max(1), h.max(1))
 }
 
+/// 在基准显示尺寸上乘全局缩放 zoom，并四舍五入、下限 1px，防止缩出 0 尺寸。
+/// persona.json 的 display_w/display_h 保持基准语义不动，缩放只在读取/渲染时叠加。
+pub fn effective_display_size_zoomed(persona: &PersonaConfig, zoom: f64) -> (u32, u32) {
+    let (w, h) = effective_display_size(persona);
+    (
+        ((w as f64 * zoom).round() as u32).max(1),
+        ((h as f64 * zoom).round() as u32).max(1),
+    )
+}
+
 /// “下一个状态”：优先取循环列表中的下一个；当前不在循环列表则取循环第一个；
 /// 若无循环配置，按 spritesheet 行号排序取下一个。
-fn next_loop_state(persona: &PersonaConfig, current: &str) -> String {
+fn next_loop_state(persona: &PersonaConfig, current: &str) -> Option<String> {
     let entries = persona.schedule.loop_entries();
     if !entries.is_empty() {
         let idx = entries.iter().position(|e| e.state == current);
         return match idx {
-            Some(i) => entries[(i + 1) % entries.len()].state.clone(),
-            None => entries[0].state.clone(),
+            Some(i) => Some(entries[(i + 1) % entries.len()].state.clone()),
+            None => Some(entries[0].state.clone()),
         };
     }
     // 无循环配置 → 按行号排序兜底
     let mut keys: Vec<&String> = persona.states.keys().collect();
     keys.sort_by_key(|k| persona.states[*k].row);
+    // states 为空时 keys.len() 为 0，`(pos + 1) % keys.len()` 会除零 panic；
+    // 且该调用发生在持有 persona 锁的上下文，panic 会毒化 Mutex 导致后续连环崩溃。
+    // 这里直接返回 None，由调用方安全跳过（正常导入已在 petdex 侧校验 states 非空）。
+    if keys.is_empty() {
+        return None;
+    }
     let pos = keys.iter().position(|k| *k == current).unwrap_or(0);
-    keys[(pos + 1) % keys.len()].clone()
+    Some(keys[(pos + 1) % keys.len()].clone())
 }
 
 /// 计算 time 时段的结束时刻（用于手动覆盖到期）
@@ -768,13 +977,46 @@ mod tests {
     fn next_loop_state_cycles() {
         let p = link();
         let entries = p.schedule.loop_entries();
-        assert_eq!(next_loop_state(&p, &entries[0].state), entries[1].state);
+        assert_eq!(
+            next_loop_state(&p, &entries[0].state),
+            Some(entries[1].state.clone())
+        );
         assert_eq!(
             next_loop_state(&p, &entries[entries.len() - 1].state),
-            entries[0].state
+            Some(entries[0].state.clone())
         );
         // 当前不在循环列表（如未知状态）→ 取循环第一个
-        assert_eq!(next_loop_state(&p, "unknown"), entries[0].state);
+        assert_eq!(
+            next_loop_state(&p, "unknown"),
+            Some(entries[0].state.clone())
+        );
+    }
+
+    #[test]
+    fn next_loop_state_empty_states_is_none() {
+        // 空 states 且无循环配置时会落入 keys 兜底分支，历史上 `(pos+1) % keys.len()`
+        // 会除零 panic；现在应安全返回 None。
+        let mut p = link();
+        p.states.clear();
+        p.schedule.r#loop.clear();
+        assert_eq!(next_loop_state(&p, "Awake"), None);
+    }
+
+    #[test]
+    fn next_state_expire_zero_duration_uses_30min_fallback() {
+        // 命中零时长 loop 条目时没有自然到期点，历史上 expire_at=None 会把该状态永久锁死；
+        // 现在应回退为 30 分钟兜底，而不是 None。
+        let mut p = link();
+        p.schedule.time.clear();
+        let state = p.schedule.r#loop.first().expect("link 应有循环").state.clone();
+        p.schedule.r#loop = vec![LoopEntry {
+            state: state.clone(),
+            duration: 0,
+        }];
+        let now = chrono::Local::now();
+        let exp = next_state_expire_at(&p.schedule, &state, now)
+            .expect("零时长条目应回退 30 分钟，而非 None");
+        assert_eq!((exp - now).num_minutes(), 30);
     }
 
     #[test]
@@ -812,6 +1054,57 @@ mod tests {
             .join("../resources/characters/link/spritesheet.webp");
         p.spritesheet = sprite.to_string_lossy().into_owned();
         assert_eq!(effective_display_size(&p), (192, 208));
+    }
+
+    #[test]
+    fn zoomed_display_scales_base_and_min_one() {
+        let p = link();
+        // 2.0 翻倍
+        assert_eq!(
+            effective_display_size_zoomed(&p, 2.0),
+            (p.display_w * 2, p.display_h * 2)
+        );
+        // 0.5 减半（125 * 0.5 = 62.5，四舍五入为 63）
+        assert_eq!(
+            effective_display_size_zoomed(&p, 0.5),
+            (58, 63)
+        );
+        // zoom=0 时也至少保留 1px，避免缩成 0 导致不可见
+        let mut tiny = link();
+        tiny.display_w = 1;
+        tiny.display_h = 1;
+        assert_eq!(effective_display_size_zoomed(&tiny, 0.0), (1, 1));
+    }
+
+    #[test]
+    fn history_id_validation() {
+        assert!(is_valid_history_id("link"));
+        assert!(is_valid_history_id("petdex-doraemon"));
+        assert!(!is_valid_history_id(""));
+        // 路径穿越 / 非法字符应被拒绝（与 remove_persona 校验一致）
+        assert!(!is_valid_history_id("../etc/passwd"));
+        assert!(!is_valid_history_id("abc/de"));
+    }
+
+    #[test]
+    fn history_trims_to_last_20_and_filters_roles() {
+        let mut msgs: Vec<LlmMessage> = (0..30)
+            .map(|i| LlmMessage {
+                role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
+                content: crate::llm::Content::Text(format!("m{i}")),
+            })
+            .collect();
+        // 追加一条 system，应被角色白名单过滤掉
+        msgs.push(LlmMessage {
+            role: "system".into(),
+            content: crate::llm::Content::Text("sys".into()),
+        });
+        let kept = sanitize_history(msgs);
+        assert_eq!(kept.len(), 20);
+        assert!(kept.iter().all(|m| is_valid_history_role(&m.role)));
+        assert_eq!(kept.first().unwrap().content.as_text(), "m10");
+        assert_eq!(kept.first().unwrap().role, "user");
+        assert_eq!(kept.last().unwrap().content.as_text(), "m29");
     }
 
     /// 构造今天指定 HH:MM（秒为 0）的本地时刻，供 next_transition_at 测试用。
