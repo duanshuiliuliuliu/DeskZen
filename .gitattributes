@@ -1,0 +1,22 @@
+# Normalize line endings: text files are stored as LF in the repo,
+# and checked out with the platform's native endings (CRLF on Windows).
+* text=auto
+
+# Windows shell scripts should stay CRLF when checked out.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets: never apply text conversion.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.exe binary
+*.dll binary
+*.pdb binary
