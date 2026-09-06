@@ -19,10 +19,11 @@ use tauri::{
 };
 
 /// 角色精灵在角色窗口内的底距（与 styles.css `.character { bottom: 24px }` 同步）
-const SPRITE_BOTTOM: i32 = 24;
-/// 角色窗口显示余量：水平每侧 ≥30px（气泡可能比精灵宽，需留横向空间）、顶部 ≥50px（气泡显示空间）。
-const H_MARGIN: i32 = 30;
-const TOP_MARGIN: i32 = 50;
+pub(crate) const SPRITE_BOTTOM: i32 = 24;
+/// 角色窗口显示余量：水平每侧 ≥30px（气泡可能比精灵宽，需留横向空间）、顶部 ≥96px
+/// （气泡显示空间：需容纳 3 行气泡 ≈73px + 与精灵的间隙 9px，两行气泡在 50px 时代会被窗口顶部截断）。
+pub(crate) const H_MARGIN: i32 = 30;
+pub(crate) const TOP_MARGIN: i32 = 96;
 /// 窗口最小逻辑尺寸：与 tauri.conf.json 初始 240×280 一致，保证基准缩放下气泡不溢出、尺寸稳定。
 const MIN_WINDOW_W: i32 = 240;
 const MIN_WINDOW_H: i32 = 280;
@@ -78,13 +79,18 @@ pub fn run() {
             let persona = app.get_webview_window("persona").unwrap();
             // 默认停在主显示器右下角（给任务栏留出空间），避免遮挡居中的对话窗口
             if let Some(monitor) = app.primary_monitor()? {
-                let pos = monitor.position();
-                let size = monitor.size();
+                let wa = monitor.work_area();
                 if let Ok(p_size) = persona.outer_size() {
-                    let _ = persona.set_position(PhysicalPosition::new(
-                        pos.x + size.width as i32 - p_size.width as i32 - 40,
-                        pos.y + size.height as i32 - p_size.height as i32 - 70,
-                    ));
+                    let mut x = wa.position.x + wa.size.width as i32 - p_size.width as i32 - 40;
+                    let mut y = wa.position.y + wa.size.height as i32 - p_size.height as i32 - 70;
+                    // 钳制到主显示器工作区，避免窗口（尤其高 zoom 放大后）大于屏幕时为负坐标。
+                    let min_x = wa.position.x;
+                    let min_y = wa.position.y;
+                    let max_x = (min_x + wa.size.width as i32 - p_size.width as i32).max(min_x);
+                    let max_y = (min_y + wa.size.height as i32 - p_size.height as i32).max(min_y);
+                    x = x.clamp(min_x, max_x);
+                    y = y.clamp(min_y, max_y);
+                    let _ = persona.set_position(PhysicalPosition::new(x, y));
                 }
             }
             persona.show()?;
@@ -247,8 +253,19 @@ pub(crate) fn resize_persona_window(app: &AppHandle) {
     let new_w = (win_w_log * scale).round() as i32;
     let new_h = (win_h_log * scale).round() as i32;
     if let (Ok(old_pos), Ok(old_size)) = (persona.outer_position(), persona.outer_size()) {
-        let new_x = old_pos.x + (old_size.width as i32 - new_w) / 2;
-        let new_y = old_pos.y + (old_size.height as i32 - new_h);
+        let mut new_x = old_pos.x + (old_size.width as i32 - new_w) / 2;
+        let mut new_y = old_pos.y + (old_size.height as i32 - new_h);
+        // 底边锚定、水平居中的语义在未超屏时保持不变；把最终位置钳制到当前显示器工作区，避免窗口出屏。
+        if let Ok(Some(monitor)) = persona.current_monitor() {
+            let wa = monitor.work_area();
+            let min_x = wa.position.x;
+            let min_y = wa.position.y;
+            // 窗口比工作区还大时 max < min，用 max(min) 保证 clamp 区间合法（贴 wa 左/上边）。
+            let max_x = (min_x + wa.size.width as i32 - new_w).max(min_x);
+            let max_y = (min_y + wa.size.height as i32 - new_h).max(min_y);
+            new_x = new_x.clamp(min_x, max_x);
+            new_y = new_y.clamp(min_y, max_y);
+        }
         let _ = persona.set_position(PhysicalPosition::new(new_x, new_y));
     }
     let _ = persona.set_size(PhysicalSize::new(new_w, new_h));

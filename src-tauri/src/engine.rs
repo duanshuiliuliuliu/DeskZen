@@ -174,7 +174,11 @@ impl StateEngine {
             .cloned()
             .expect("缺少默认角色 link");
         let prefs = crate::prefs::load_prefs(&app);
-        let display = effective_display_size_zoomed(&persona, prefs.zoom);
+        let mut display = effective_display_size_zoomed(&persona, prefs.zoom);
+        // 启动即按显示器工作区等比适配，避免离谱 display / 高 zoom 时窗口出屏（取不到工作区则不钳制）。
+        if let Some((mw, mh)) = work_area_content_limit(&app) {
+            display = fit_display_size_proportional(display.0, display.1, mw, mh);
+        }
         Self {
             app,
             personas: Arc::new(Mutex::new(personas)),
@@ -254,7 +258,12 @@ impl StateEngine {
     pub fn refresh_display_size(&self) {
         let zoom = self.prefs.lock().unwrap().zoom;
         let persona = self.persona.lock().unwrap().clone();
-        *self.display_size.lock().unwrap() = effective_display_size_zoomed(&persona, zoom);
+        let mut display = effective_display_size_zoomed(&persona, zoom);
+        // 此刻未持有任何锁：取工作区（UI 查询不做锁内操作），按工作区等比适配后写回缓存。
+        if let Some((mw, mh)) = work_area_content_limit(&self.app) {
+            display = fit_display_size_proportional(display.0, display.1, mw, mh);
+        }
+        *self.display_size.lock().unwrap() = display;
     }
 
     /// 返回给前端用的角色配置：display_w/display_h 替换为缩放后的显示尺寸（缓存值），
@@ -362,17 +371,23 @@ impl StateEngine {
             .cloned()
             .ok_or_else(|| format!("角色不存在: {id}"))?;
         let zoom = self.prefs.lock().unwrap().zoom;
-        let display = effective_display_size_zoomed(&persona, zoom);
+        let mut display = effective_display_size_zoomed(&persona, zoom);
+        // 切换后同样按工作区等比适配，避免新角色尺寸过大出屏。
+        if let Some((mw, mh)) = work_area_content_limit(&self.app) {
+            display = fit_display_size_proportional(display.0, display.1, mw, mh);
+        }
+        // 新角色的当前状态：切换角色本身不算“状态变化”，预先记录 last_state，
+        // 避免节拍线程醒来误判为状态切换而弹出气泡（气泡逻辑与切换角色解耦）。
+        let state = self.resolve_state(&persona, chrono::Local::now());
         {
             let mut cur = self.persona.lock().unwrap();
             *cur = persona.clone();
-            *self.last_state.lock().unwrap() = None;
+            *self.last_state.lock().unwrap() = Some(state.clone());
             *self.manual_state.lock().unwrap() = None;
             *self.display_size.lock().unwrap() = display;
         }
         // 修改完成后唤醒节拍线程，使新日程表立即生效（否则线程仍睡在旧 next_transition_at）。
         self.notify_wake();
-        let state = self.resolve_state(&persona, chrono::Local::now());
         // 给前端的显示配置带 zoomed 尺寸，前端 applyPersona 据此零改动呈现缩放后的角色。
         let _ = app.emit("persona-changed", self.persona_view());
         let _ = app.emit(
@@ -752,6 +767,41 @@ pub fn effective_display_size_zoomed(persona: &PersonaConfig, zoom: f64) -> (u32
     )
 }
 
+/// 等比适配显示尺寸到上限内（保持宽高比，绝不独立钳制宽高导致拉伸）。
+/// 超限时取 `min(max_w/w, max_h/h)` 作为缩放比例，四舍五入且下限 1px；未超限原样返回。
+/// max 为 0 时按 1 处理，避免除零。
+pub fn fit_display_size_proportional(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if w <= max_w && h <= max_h {
+        return (w, h);
+    }
+    let mw = max_w.max(1) as f64;
+    let mh = max_h.max(1) as f64;
+    let scale = (mw / w as f64).min(mh / h as f64);
+    (
+        ((w as f64 * scale).round() as u32).max(1),
+        ((h as f64 * scale).round() as u32).max(1),
+    )
+}
+
+/// 从显示器工作区推导角色显示内容上限（逻辑像素）：工作区换算成逻辑像素后减去窗口余量，
+/// 保证 persona 窗口整体（含边距、气泡区）放得进工作区。取不到窗口/显示器时不钳制（返回 None）。
+fn work_area_content_limit(app: &AppHandle) -> Option<(u32, u32)> {
+    let win = app.get_webview_window("persona")?;
+    let scale = win.scale_factor().ok()?;
+    let monitor = win
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| app.primary_monitor().ok().flatten())?;
+    let wa = monitor.work_area();
+    // 物理工作区 ÷ scale 得逻辑像素，再减去水平两侧与底距/顶部余量
+    let max_w = (wa.size.width as f64 / scale - (2 * crate::H_MARGIN) as f64).max(1.0) as u32;
+    let max_h =
+        (wa.size.height as f64 / scale - (crate::SPRITE_BOTTOM + crate::TOP_MARGIN) as f64)
+            .max(1.0) as u32;
+    Some((max_w, max_h))
+}
+
 /// “下一个状态”：优先取循环列表中的下一个；当前不在循环列表则取循环第一个；
 /// 若无循环配置，按 spritesheet 行号排序取下一个。
 fn next_loop_state(persona: &PersonaConfig, current: &str) -> Option<String> {
@@ -1074,6 +1124,22 @@ mod tests {
         tiny.display_w = 1;
         tiny.display_h = 1;
         assert_eq!(effective_display_size_zoomed(&tiny, 0.0), (1, 1));
+    }
+
+    #[test]
+    fn fit_display_size_proportional_respects_bounds() {
+        // 未超限：原样返回
+        assert_eq!(fit_display_size_proportional(100, 50, 200, 200), (100, 50));
+        // 宽超限：按宽等比缩，高随之变小（保持宽高比 2:1）
+        assert_eq!(fit_display_size_proportional(200, 100, 100, 500), (100, 50));
+        // 高超限：按高等比缩，宽随之变小（保持 1:2）
+        assert_eq!(fit_display_size_proportional(50, 200, 500, 100), (25, 100));
+        // 双超限：方形入方形，等比缩到内切
+        assert_eq!(fit_display_size_proportional(400, 400, 200, 200), (200, 200));
+        // 上限为 0：不除零，按 max(1) 兜底
+        assert_eq!(fit_display_size_proportional(1, 1, 0, 0), (1, 1));
+        // 极小值下限：等比缩后高度约 0.3px，须钳制到 1px，避免缩成 0
+        assert_eq!(fit_display_size_proportional(1000, 1, 300, 300), (300, 1));
     }
 
     #[test]
