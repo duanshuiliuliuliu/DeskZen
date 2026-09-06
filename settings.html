@@ -32,8 +32,11 @@
           <section class="settings-group">
             <h2>桌面表现</h2>
             <label class="settings-row settings-check">
+              <span class="check-label">
+                <span class="check-label-main">点击穿透</span>
+                <small class="check-label-sub">鼠标穿过角色窗口，不挡住下层操作</small>
+              </span>
               <input type="checkbox" id="passthrough" />
-              <span>点击穿透（鼠标穿过角色窗口，不挡住下层操作）</span>
             </label>
             <label class="settings-row settings-row-zoom">
               <span>角色缩放</span>
@@ -52,6 +55,7 @@
 
           <section class="settings-group">
             <h2>角色导入</h2>
+            <div class="settings-sub">从 Petdex 导入</div>
             <label class="settings-field">
               <span>Petdex 链接</span>
               <input id="petdex-url" type="url" placeholder="https://petdex.dev/pets/doraemon" autocomplete="off" />
@@ -79,7 +83,6 @@
           </header>
 
           <section class="settings-group">
-            <h2>模型网关</h2>
             <label class="settings-field">
               <span>接口地址</span>
               <input id="base-url" type="text" />

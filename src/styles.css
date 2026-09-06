@@ -452,11 +452,12 @@ body.settings-body {
 }
 
 .settings-logo {
-  font-size: 16px;
+  font-size: 13px;          /* 76px 窄栏内 DeskZen 需更小字号才能完整显示；14px 仍显紧张，取 13px 保险 */
   font-weight: 700;
-  letter-spacing: 1px;
+  letter-spacing: 0.5px;
   color: var(--sidebar-brand);
-  padding: 0 14px 16px;
+  padding: 0 8px 14px;
+  text-align: center;       /* 窄栏内居中 */
   border-bottom: 1px solid var(--sidebar-line);
 }
 
@@ -474,7 +475,7 @@ body.settings-body {
   background: transparent;
   color: var(--sidebar-nav);
   font-size: 13px;
-  text-align: left;
+  text-align: center;       /* 窄栏下按钮文字居中，是常见形态 */
   cursor: pointer;
   transition:
     background 0.15s ease,
@@ -693,11 +694,74 @@ body.settings-body {
 .settings-check {
   display: flex;
   align-items: center;
-  justify-content: flex-start; /* 覆盖 settings-row 的 space-between：勾选框+文字靠左成组 */
+  justify-content: space-between; /* 标签在左、checkbox 在右 */
   gap: 8px;
   font-size: 13px;
   color: var(--text-primary);
   margin-bottom: 10px; /* 与 settings-row 一致，保证勾选行与下一行等距 */
+}
+
+/* 点击穿透行：左侧为主文字 + 小字说明两行，checkbox 靠右 */
+.check-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.check-label-main {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.check-label-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* 点击穿透：把原生勾选框画成滑动开关（外观与「角色缩放」下拉框视觉协调，逻辑仍走 checkbox checked）
+   —— appearance:none 隐藏自绘外观，用 ::after 画滑块；选中=金色轨道+滑块右，未选中=米白轨道+滑块左 */
+.settings-check input[type="checkbox"] {
+  appearance: none;
+  width: 44px;
+  height: 24px;
+  /* 缩放下拉框宽 110px、开关宽 44px：(110−44)/2=33px，右移 33px 使两者中心落在同一竖轴上，观感对齐 */
+  margin-right: 33px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  position: relative;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+  flex-shrink: 0;
+}
+
+.settings-check input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+  transition: transform 0.15s ease;
+}
+
+.settings-check input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.settings-check input[type="checkbox"]:checked::after {
+  transform: translateX(20px);
+}
+
+.settings-check input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .settings-field {

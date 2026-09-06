@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -149,7 +150,7 @@ async function refreshImported(): Promise<void> {
     const actions = document.createElement("span");
     actions.className = "imported-actions";
 
-    // 内置角色（id 无 petdex-/local- 前缀）只显示名字；当前角色加「当前」徽标
+    // 当前角色加「当前」徽标
     if (isCurrent) {
       const badge = document.createElement("span");
       badge.className = "imported-current";
@@ -157,25 +158,27 @@ async function refreshImported(): Promise<void> {
       actions.appendChild(badge);
     }
 
-    if (isImported) {
-      const use = document.createElement("button");
-      use.type = "button";
-      use.className = "imported-use";
-      use.textContent = "设为当前";
-      use.disabled = isCurrent;
-      use.addEventListener("click", async () => {
-        use.disabled = true;
-        try {
-          await invoke("switch_persona", { id: p.id });
-          setImportedStatus(`已切换至「${p.name}」`);
-        } catch (err) {
-          setImportedStatus(`切换失败：${String(err)}`, true);
-        } finally {
-          await refreshImported();
-        }
-      });
-      actions.appendChild(use);
+    // 所有角色（内置 + 导入）都可设为当前，避免切到导入角色后无法回到内置角色；当前角色按钮禁用
+    const use = document.createElement("button");
+    use.type = "button";
+    use.className = "imported-use";
+    use.textContent = "设为当前";
+    use.disabled = isCurrent;
+    use.addEventListener("click", async () => {
+      use.disabled = true;
+      try {
+        await invoke("switch_persona", { id: p.id });
+        // 成功时不显示提示：角色列表高亮本身就是反馈
+      } catch (err) {
+        setImportedStatus(`切换失败：${String(err)}`, true);
+      } finally {
+        await refreshImported();
+      }
+    });
+    actions.appendChild(use);
 
+    // 仅导入角色可删除（内置角色不可删除）
+    if (isImported) {
       const del = document.createElement("button");
       del.type = "button";
       del.className = "imported-del";
@@ -339,6 +342,12 @@ void getCurrentWebview()
 
 // 页面卸载时释放拖放监听，避免窗口关闭/重建后残留监听器
 window.addEventListener("pagehide", () => unlistenDragDrop?.());
+
+// 外部切换角色（托盘“更换角色”等）后同步列表高亮；忽略完整 persona 负载，仅刷新即可
+void listen("persona-changed", () => {
+  setImportedStatus(""); // 清空旧提示，避免残留「已切换至」误导
+  void refreshImported();
+});
 
 void refresh();
 void refreshImported();

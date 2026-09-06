@@ -270,7 +270,8 @@ async fn open_settings(app: AppHandle) -> Result<(), String> {
     }
     WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
         .title("DeskZen · 设置")
-        .inner_size(560.0, 620.0)
+        // 侧边栏收窄到 76px 后内容区相应变窄，默认宽度从 560 收到 480 以匹配表单内容（min_inner_size 420 不动）。
+        .inner_size(480.0, 620.0)
         .min_inner_size(420.0, 500.0)
         .center()
         // 先隐藏创建，等前端就绪后再显示，避免 WebView2 未渲染时闪现空白窗口。
@@ -287,7 +288,10 @@ fn switch_persona(
     id: String,
     engine: tauri::State<'_, engine::StateEngine>,
 ) -> Result<(), String> {
-    engine.switch_persona(&app, &id)
+    engine.switch_persona(&app, &id)?;
+    // 设置页等 IPC 入口切换后也要同步托盘“更换角色”子菜单的 ✓ 标记（与托盘路径行为一致）
+    update_persona_menu_labels(&app);
+    Ok(())
 }
 
 /// 列出全部可切换角色（设置界面据此展示已导入角色）
