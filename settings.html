@@ -103,6 +103,13 @@
               <span>最大输出 Token</span>
               <input id="max-tokens" type="number" min="64" max="4096" step="1" />
             </label>
+            <label class="settings-row settings-check">
+              <span class="check-label">
+                <span class="check-label-main">AI 每日气泡</span>
+                <small class="check-label-sub">每天用大模型为各状态生成新台词；未配置大模型时使用角色自带文案</small>
+              </span>
+              <input type="checkbox" id="ai-bubbles" />
+            </label>
             <button id="llm-save" class="btn btn-primary">保存模型配置</button>
             <p class="settings-hint">发送图片时，请使用支持图像输入的视觉模型。</p>
           </section>

@@ -16,6 +16,7 @@ const model = $("model") as HTMLInputElement;
 const apiKey = $("api-key") as HTMLInputElement;
 const temperature = $("temperature") as HTMLInputElement;
 const maxTokens = $("max-tokens") as HTMLInputElement;
+const aiBubbles = $("ai-bubbles") as HTMLInputElement;
 const statusEl = $("settings-status");
 const passthrough = $("passthrough") as HTMLInputElement;
 const personaZoom = $("persona-zoom") as HTMLSelectElement;
@@ -218,8 +219,9 @@ async function refresh(): Promise<void> {
   maxTokens.value = String(cfg.max_tokens);
   updateMaskHint();
   passthrough.checked = await invoke<boolean>("get_passthrough");
-  const prefs = await invoke<{ zoom: number }>("get_prefs");
+  const prefs = await invoke<{ zoom: number; ai_bubbles: boolean }>("get_prefs");
   personaZoom.value = String(closestZoom(prefs.zoom));
+  aiBubbles.checked = prefs.ai_bubbles;
 }
 
 saveBtn.addEventListener("click", async () => {
@@ -240,6 +242,18 @@ saveBtn.addEventListener("click", async () => {
 
 passthrough.addEventListener("change", () => {
   void invoke("set_passthrough", { enabled: passthrough.checked });
+});
+
+aiBubbles.addEventListener("change", async () => {
+  try {
+    await invoke("set_ai_bubbles", { enabled: aiBubbles.checked });
+    statusEl.textContent = aiBubbles.checked
+      ? "已开启 AI 每日气泡"
+      : "已关闭 AI 每日气泡";
+  } catch (err) {
+    statusEl.textContent = `设置失败：${String(err)}`;
+    aiBubbles.checked = !aiBubbles.checked;
+  }
 });
 
 personaZoom.addEventListener("change", async () => {

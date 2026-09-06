@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         {Arc, Condvar, Mutex},
     },
     thread,
@@ -141,6 +141,10 @@ pub struct StateEngine {
     display_size: Arc<Mutex<(u32, u32)>>,
     /// 全局缩放偏好（含 zoom）；放在引擎侧便于 switch_persona / get_persona_config 直接用。
     prefs: Arc<Mutex<crate::prefs::Prefs>>,
+    /// 每日 AI 气泡缓存（当前角色的）：气泡广播时优先取当日生成文案，取不到回退原配置。
+    gen_bubbles: Arc<Mutex<crate::genbubble::GenState>>,
+    /// 每日气泡生成任务是否在跑（防止重复起任务）
+    pub(crate) generating: Arc<AtomicBool>,
     /// 后台节拍线程的唤醒信号：switch_persona / next_state 修改配置后 notify，
     /// 让线程立即醒来重算下一次切换时刻，避免睡到旧的 next_transition_at。
     wake_lock: Arc<Mutex<()>>,
@@ -174,6 +178,7 @@ impl StateEngine {
             .cloned()
             .expect("缺少默认角色 link");
         let prefs = crate::prefs::load_prefs(&app);
+        let gen_cache = crate::genbubble::load(&app, "link");
         let mut display = effective_display_size_zoomed(&persona, prefs.zoom);
         // 启动即按显示器工作区等比适配，避免离谱 display / 高 zoom 时窗口出屏（取不到工作区则不钳制）。
         if let Some((mw, mh)) = work_area_content_limit(&app) {
@@ -186,6 +191,11 @@ impl StateEngine {
             last_state: Arc::new(Mutex::new(None)),
             manual_state: Arc::new(Mutex::new(None)),
             display_size: Arc::new(Mutex::new(display)),
+            gen_bubbles: Arc::new(Mutex::new(crate::genbubble::GenState {
+                persona_id: "link".into(),
+                cache: gen_cache,
+            })),
+            generating: Arc::new(AtomicBool::new(false)),
             prefs: Arc::new(Mutex::new(prefs)),
             wake_lock: Arc::new(Mutex::new(())),
             wake_cond: Arc::new(Condvar::new()),
@@ -232,6 +242,87 @@ impl StateEngine {
     /// 当前缩放偏好（克隆），供 set_zoom / get_prefs 读取。
     pub fn prefs(&self) -> crate::prefs::Prefs {
         self.prefs.lock().unwrap().clone()
+    }
+
+    // ---- 每日 AI 气泡：缓存读写与触发（见 genbubble.rs）----
+
+    /// 广播气泡文案：优先当日 AI 生成内容，取不到回退角色自带 bubbles。
+    fn bubble_text(&self, state: &str, cfg: &StateConfig) -> Option<String> {
+        crate::genbubble::today_bubble(&self.gen_bubbles, state)
+            .or_else(|| pick(&cfg.bubbles))
+    }
+
+    /// 某状态今天是否已有生成台词
+    pub(crate) fn gen_has_today(&self, state: &str) -> bool {
+        crate::genbubble::today_bubble(&self.gen_bubbles, state).is_some()
+    }
+
+    /// 某状态当天是否已标记失败（当天不再重试）
+    pub(crate) fn gen_failed(&self, persona_id: &str, state: &str) -> bool {
+        let g = self.gen_bubbles.lock().unwrap();
+        g.persona_id == persona_id && g.cache.failed.iter().any(|s| s == state)
+    }
+
+    /// 生成历史快照（查重用）
+    pub(crate) fn gen_history(&self) -> Vec<String> {
+        self.gen_bubbles.lock().unwrap().cache.history.clone()
+    }
+
+    /// 记录一个状态当日生成成功：更新内存缓存并落盘（切换角色后到达的迟到结果直接丢弃）
+    pub(crate) fn record_gen_bubble(&self, persona_id: &str, state: &str, text: &str) {
+        let (cache, changed) = {
+            let mut g = self.gen_bubbles.lock().unwrap();
+            if g.persona_id != persona_id {
+                return;
+            }
+            g.cache.date = crate::genbubble::today_str();
+            g.cache.by_state.insert(state.to_string(), text.to_string());
+            g.cache.history.push(text.to_string());
+            let keep = g.cache.history.len().saturating_sub(crate::genbubble::HISTORY_KEEP);
+            if keep > 0 {
+                g.cache.history.drain(..keep);
+            }
+            (g.cache.clone(), true)
+        };
+        if changed {
+            let _ = crate::genbubble::save(&self.app, persona_id, &cache);
+        }
+    }
+
+    /// 记录一个状态当日生成失败（不写历史、只标记，当天回退原配置）
+    pub(crate) fn record_gen_failure(&self, persona_id: &str, state: &str) {
+        let (cache, changed) = {
+            let mut g = self.gen_bubbles.lock().unwrap();
+            if g.persona_id != persona_id || g.cache.failed.iter().any(|s| s == state) {
+                return;
+            }
+            g.cache.date = crate::genbubble::today_str();
+            g.cache.failed.push(state.to_string());
+            (g.cache.clone(), true)
+        };
+        if changed {
+            let _ = crate::genbubble::save(&self.app, persona_id, &cache);
+        }
+    }
+
+    /// 是否需要（重新）生成当日气泡：缓存归属角色不符 / 日期过期 / 有状态既未生成也未标记失败
+    pub(crate) fn gen_needs_refresh(&self) -> bool {
+        let persona = self.persona.lock().unwrap();
+        let g = self.gen_bubbles.lock().unwrap();
+        if g.persona_id != persona.id {
+            return true;
+        }
+        if g.cache.date != crate::genbubble::today_str() {
+            return true;
+        }
+        persona.states.keys().any(|s| {
+            !g.cache.by_state.contains_key(s) && !g.cache.failed.iter().any(|f| f == s)
+        })
+    }
+
+    /// 设置页开关：写内存 prefs（落盘由调用方 save_prefs 完成）
+    pub(crate) fn set_ai_bubbles(&self, enabled: bool) {
+        self.prefs.lock().unwrap().ai_bubbles = enabled;
     }
 
     /// 应用全局缩放：clamp 校验（非 finite → 1.0，越界 → [0.5, 2.0]），更新内存 prefs 并刷新
@@ -386,6 +477,15 @@ impl StateEngine {
             *self.manual_state.lock().unwrap() = None;
             *self.display_size.lock().unwrap() = display;
         }
+        // 气泡缓存整体切到新角色（内存换绑 + 磁盘加载），并视条件补跑当日生成
+        {
+            let cache = crate::genbubble::load(&self.app, id);
+            *self.gen_bubbles.lock().unwrap() = crate::genbubble::GenState {
+                persona_id: id.to_string(),
+                cache,
+            };
+        }
+        crate::genbubble::maybe_spawn_daily(app);
         // 修改完成后唤醒节拍线程，使新日程表立即生效（否则线程仍睡在旧 next_transition_at）。
         self.notify_wake();
         // 给前端的显示配置带 zoomed 尺寸，前端 applyPersona 据此零改动呈现缩放后的角色。
@@ -419,7 +519,7 @@ impl StateEngine {
             },
         );
         if let Some(cfg) = persona.states.get(&state) {
-            if let Some(text) = pick(&cfg.bubbles) {
+            if let Some(text) = self.bubble_text(&state, cfg) {
                 let _ = self.app.emit("bubble", BubbleEvent { state, text });
             }
         }
@@ -430,6 +530,7 @@ impl StateEngine {
     pub fn start(&self) {
         let app = self.app.clone();
         let persona = Arc::clone(&self.persona);
+        let gen_bubbles = Arc::clone(&self.gen_bubbles);
         let last_state = Arc::clone(&self.last_state);
         let manual_state = Arc::clone(&self.manual_state);
         let wake_lock = Arc::clone(&self.wake_lock);
@@ -484,11 +585,16 @@ impl StateEngine {
                     },
                 );
                 if let Some(cfg) = persona.states.get(&state) {
-                    if let Some(text) = pick(&cfg.bubbles) {
+                    // 优先当日 AI 生成文案，取不到回退角色自带 bubbles
+                    let text = crate::genbubble::today_bubble(&gen_bubbles, &state)
+                        .or_else(|| pick(&cfg.bubbles));
+                    if let Some(text) = text {
                         let _ = app.emit("bubble", BubbleEvent { state, text });
                     }
                 }
             }
+            // 跨天/启动后补齐当日 AI 气泡（幂等，条件不满足时内部直接返回）
+            crate::genbubble::maybe_spawn_daily(&app);
         });
     }
 
@@ -544,7 +650,7 @@ const HISTORY_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const HISTORY_MAX_MESSAGES: usize = 20;
 
 /// 角色 id 合法性：仅字母数字与连字符（防路径穿越；与 remove_persona 校验一致）
-fn is_valid_history_id(id: &str) -> bool {
+pub(crate) fn is_valid_history_id(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 

@@ -1,4 +1,5 @@
 mod engine;
+mod genbubble;
 mod llm;
 mod petdex;
 mod prefs;
@@ -75,6 +76,9 @@ pub fn run() {
             // 按持久化的 zoom 调整窗口尺寸，使重启后缩放立即生效（精灵尺寸由前端按 zoomed 值渲染）。
             resize_persona_window(app.handle());
 
+            // 启动即检查并补跑当日 AI 气泡生成（开关关闭/未配 Key/已生成完时内部直接返回）
+            genbubble::maybe_spawn_daily(app.handle());
+
             // 等前端就绪后再显示，避免透明窗口启动白屏闪烁
             let persona = app.get_webview_window("persona").unwrap();
             // 默认停在主显示器右下角（给任务栏留出空间），避免遮挡居中的对话窗口
@@ -128,6 +132,7 @@ pub fn run() {
             set_passthrough,
             get_prefs,
             set_zoom,
+            set_ai_bubbles,
             get_current_persona_id,
             show_persona_menu,
             capture_screen,
@@ -448,6 +453,21 @@ fn set_zoom(
 #[tauri::command]
 fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+/// 设置 AI 每日气泡开关：写 prefs 并落盘；开启时视条件立即补跑当日生成。
+#[tauri::command]
+fn set_ai_bubbles(
+    app: AppHandle,
+    enabled: bool,
+    engine: tauri::State<'_, engine::StateEngine>,
+) -> Result<(), String> {
+    engine.set_ai_bubbles(enabled);
+    prefs::save_prefs(&app, &engine.prefs())?;
+    if enabled {
+        genbubble::maybe_spawn_daily(&app);
+    }
+    Ok(())
 }
 
 /// 前端在事件挂载完成后调用：把启动时的角色/状态/开场气泡广播给各窗口。
