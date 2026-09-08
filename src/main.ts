@@ -25,11 +25,9 @@ interface PersonaConfig {
 
 interface StateChangedPayload {
   state: string;
-  previous: string;
 }
 
 interface BubblePayload {
-  state: string;
   text: string;
 }
 
@@ -186,7 +184,7 @@ async function init(): Promise<void> {
   });
 
   // 所有事件监听就绪、初始配置也已拉取完毕后，再通知 Rust 广播启动事件
-  //（persona-changed / state-changed / 开场气泡），否则广播发生在监听器注册之前会被丢弃。
+  //（persona-changed / state-changed），否则广播发生在监听器注册之前会被丢弃。
   await invoke("frontend_ready");
 }
 

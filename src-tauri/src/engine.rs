@@ -139,12 +139,10 @@ pub struct ManualOverride {
 #[derive(Debug, Clone, Serialize)]
 pub struct StateChanged {
     pub state: String,
-    pub previous: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BubbleEvent {
-    pub state: String,
     pub text: String,
 }
 
@@ -528,7 +526,7 @@ impl StateEngine {
                 ambient.last_shown_at = Some(now);
                 ambient.recent.push_back(now);
             }
-            let _ = self.app.emit("bubble", BubbleEvent { state, text });
+            let _ = self.app.emit("bubble", BubbleEvent { text });
         }
         self.schedule_ambient_bubble(now);
     }
@@ -707,13 +705,7 @@ impl StateEngine {
         self.notify_wake();
         // 给前端的显示配置带 zoomed 尺寸，前端 applyPersona 据此零改动呈现缩放后的角色。
         let _ = app.emit("persona-changed", self.persona_view());
-        let _ = app.emit(
-            "state-changed",
-            StateChanged {
-                state,
-                previous: String::new(),
-            },
-        );
+        let _ = app.emit("state-changed", StateChanged { state });
         // 新角色缩放后尺寸可能不同：同步重设窗口并保持地板不动。
         crate::resize_persona_window(&self.app);
         Ok(())
@@ -728,13 +720,7 @@ impl StateEngine {
         *self.last_state.lock().unwrap() = Some(state.clone());
         // 带 zoomed display 给前端，前端 applyPersona 不因广播而回到基准尺寸。
         let _ = self.app.emit("persona-changed", self.persona_view());
-        let _ = self.app.emit(
-            "state-changed",
-            StateChanged {
-                state,
-                previous: String::new(),
-            },
-        );
+        let _ = self.app.emit("state-changed", StateChanged { state });
         // 排出启动后的第一条环境气泡（不立即弹出，给角色一段安静期）
         self.schedule_ambient_bubble(chrono::Local::now());
     }
@@ -797,15 +783,8 @@ impl StateEngine {
             let mut last = last_state.lock().unwrap();
             let mut state_changed = false;
             if last.as_deref() != Some(state.as_str()) {
-                let previous = last.clone().unwrap_or_default();
                 *last = Some(state.clone());
-                let _ = app.emit(
-                    "state-changed",
-                    StateChanged {
-                        state: state.clone(),
-                        previous,
-                    },
-                );
+                let _ = app.emit("state-changed", StateChanged { state });
                 state_changed = true;
             }
             drop(last);
@@ -826,7 +805,7 @@ impl StateEngine {
     pub fn next_state(&self) -> String {
         // 先在作用域内读取 persona 并算出下一个状态/到期时刻，随后释放 persona 锁，
         // 再写覆盖并 notify（避免在持有 persona 锁时再锁 wake_lock）。
-        let (next, expire_at, current) = {
+        let (next, expire_at) = {
             let persona = self.persona.lock().unwrap();
             let now = chrono::Local::now();
             let current = self.resolve_state(&persona, now);
@@ -836,7 +815,7 @@ impl StateEngine {
             // 到期时间：time 时段内 → 到该时段结束；否则按 loop 时长；
             // 都不适用（不在 loop/零时长）→ 30 分钟兜底，避免手动锁定永久卡死。
             let expire_at = next_state_expire_at(&persona.schedule, &next, now);
-            (next, expire_at, current)
+            (next, expire_at)
         };
         *self.manual_state.lock().unwrap() = Some(ManualOverride {
             state: next.clone(),
@@ -845,13 +824,7 @@ impl StateEngine {
         *self.last_state.lock().unwrap() = Some(next.clone());
         // 新的手动覆盖带到期时间 → 唤醒线程，使该到期时刻尽早接管。
         self.notify_wake();
-        let _ = self.app.emit(
-            "state-changed",
-            StateChanged {
-                state: next.clone(),
-                previous: current,
-            },
-        );
+        let _ = self.app.emit("state-changed", StateChanged { state: next.clone() });
         // 手动覆盖改写了“下一次切换时刻”（last_state 已预先登记，节拍线程不会再触发
         // 状态变化分支），气泡需按新状态的剩余时长/话痨程度就地重排。
         self.schedule_ambient_bubble(chrono::Local::now());

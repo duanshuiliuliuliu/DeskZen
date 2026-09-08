@@ -6,7 +6,6 @@ import "./styles.css";
 
 interface ChatReply {
   reply: string;
-  state: string;
 }
 
 interface PersonaConfig {

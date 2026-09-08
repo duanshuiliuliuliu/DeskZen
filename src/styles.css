@@ -132,21 +132,6 @@ body.chat-body {
   -webkit-user-select: none;
 }
 
-.chat-avatar {
-  width: 26px;
-  height: 26px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: rgba(255, 250, 238, 0.92);
-  color: #8a6428;
-  font-size: 13px;
-  font-weight: 700;
-  box-shadow: inset 0 0 0 1px rgba(190, 150, 80, 0.35);
-}
-
 .chat-title {
   flex: 1;
   min-width: 0;

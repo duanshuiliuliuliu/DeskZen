@@ -46,7 +46,6 @@ pub struct AppState {
 #[derive(serde::Serialize)]
 struct ChatReply {
     reply: String,
-    state: String,
 }
 
 #[derive(serde::Serialize)]
@@ -470,7 +469,7 @@ fn set_ai_bubbles(
     Ok(())
 }
 
-/// 前端在事件挂载完成后调用：把启动时的角色/状态/开场气泡广播给各窗口。
+/// 前端在事件挂载完成后调用：把启动时的角色/状态广播给各窗口，并排出第一条环境气泡。
 /// setup 阶段 WebView 尚未注册监听，提前 broadcast 会被丢弃，因此推迟到前端就绪。
 #[tauri::command]
 fn frontend_ready(
@@ -540,7 +539,7 @@ async fn chat_send(
             return Err("模型连续两次返回空回复，请检查模型或稍后重试".into());
         }
     }
-    Ok(ChatReply { reply, state })
+    Ok(ChatReply { reply })
 }
 
 /// 点击「📷」：截取当前屏幕并返回 base64 data URL，供前端作为预览、待用户发送。
@@ -624,13 +623,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 let persona_id = id.trim_start_matches("persona_").to_string();
                 let engine = app.state::<engine::StateEngine>();
                 if let Err(e) = engine.switch_persona(app, &persona_id) {
-                    let _ = app.emit(
-                        "bubble",
-                        engine::BubbleEvent {
-                            state: "Awake".into(),
-                            text: e,
-                        },
-                    );
+                    let _ = app.emit("bubble", engine::BubbleEvent { text: e });
                 }
                 update_persona_menu_labels(app);
             }
