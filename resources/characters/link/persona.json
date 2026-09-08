@@ -29,7 +29,8 @@
         "去救公主的路上～",
         "要不要一起去打败灾厄？",
         "我是勇者"
-      ]
+      ],
+      "talkativeness": "normal"
     },
     "motorcycle": {
       "label": "骑摩托车",
@@ -40,7 +41,8 @@
         "海拉鲁大陆兜风中～",
         "要不要一起去冒险？",
         "管他什么勇者不勇者呢"
-      ]
+      ],
+      "talkativeness": "chatty"
     },
     "idle": {
       "label": "休息中",
@@ -51,7 +53,8 @@
         "休息中～",
         "好累,睡一会吧",
         "想梦到塞尔达公主"
-      ]
+      ],
+      "talkativeness": "normal"
     },
     "eat": {
       "label": "吃苹果",
@@ -62,7 +65,8 @@
         "吃苹果中～",
         "好甜,再吃一口",
         "等会再摘几个"
-      ]
+      ],
+      "talkativeness": "chatty"
     },
     "fight": {
       "label": "战斗中",
@@ -73,7 +77,8 @@
         "战斗中～",
         "敌人来了！",
         "吃我一剑！"
-      ]
+      ],
+      "talkativeness": "quiet"
     },
     "sleep": {
       "label": "睡觉中",
@@ -84,7 +89,8 @@
         "Zzz...",
         "塞..尔..达..",
         "米..法.."
-      ]
+      ],
+      "talkativeness": "mute"
     }
   },
   "schedule": {

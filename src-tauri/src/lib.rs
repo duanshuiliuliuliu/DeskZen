@@ -492,6 +492,8 @@ async fn chat_send(
     engine: tauri::State<'_, engine::StateEngine>,
     clipboard_image: Option<String>,
 ) -> Result<ChatReply, String> {
+    // 记录聊天互动：随后数分钟内抑制环境气泡（即使本轮回复失败，用户也在互动中）
+    engine.record_chat_activity();
     let state = engine.current_state();
     let cfg = llm::load_config(&app);
     let persona = engine.persona();
@@ -538,13 +540,6 @@ async fn chat_send(
             return Err("模型连续两次返回空回复，请检查模型或稍后重试".into());
         }
     }
-    let _ = app.emit(
-        "bubble",
-        engine::BubbleEvent {
-            state: state.clone(),
-            text: "收到！".into(),
-        },
-    );
     Ok(ChatReply { reply, state })
 }
 

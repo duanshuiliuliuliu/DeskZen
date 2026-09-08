@@ -526,6 +526,7 @@ fn default_states() -> HashMap<String, StateConfig> {
             frames: 6,
             frame_ms: 180,
             bubbles: vec!["嘿嘿，我在待机中～".into(), "要不要一起玩？".into(), "我超厉害的！".into()],
+            talkativeness: "chatty".into(),
         },
     );
     states.insert(
@@ -536,6 +537,7 @@ fn default_states() -> HashMap<String, StateConfig> {
             frames: 8,
             frame_ms: 120,
             bubbles: vec!["向右冲！".into(), "跑起来咯！".into()],
+            talkativeness: "quiet".into(),
         },
     );
     states.insert(
@@ -546,6 +548,7 @@ fn default_states() -> HashMap<String, StateConfig> {
             frames: 8,
             frame_ms: 120,
             bubbles: vec!["向左冲！".into(), "嗖——".into()],
+            talkativeness: "quiet".into(),
         },
     );
     states.insert(
@@ -556,6 +559,7 @@ fn default_states() -> HashMap<String, StateConfig> {
             frames: 4,
             frame_ms: 160,
             bubbles: vec!["嗨！你好呀！".into(), "挥手挥手～".into()],
+            talkativeness: "chatty".into(),
         },
     );
     states.insert(
@@ -566,6 +570,7 @@ fn default_states() -> HashMap<String, StateConfig> {
             frames: 5,
             frame_ms: 140,
             bubbles: vec!["跳高高！".into(), "嘿嘿，接住！".into()],
+            talkativeness: "quiet".into(),
         },
     );
     states.insert(
@@ -576,6 +581,7 @@ fn default_states() -> HashMap<String, StateConfig> {
             frames: 8,
             frame_ms: 130,
             bubbles: vec!["哎呀，摔了一跤…".into(), "呜哇，失败了！".into()],
+            talkativeness: "normal".into(),
         },
     );
     states.insert(
@@ -586,6 +592,7 @@ fn default_states() -> HashMap<String, StateConfig> {
             frames: 6,
             frame_ms: 220,
             bubbles: vec!["我在等什么呢…".into(), "（等ing）".into()],
+            talkativeness: "chatty".into(),
         },
     );
     states.insert(
@@ -596,6 +603,7 @@ fn default_states() -> HashMap<String, StateConfig> {
             frames: 6,
             frame_ms: 130,
             bubbles: vec!["跑跑跑！".into(), "冲刺！".into()],
+            talkativeness: "quiet".into(),
         },
     );
     states.insert(
@@ -606,6 +614,7 @@ fn default_states() -> HashMap<String, StateConfig> {
             frames: 6,
             frame_ms: 200,
             bubbles: vec!["复习功课中…".into(), "这个字怎么写来着？".into()],
+            talkativeness: "quiet".into(),
         },
     );
     states

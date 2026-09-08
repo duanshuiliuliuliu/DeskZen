@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -44,6 +44,30 @@ pub struct SystemPromptConfig {
     pub state_guidelines: HashMap<String, String>,
 }
 
+/// 状态的话痨程度：决定该状态下环境气泡的期望间隔倍率
+/// （chatty ×0.5 / normal ×1.0 / quiet ×2.0 / mute 不弹）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Talkativeness {
+    Chatty,
+    #[default]
+    Normal,
+    Quiet,
+    Mute,
+}
+
+impl Talkativeness {
+    /// 宽松解析：未知值按 normal 处理——persona.json 可能被手改，
+    /// 不能因一个非法字段让整个角色解析失败。
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "chatty" => Self::Chatty,
+            "quiet" => Self::Quiet,
+            "mute" => Self::Mute,
+            _ => Self::Normal,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StateConfig {
     /// 状态的中文显示名（对话窗头部）
@@ -56,6 +80,15 @@ pub struct StateConfig {
     pub frame_ms: u64,
     /// 该状态下的气泡文本池
     pub bubbles: Vec<String>,
+    /// 话痨程度："chatty"|"normal"|"quiet"|"mute"；缺省或未知值按 normal
+    #[serde(default)]
+    pub talkativeness: String,
+}
+
+impl StateConfig {
+    pub fn talkativeness(&self) -> Talkativeness {
+        Talkativeness::parse(&self.talkativeness)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -115,6 +148,52 @@ pub struct BubbleEvent {
     pub text: String,
 }
 
+/// 环境气泡调度状态（与状态引擎同生命周期，不持久化）
+#[derive(Debug, Default)]
+struct AmbientBubbles {
+    /// 下一条气泡的预定时刻；None 表示当前状态不弹（mute）
+    next_at: Option<chrono::DateTime<chrono::Local>>,
+    /// 上一条气泡实际弹出时刻（硬性最小间隔用）
+    last_shown_at: Option<chrono::DateTime<chrono::Local>>,
+    /// 最近 1 小时内的弹出时刻（小时上限，滑动窗口）
+    recent: VecDeque<chrono::DateTime<chrono::Local>>,
+    /// 最近一次用户发消息时刻（聊天后抑制窗口用）
+    last_chat_at: Option<chrono::DateTime<chrono::Local>>,
+    /// 洗牌袋：state -> 本轮剩余未弹文案（取完一轮后重洗）
+    bags: HashMap<String, VecDeque<String>>,
+    /// 各状态上一条弹出的文案（跨轮防重复）
+    last_text: HashMap<String, String>,
+}
+
+/// 期望间隔 E（分钟）的钳制范围：E = clamp(D/2 × 话痨倍率, MIN, MAX)
+const BUBBLE_E_CLAMP_MIN: f64 = 5.0;
+const BUBBLE_E_CLAMP_MAX: f64 = 60.0;
+/// 单次间隔下限（分钟）：任何情况下 min_gap 不低于此值
+const BUBBLE_GAP_FLOOR_MIN: i64 = 4;
+/// 两条气泡间的硬性最小间隔（分钟）
+const BUBBLE_HARD_MIN_MIN: i64 = 5;
+/// 每小时气泡上限（滑动窗口）
+const BUBBLE_HOURLY_CAP: usize = 4;
+/// 聊天后的气泡抑制窗口（分钟）
+const CHAT_SUPPRESS_MIN: i64 = 3;
+/// 剩余时长不可得时用于推导间隔的兜底 D（分钟）
+const BUBBLE_FALLBACK_REMAINING_MIN: i64 = 30;
+
+/// 由「距下一次状态切换的剩余时长 D（分钟）」与话痨程度推导单次间隔范围 (min, max)（分钟）。
+/// mute 返回 None（该状态不弹气泡）。normal 状态下 E = D/2，即平均每个状态周期弹约两条。
+fn bubble_gap_range(remaining_min: i64, t: Talkativeness) -> Option<(i64, i64)> {
+    let m = match t {
+        Talkativeness::Mute => return None,
+        Talkativeness::Chatty => 0.5,
+        Talkativeness::Normal => 1.0,
+        Talkativeness::Quiet => 2.0,
+    };
+    let e = ((remaining_min.max(1) as f64) / 2.0 * m).clamp(BUBBLE_E_CLAMP_MIN, BUBBLE_E_CLAMP_MAX);
+    let min = ((e * 0.6).round() as i64).max(BUBBLE_GAP_FLOOR_MIN);
+    let max = ((e * 1.4).round() as i64).max(min);
+    Some((min, max))
+}
+
 /// 缩放变化后广播给前端的角色显示尺寸（已乘 zoom 的最终 pixel 尺寸）
 #[derive(Debug, Clone, Serialize)]
 pub struct ZoomChanged {
@@ -143,6 +222,8 @@ pub struct StateEngine {
     prefs: Arc<Mutex<crate::prefs::Prefs>>,
     /// 每日 AI 气泡缓存（当前角色的）：气泡广播时优先取当日生成文案，取不到回退原配置。
     gen_bubbles: Arc<Mutex<crate::genbubble::GenState>>,
+    /// 环境气泡调度状态：随机自言自语的排期、限频与洗牌袋（见 schedule_ambient_bubble）
+    ambient: Arc<Mutex<AmbientBubbles>>,
     /// 每日气泡生成任务是否在跑（防止重复起任务）
     pub(crate) generating: Arc<AtomicBool>,
     /// 后台节拍线程的唤醒信号：switch_persona / next_state 修改配置后 notify，
@@ -195,6 +276,7 @@ impl StateEngine {
                 persona_id: "link".into(),
                 cache: gen_cache,
             })),
+            ambient: Arc::new(Mutex::new(AmbientBubbles::default())),
             generating: Arc::new(AtomicBool::new(false)),
             prefs: Arc::new(Mutex::new(prefs)),
             wake_lock: Arc::new(Mutex::new(())),
@@ -246,15 +328,9 @@ impl StateEngine {
 
     // ---- 每日 AI 气泡：缓存读写与触发（见 genbubble.rs）----
 
-    /// 广播气泡文案：优先当日 AI 生成内容，取不到回退角色自带 bubbles。
-    fn bubble_text(&self, state: &str, cfg: &StateConfig) -> Option<String> {
-        crate::genbubble::today_bubble(&self.gen_bubbles, state)
-            .or_else(|| pick(&cfg.bubbles))
-    }
-
     /// 某状态今天是否已有生成台词
     pub(crate) fn gen_has_today(&self, state: &str) -> bool {
-        crate::genbubble::today_bubble(&self.gen_bubbles, state).is_some()
+        crate::genbubble::today_pool(&self.gen_bubbles, state).is_some()
     }
 
     /// 某状态当天是否已标记失败（当天不再重试）
@@ -268,16 +344,22 @@ impl StateEngine {
         self.gen_bubbles.lock().unwrap().cache.history.clone()
     }
 
-    /// 记录一个状态当日生成成功：更新内存缓存并落盘（切换角色后到达的迟到结果直接丢弃）
-    pub(crate) fn record_gen_bubble(&self, persona_id: &str, state: &str, text: &str) {
+    /// 记录一个状态当日生成成功（一批台词）：更新内存缓存并落盘
+    /// （切换角色后到达的迟到结果直接丢弃）
+    pub(crate) fn record_gen_bubble(&self, persona_id: &str, state: &str, texts: &[String]) {
+        if texts.is_empty() {
+            return;
+        }
         let (cache, changed) = {
             let mut g = self.gen_bubbles.lock().unwrap();
             if g.persona_id != persona_id {
                 return;
             }
             g.cache.date = crate::genbubble::today_str();
-            g.cache.by_state.insert(state.to_string(), text.to_string());
-            g.cache.history.push(text.to_string());
+            g.cache
+                .by_state
+                .insert(state.to_string(), texts.to_vec());
+            g.cache.history.extend(texts.iter().cloned());
             let keep = g.cache.history.len().saturating_sub(crate::genbubble::HISTORY_KEEP);
             if keep > 0 {
                 g.cache.history.drain(..keep);
@@ -323,6 +405,132 @@ impl StateEngine {
     /// 设置页开关：写内存 prefs（落盘由调用方 save_prefs 完成）
     pub(crate) fn set_ai_bubbles(&self, enabled: bool) {
         self.prefs.lock().unwrap().ai_bubbles = enabled;
+    }
+
+    // ---- 环境气泡：随机自言自语（与状态切换解耦，机制见 README「主动交互与防打扰机制」）----
+
+    /// 记录一次用户聊天互动（chat_send 入口调用）：随后数分钟内抑制环境气泡
+    pub(crate) fn record_chat_activity(&self) {
+        self.ambient.lock().unwrap().last_chat_at = Some(chrono::Local::now());
+    }
+
+    /// 按「当前状态的话痨程度 + 距下一次状态切换的剩余时长」重排下一条气泡时刻。
+    /// 启动、状态切换、右键“下个状态”、切换角色、每次弹出/抑制后都会调用。
+    /// mute 状态排为 None（不弹）；其余状态在 [min_gap, max_gap] 内均匀取一个时刻。
+    fn schedule_ambient_bubble(&self, now: chrono::DateTime<chrono::Local>) {
+        let persona = self.persona.lock().unwrap().clone();
+        let state = self.resolve_state(&persona, now);
+        let manual = self.manual_state.lock().unwrap().clone();
+        let remaining = (next_transition_at(&persona, &manual, &now) - now).num_minutes();
+        // 剩余时长不可得（如完全无日程配置时 next_transition_at 的兜底只有 30s）时，
+        // 按 30 分钟的周期长度推导间隔，避免短周期把气泡排得过密。
+        let remaining = if remaining <= 0 {
+            BUBBLE_FALLBACK_REMAINING_MIN
+        } else {
+            remaining
+        };
+        let talkativeness = persona
+            .states
+            .get(&state)
+            .map(|s| s.talkativeness())
+            .unwrap_or_default();
+        let next = bubble_gap_range(remaining, talkativeness)
+            .map(|(min, max)| now + chrono::Duration::minutes(rng_range_i64(min, max)));
+        self.ambient.lock().unwrap().next_at = next;
+    }
+
+    /// 抑制判断：角色隐藏 / 对话窗打开 / 刚聊过天——命中时气泡推迟而非取消。
+    /// UI 可见性查询不做锁内操作，仅在锁外调用。
+    fn bubble_suppressed(&self, now: &chrono::DateTime<chrono::Local>) -> bool {
+        if let Some(win) = self.app.get_webview_window("persona") {
+            if !win.is_visible().unwrap_or(false) {
+                return true;
+            }
+        }
+        if let Some(chat) = self.app.get_webview_window("chat") {
+            if chat.is_visible().unwrap_or(false) {
+                return true;
+            }
+        }
+        if let Some(t) = self.ambient.lock().unwrap().last_chat_at {
+            if *now - t < chrono::Duration::minutes(CHAT_SUPPRESS_MIN) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 频率护栏：硬性最小间隔 + 每小时上限（滑动窗口）
+    fn bubble_rate_limited(&self, now: &chrono::DateTime<chrono::Local>) -> bool {
+        let mut ambient = self.ambient.lock().unwrap();
+        let cutoff = *now - chrono::Duration::hours(1);
+        while ambient.recent.front().is_some_and(|t| *t < cutoff) {
+            ambient.recent.pop_front();
+        }
+        if ambient.recent.len() >= BUBBLE_HOURLY_CAP {
+            return true;
+        }
+        if let Some(t) = ambient.last_shown_at {
+            if *now - t < chrono::Duration::minutes(BUBBLE_HARD_MIN_MIN) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 取当前状态的下一条气泡文案：洗牌袋逐条取，取完一轮后用文案池重洗。
+    /// 池来源：当日 AI 生成台词（优先）/ 角色自带 bubbles（兜底，未配 Key 也照常弹出）。
+    fn next_ambient_text(&self, state: &str, cfg: &StateConfig) -> Option<String> {
+        // 先看袋里还有没有剩余（只锁 ambient）
+        {
+            let mut ambient = self.ambient.lock().unwrap();
+            if let Some(bag) = ambient.bags.get_mut(state) {
+                if let Some(text) = bag.pop_front() {
+                    ambient.last_text.insert(state.to_string(), text.clone());
+                    return Some(text);
+                }
+            }
+        }
+        // 袋空：组装新池（此时不持 ambient 锁，避免与 gen_bubbles 锁嵌套）
+        let pool = crate::genbubble::today_pool(&self.gen_bubbles, state)
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| cfg.bubbles.clone());
+        if pool.is_empty() {
+            return None;
+        }
+        let mut ambient = self.ambient.lock().unwrap();
+        let mut bag = refill_bag(pool, ambient.last_text.get(state).map(String::as_str));
+        let text = bag.pop_front()?;
+        ambient.bags.insert(state.to_string(), bag);
+        ambient.last_text.insert(state.to_string(), text.clone());
+        Some(text)
+    }
+
+    /// 气泡到期处理：被抑制或触发护栏则直接重排（推迟而非丢弃）；否则取文案弹出并记录。
+    fn fire_ambient_bubble_if_due(&self, now: chrono::DateTime<chrono::Local>) {
+        let due = self.ambient.lock().unwrap().next_at.is_some_and(|t| now >= t);
+        if !due {
+            return;
+        }
+        if self.bubble_suppressed(&now) || self.bubble_rate_limited(&now) {
+            self.schedule_ambient_bubble(now);
+            return;
+        }
+        let persona = self.persona.lock().unwrap().clone();
+        let state = self.resolve_state(&persona, now);
+        let text = persona
+            .states
+            .get(&state)
+            .and_then(|cfg| self.next_ambient_text(&state, cfg));
+        if let Some(text) = text {
+            {
+                let mut ambient = self.ambient.lock().unwrap();
+                ambient.last_shown_at = Some(now);
+                ambient.recent.push_back(now);
+            }
+            let _ = self.app.emit("bubble", BubbleEvent { state, text });
+        }
+        self.schedule_ambient_bubble(now);
     }
 
     /// 应用全局缩放：clamp 校验（非 finite → 1.0，越界 → [0.5, 2.0]），更新内存 prefs 并刷新
@@ -468,7 +676,7 @@ impl StateEngine {
             display = fit_display_size_proportional(display.0, display.1, mw, mh);
         }
         // 新角色的当前状态：切换角色本身不算“状态变化”，预先记录 last_state，
-        // 避免节拍线程醒来误判为状态切换而弹出气泡（气泡逻辑与切换角色解耦）。
+        // 避免节拍线程醒来误判为状态切换而重复广播（气泡重排由下方显式完成）。
         let state = self.resolve_state(&persona, chrono::Local::now());
         {
             let mut cur = self.persona.lock().unwrap();
@@ -485,6 +693,15 @@ impl StateEngine {
                 cache,
             };
         }
+        // 洗牌袋与“上一条文案”属于旧角色，整体清空；限频窗口（recent/last_shown_at/
+        // last_chat_at）保留——防止借连续切角色绕过小时上限。
+        {
+            let mut ambient = self.ambient.lock().unwrap();
+            ambient.bags.clear();
+            ambient.last_text.clear();
+        }
+        // 按新角色的当前状态重排环境气泡
+        self.schedule_ambient_bubble(chrono::Local::now());
         crate::genbubble::maybe_spawn_daily(app);
         // 修改完成后唤醒节拍线程，使新日程表立即生效（否则线程仍睡在旧 next_transition_at）。
         self.notify_wake();
@@ -502,35 +719,32 @@ impl StateEngine {
         Ok(())
     }
 
-    /// 启动即广播当前角色与状态、开场气泡
+    /// 启动即广播当前角色与状态，并排出第一条环境气泡（启动时不立即弹出）
     pub fn broadcast_state(&self) {
         let persona = self.persona();
         let state = self.resolve_state(&persona, chrono::Local::now());
         // 记录“该状态已广播过”，否则节拍线程醒来读到 last_state=None 会误判为状态变化，
-        // 再次 emit state-changed + 开场气泡，导致开局弹两次气泡。
+        // 再次 emit state-changed，导致开局重复广播。
         *self.last_state.lock().unwrap() = Some(state.clone());
         // 带 zoomed display 给前端，前端 applyPersona 不因广播而回到基准尺寸。
         let _ = self.app.emit("persona-changed", self.persona_view());
         let _ = self.app.emit(
             "state-changed",
             StateChanged {
-                state: state.clone(),
+                state,
                 previous: String::new(),
             },
         );
-        if let Some(cfg) = persona.states.get(&state) {
-            if let Some(text) = self.bubble_text(&state, cfg) {
-                let _ = self.app.emit("bubble", BubbleEvent { state, text });
-            }
-        }
+        // 排出启动后的第一条环境气泡（不立即弹出，给角色一段安静期）
+        self.schedule_ambient_bubble(chrono::Local::now());
     }
 
-    /// 后台节拍线程：睡到下一个切换时刻（manual 到期 / 时段结束 / loop 边界），
-    /// 醒来检查状态，变化时广播并弹出对应气泡；单次睡眠最多 15 分钟。
+    /// 后台节拍线程：睡到「下一个状态切换时刻」与「下一条环境气泡时刻」中较早者，
+    /// 醒来先处理状态变化（广播 + 重排气泡），再处理到期气泡；单次睡眠最多 15 分钟。
     pub fn start(&self) {
         let app = self.app.clone();
         let persona = Arc::clone(&self.persona);
-        let gen_bubbles = Arc::clone(&self.gen_bubbles);
+        let ambient = Arc::clone(&self.ambient);
         let last_state = Arc::clone(&self.last_state);
         let manual_state = Arc::clone(&self.manual_state);
         let wake_lock = Arc::clone(&self.wake_lock);
@@ -547,7 +761,15 @@ impl StateEngine {
                 let m = manual_state.lock().unwrap();
                 next_transition_at(&p, &m, &now)
             };
-            let mut sleep_dur = (next - now)
+            // 环境气泡的预定时刻若早于状态切换，则按气泡时刻唤醒
+            let wake_at = {
+                let bubble_at = ambient.lock().unwrap().next_at;
+                match bubble_at {
+                    Some(t) if t < next => t,
+                    _ => next,
+                }
+            };
+            let mut sleep_dur = (wake_at - now)
                 .to_std()
                 .unwrap_or(Duration::from_secs(0));
             sleep_dur += Duration::from_secs(1);
@@ -560,7 +782,7 @@ impl StateEngine {
             drop(guard);
 
             let now = chrono::Local::now();
-            let (state, persona) = {
+            let state = {
                 let p = persona.lock().unwrap();
                 let mut m = manual_state.lock().unwrap();
                 if let Some(ov) = m.as_ref() {
@@ -570,10 +792,10 @@ impl StateEngine {
                         }
                     }
                 }
-                let s = effective_state(&*m, &p, &now);
-                (s, p.clone())
+                effective_state(&m, &p, &now)
             };
             let mut last = last_state.lock().unwrap();
+            let mut state_changed = false;
             if last.as_deref() != Some(state.as_str()) {
                 let previous = last.clone().unwrap_or_default();
                 *last = Some(state.clone());
@@ -584,15 +806,16 @@ impl StateEngine {
                         previous,
                     },
                 );
-                if let Some(cfg) = persona.states.get(&state) {
-                    // 优先当日 AI 生成文案，取不到回退角色自带 bubbles
-                    let text = crate::genbubble::today_bubble(&gen_bubbles, &state)
-                        .or_else(|| pick(&cfg.bubbles));
-                    if let Some(text) = text {
-                        let _ = app.emit("bubble", BubbleEvent { state, text });
-                    }
-                }
+                state_changed = true;
             }
+            drop(last);
+            let engine = app.state::<StateEngine>();
+            if state_changed {
+                // 新状态的剩余时长/话痨程度不同，气泡按新状态重排（状态切换本身不弹气泡）。
+                engine.schedule_ambient_bubble(now);
+            }
+            // 处理到期气泡：若刚重排过，next_at 在未来，自然跳过，不会用旧状态文案。
+            engine.fire_ambient_bubble_if_due(now);
             // 跨天/启动后补齐当日 AI 气泡（幂等，条件不满足时内部直接返回）
             crate::genbubble::maybe_spawn_daily(&app);
         });
@@ -629,6 +852,9 @@ impl StateEngine {
                 previous: current,
             },
         );
+        // 手动覆盖改写了“下一次切换时刻”（last_state 已预先登记，节拍线程不会再触发
+        // 状态变化分支），气泡需按新状态的剩余时长/话痨程度就地重排。
+        self.schedule_ambient_bubble(chrono::Local::now());
         next
     }
 }
@@ -1059,11 +1285,8 @@ fn parse_mins(value: &str) -> Option<u32> {
 /// xorshift64 状态（惰性以纳秒时间做种子），避免引入 rand 依赖
 static RNG_STATE: AtomicU64 = AtomicU64::new(0);
 
-/// 简易伪随机：推进 xorshift64 状态后从文本池取一条，减少连续命中同一文本（PRNG，非去重）
-fn pick(list: &[String]) -> Option<String> {
-    if list.is_empty() {
-        return None;
-    }
+/// 推进并返回下一个伪随机数（PRNG，非密码学安全）
+fn rng_next() -> u64 {
     let mut s = RNG_STATE.load(Ordering::Relaxed);
     if s == 0 {
         s = std::time::SystemTime::now()
@@ -1081,7 +1304,37 @@ fn pick(list: &[String]) -> Option<String> {
         s = 0x9E37_79B9_7F4A_7C15;
     }
     RNG_STATE.store(s, Ordering::Relaxed);
-    Some(list[(s as usize) % list.len()].clone())
+    s
+}
+
+/// [min, max] 闭区间内均匀取整（max <= min 时返回 min）
+fn rng_range_i64(min: i64, max: i64) -> i64 {
+    if max <= min {
+        return min;
+    }
+    min + (rng_next() % ((max - min + 1) as u64)) as i64
+}
+
+/// Fisher–Yates 洗牌
+fn shuffle(list: &mut [String]) {
+    for i in (1..list.len()).rev() {
+        let j = (rng_next() % ((i + 1) as u64)) as usize;
+        list.swap(i, j);
+    }
+}
+
+/// 用文案池装填洗牌袋：打乱顺序后逐条弹出，保证一轮之内不重复；
+/// 池多于一条时，若重洗后的首条与上一轮末条相同则与第二条交换，避免跨轮连续重复。
+fn refill_bag(mut pool: Vec<String>, last_shown: Option<&str>) -> VecDeque<String> {
+    shuffle(&mut pool);
+    if pool.len() > 1 {
+        if let Some(last) = last_shown {
+            if pool.first().map(String::as_str) == Some(last) {
+                pool.swap(0, 1);
+            }
+        }
+    }
+    pool.into()
 }
 
 #[cfg(test)]
@@ -1346,5 +1599,71 @@ mod tests {
             next_transition_at(&p, &None, &now),
             now + chrono::Duration::seconds(30)
         );
+    }
+
+    #[test]
+    fn talkativeness_parse_is_lenient() {
+        assert_eq!(Talkativeness::parse("chatty"), Talkativeness::Chatty);
+        assert_eq!(Talkativeness::parse("normal"), Talkativeness::Normal);
+        assert_eq!(Talkativeness::parse("quiet"), Talkativeness::Quiet);
+        assert_eq!(Talkativeness::parse("mute"), Talkativeness::Mute);
+        // 缺省 / 未知值宽松回退 normal，不让整个 persona 解析失败
+        assert_eq!(Talkativeness::parse(""), Talkativeness::Normal);
+        assert_eq!(Talkativeness::parse("whatever"), Talkativeness::Normal);
+    }
+
+    #[test]
+    fn state_config_talkativeness_defaults_and_parses() {
+        let p = link();
+        // link 的 sleep 配了 mute、eat 配了 chatty；其余缺省 normal
+        assert_eq!(p.states["sleep"].talkativeness(), Talkativeness::Mute);
+        assert_eq!(p.states["eat"].talkativeness(), Talkativeness::Chatty);
+        assert_eq!(p.states["walking"].talkativeness(), Talkativeness::Normal);
+    }
+
+    #[test]
+    fn bubble_gap_range_derives_from_remaining_and_talkativeness() {
+        // mute 不弹
+        assert_eq!(bubble_gap_range(30, Talkativeness::Mute), None);
+        // D=20 normal：E = 20/2 × 1.0 = 10 → min 6、max 14
+        assert_eq!(bubble_gap_range(20, Talkativeness::Normal), Some((6, 14)));
+        // D=20 chatty：E = 5 → min 触地板 4、max 7
+        assert_eq!(bubble_gap_range(20, Talkativeness::Chatty), Some((4, 7)));
+        // D=20 quiet：E = 20 → min 12、max 28
+        assert_eq!(bubble_gap_range(20, Talkativeness::Quiet), Some((12, 28)));
+        // 超长 D：E 钳到 60 → 36~84
+        assert_eq!(bubble_gap_range(480, Talkativeness::Normal), Some((36, 84)));
+        // 极短 D：E 钳到 5 → 4~7
+        assert_eq!(bubble_gap_range(1, Talkativeness::Normal), Some((4, 7)));
+    }
+
+    #[test]
+    fn refill_bag_avoids_cross_round_repeat() {
+        // 池 >1 时重洗后的首条不得等于上一轮末条（多次运行覆盖洗牌随机性）
+        for _ in 0..50 {
+            let bag = refill_bag(vec!["a".to_string(), "b".to_string()], Some("a"));
+            assert_eq!(bag.front().map(String::as_str), Some("b"));
+        }
+        // 单条池无法避免重复，原样返回
+        let bag = refill_bag(vec!["only".to_string()], Some("only"));
+        assert_eq!(bag.front().map(String::as_str), Some("only"));
+    }
+
+    #[test]
+    fn refill_bag_keeps_all_texts() {
+        let pool: Vec<String> = (0..10).map(|i| format!("t{i}")).collect();
+        let mut sorted: Vec<String> = refill_bag(pool.clone(), None).into_iter().collect();
+        sorted.sort();
+        assert_eq!(sorted, pool);
+    }
+
+    #[test]
+    fn rng_range_stays_within_bounds() {
+        for _ in 0..200 {
+            let v = rng_range_i64(4, 7);
+            assert!((4..=7).contains(&v));
+        }
+        assert_eq!(rng_range_i64(5, 5), 5);
+        assert_eq!(rng_range_i64(7, 4), 7);
     }
 }

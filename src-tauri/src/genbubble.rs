@@ -1,5 +1,5 @@
 //! 每日 AI 气泡生成：用大模型按角色设定 + 当前状态生成各状态的气泡台词，
-//! 每天每状态一条，存独立缓存文件（不改写 persona.json，原配置永远只读）。
+//! 每天每状态一批（默认 5 条），存独立缓存文件（不改写 persona.json，原配置永远只读）。
 //! 未配置大模型 / 生成失败 / 超长重复校验不通过时，回退角色自带 bubbles。
 
 use std::collections::HashMap;
@@ -17,8 +17,10 @@ const PROMPT_CHAR_LIMIT: usize = 28;
 /// 气泡几何上限：max-width 236px - 内边距 24px = 212px，字号 13px → 每行约 16 个全角字符，
 /// 两行 = 32 个全角字符（半角字符折半计）。超过即整条拒绝重试，绝不截断。
 const BUBBLE_MAX_UNITS: f64 = 32.0;
-/// 生成历史保留条数（查重用，跨天累计）
-pub(crate) const HISTORY_KEEP: usize = 20;
+/// 每状态每天生成的台词条数：撑住环境气泡一天的弹出量，一次调用批量生成控制成本
+const DAILY_LINES_PER_STATE: usize = 5;
+/// 生成历史保留条数（查重用，跨天累计；每状态每天 5 条，留约一天的量）
+pub(crate) const HISTORY_KEEP: usize = 60;
 /// 查重时随提示词下发的近期台词条数
 const HISTORY_IN_PROMPT: usize = 10;
 
@@ -28,9 +30,9 @@ pub struct GenBubbleCache {
     /// 缓存归属日期 "YYYY-MM-DD"；非当日内容一律不使用（回退原配置）
     #[serde(default)]
     pub date: String,
-    /// state id -> 当日已生成的台词
+    /// state id -> 当日已生成的台词池（环境气泡逐条弹出，取完当天不再有 AI 文案）
     #[serde(default)]
-    pub by_state: HashMap<String, String>,
+    pub by_state: HashMap<String, Vec<String>>,
     /// 当日生成失败的状态（网络错误/校验不过），当天不再重试
     #[serde(default)]
     pub failed: Vec<String>,
@@ -166,8 +168,8 @@ fn build_user_prompt(cfg: &StateConfig, history: &[String]) -> String {
             .join("\n")
     };
     format!(
-        "请为角色在「{}」状态下写一句气泡台词：不超过 {} 个汉字的一句话，口语自然，符合角色人设与当前状态。不要与以下近期台词重复：\n{}\n只输出台词本身，不要引号和任何说明。",
-        cfg.label, PROMPT_CHAR_LIMIT, list
+        "请为角色在「{}」状态下写 {} 句气泡台词：每句不超过 {} 个汉字，口语自然，符合角色人设与当前状态。每句单独一行，不要编号，不要引号和任何说明。不要与以下近期台词重复：\n{}",
+        cfg.label, DAILY_LINES_PER_STATE, PROMPT_CHAR_LIMIT, list
     )
 }
 
@@ -203,14 +205,38 @@ pub(crate) fn save(app: &AppHandle, persona_id: &str, cache: &GenBubbleCache) ->
     Ok(())
 }
 
-/// 单个状态的台词生成：失败（网络错误或两次校验不过）返回 None
-async fn generate_one(
+/// 解析模型输出：逐行清洗校验，返回合格台词（批内去重）与首个拒绝原因（供重试反馈）
+fn parse_lines(raw: &str, history: &[String]) -> (Vec<String>, Option<RejectReason>) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut first_reject: Option<RejectReason> = None;
+    for line in raw.lines() {
+        let text = normalize_text(line);
+        if text.is_empty() {
+            continue;
+        }
+        match validate_candidate(&text, history) {
+            // 批内重复直接跳过（模型偶尔输出相邻变体）
+            Ok(t) if !lines.contains(&t) => lines.push(t),
+            Ok(_) => {}
+            Err(reason) => {
+                if first_reject.is_none() {
+                    first_reject = Some(reason);
+                }
+            }
+        }
+    }
+    (lines, first_reject)
+}
+
+/// 单个状态的台词生成（一次调用批量生成 DAILY_LINES_PER_STATE 句）：
+/// 返回通过校验的台词列表；全部不可用（网络错误或两轮校验都无合格台词）返回 None。
+async fn generate_lines(
     cfg: &crate::llm::LlmConfig,
     persona: &PersonaConfig,
     state_id: &str,
     scfg: &StateConfig,
     history: &[String],
-) -> Option<String> {
+) -> Option<Vec<String>> {
     let system = build_system_prompt(persona, state_id, scfg);
     let mut messages = vec![
         LlmMessage {
@@ -225,20 +251,21 @@ async fn generate_one(
     // 最多一次带反馈的重试：长度/重复问题模型通常一条反馈即可修正
     for _ in 0..2 {
         let raw = crate::llm::chat_completion(cfg, &cfg.model, &messages).await.ok()?;
-        let text = normalize_text(&raw);
-        match validate_candidate(&text, history) {
-            Ok(t) => return Some(t),
-            Err(reason) => {
-                messages.push(LlmMessage {
-                    role: "assistant".into(),
-                    content: raw.into(),
-                });
-                messages.push(LlmMessage {
-                    role: "user".into(),
-                    content: corrective(&reason).into(),
-                });
-            }
+        let (lines, first_reject) = parse_lines(&raw, history);
+        // 有合格台词即收下（不足 N 条也够用，环境气泡会回退静态池补位）
+        if !lines.is_empty() {
+            return Some(lines);
         }
+        // 整批无一合格 → 带反馈重试
+        let reason = first_reject.unwrap_or(RejectReason::Empty);
+        messages.push(LlmMessage {
+            role: "assistant".into(),
+            content: raw.into(),
+        });
+        messages.push(LlmMessage {
+            role: "user".into(),
+            content: corrective(&reason).into(),
+        });
     }
     None
 }
@@ -268,8 +295,8 @@ pub async fn generate_daily(app: &AppHandle) {
             None => continue,
         };
         let history = engine.gen_history();
-        match generate_one(&llm_cfg, &persona, &state, scfg, &history).await {
-            Some(text) => engine.record_gen_bubble(&persona_id, &state, &text),
+        match generate_lines(&llm_cfg, &persona, &state, scfg, &history).await {
+            Some(texts) => engine.record_gen_bubble(&persona_id, &state, &texts),
             None => engine.record_gen_failure(&persona_id, &state),
         }
     }
@@ -314,14 +341,14 @@ pub fn maybe_spawn_daily(app: &AppHandle) {
     });
 }
 
-/// 从内存 GenState 取某状态当日的生成台词；非当日或未生成返回 None（回退原配置）。
-/// 供引擎在广播气泡时调用，锁内只做查表。
-pub fn today_bubble(gs: &Mutex<GenState>, state: &str) -> Option<String> {
+/// 从内存 GenState 取某状态当日的生成台词池；非当日 / 未生成 / 空池返回 None（回退原配置）。
+/// 供引擎装填气泡洗牌袋时调用，锁内只做查表。
+pub fn today_pool(gs: &Mutex<GenState>, state: &str) -> Option<Vec<String>> {
     let gs = gs.lock().unwrap();
     if gs.cache.date != today_str() {
         return None;
     }
-    gs.cache.by_state.get(state).cloned()
+    gs.cache.by_state.get(state).filter(|v| !v.is_empty()).cloned()
 }
 
 #[cfg(test)]
@@ -373,17 +400,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_lines_filters_and_dedupes() {
+        let history = vec!["旧台词".to_string()];
+        let raw = "第一句\n  \n第二句\n第一句\n\"第三句\"\n旧台词\n";
+        let (lines, reject) = parse_lines(raw, &history);
+        // 空行清洗、批内去重、引号包裹剥离、与历史重复剔除
+        assert_eq!(lines, vec!["第一句", "第二句", "第三句"]);
+        // “旧台词”命中历史查重 → 记录拒绝原因供重试反馈（批内已有合格台词，不影响收下）
+        assert_eq!(reject, Some(RejectReason::Duplicate));
+    }
+
+    #[test]
+    fn parse_lines_reports_first_reject_reason() {
+        let too_long: String = "好".repeat(40);
+        let raw = format!("合格句\n{too_long}");
+        let (lines, reject) = parse_lines(&raw, &[]);
+        assert_eq!(lines, vec!["合格句"]);
+        assert_eq!(reject, Some(RejectReason::TooLong));
+    }
+
+    #[test]
     fn cache_round_trips_with_defaults() {
         let cache = GenBubbleCache {
             date: "2026-09-06".into(),
-            by_state: HashMap::from([("Awake".to_string(), "早安".to_string())]),
+            by_state: HashMap::from([("Awake".to_string(), vec!["早安".to_string()])]),
             failed: vec!["Sleep".to_string()],
             history: vec!["早安".to_string()],
         };
         let json = serde_json::to_string(&cache).unwrap();
         let back: GenBubbleCache = serde_json::from_str(&json).unwrap();
         assert_eq!(back.date, "2026-09-06");
-        assert_eq!(back.by_state.get("Awake").map(String::as_str), Some("早安"));
+        assert_eq!(
+            back.by_state.get("Awake").and_then(|v| v.first()),
+            Some(&"早安".to_string())
+        );
         // 旧文件缺字段：serde default 兜底
         let old: GenBubbleCache = serde_json::from_str("{}").unwrap();
         assert!(old.by_state.is_empty() && old.failed.is_empty());
