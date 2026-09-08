@@ -304,7 +304,7 @@ impl StateEngine {
                 }
             }
         }
-        effective_state(&*guard, persona, &now)
+        effective_state(&guard, persona, &now)
     }
 
     /// 当前角色配置（克隆）
@@ -964,7 +964,7 @@ pub fn save_chat_history(
 }
 
 fn now_minutes(now: &chrono::DateTime<chrono::Local>) -> u32 {
-    now.hour() as u32 * 60 + now.minute() as u32
+    now.hour() * 60 + now.minute()
 }
 
 /// 结合手动覆盖与日程自动计算
@@ -985,7 +985,7 @@ fn effective_state(
 }
 
 /// 查找当前生效的 time 时段（支持跨午夜）
-fn find_active_slot<'a>(schedule: &'a ScheduleConfig, mins: u32) -> Option<&'a TimeSlot> {
+fn find_active_slot(schedule: &ScheduleConfig, mins: u32) -> Option<&TimeSlot> {
     schedule.time().iter().find(|slot| {
         if let (Some(start), Some(end)) = (parse_mins(&slot.start), parse_mins(&slot.end)) {
             if start <= end {
@@ -1034,7 +1034,7 @@ fn loop_duration(schedule: &ScheduleConfig, state: &str) -> u32 {
 /// - 命中的 time 时段 → 到该时段结束；
 /// - 否则命中 loop 条目 → 到该条目时长；
 /// - 否则（不在 loop，或条目时长恰为 0，无法给出自然到期点）→ 用 30 分钟兜底。
-/// 兜底避免状态被手动锁死到切角色/重启；语义与 next_transition_at 的 30s 兜底一致（都是防久睡/锁死）。
+///   兜底避免状态被手动锁死到切角色/重启；语义与 next_transition_at 的 30s 兜底一致（都是防久睡/锁死）。
 fn next_state_expire_at(
     schedule: &ScheduleConfig,
     next: &str,
@@ -1078,8 +1078,8 @@ pub fn effective_display_size(persona: &PersonaConfig) -> (u32, u32) {
     if !persona.spritesheet.starts_with('/') {
         if let Ok(p) = Path::new(&persona.spritesheet).canonicalize() {
             if let Ok((sw, sh)) = image::image_dimensions(&p) {
-                let cols = persona.cols.max(1) as u32;
-                let rows = persona.rows.max(1) as u32;
+                let cols = persona.cols.max(1);
+                let rows = persona.rows.max(1);
                 let cw = ((sw as f64 / cols as f64).round() as u32).max(1);
                 let ch = ((sh as f64 / rows as f64).round() as u32).max(1);
                 return (cw, ch);

@@ -650,21 +650,18 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                     return;
                 }
                 let app = tray.app_handle().clone();
-                match button {
-                    // 左键单击：角色隐藏时把它显示出来
-                    MouseButton::Left => {
-                        let visible = app
-                            .get_webview_window("persona")
-                            .map(|w| w.is_visible().unwrap_or(false))
-                            .unwrap_or(false);
-                        if !visible {
-                            if let Some(win) = app.get_webview_window("persona") {
-                                let _ = win.show();
-                            }
-                            update_persona_menu_label(&app);
+                // 左键单击：角色隐藏时把它显示出来
+                if button == MouseButton::Left {
+                    let visible = app
+                        .get_webview_window("persona")
+                        .map(|w| w.is_visible().unwrap_or(false))
+                        .unwrap_or(false);
+                    if !visible {
+                        if let Some(win) = app.get_webview_window("persona") {
+                            let _ = win.show();
                         }
+                        update_persona_menu_label(&app);
                     }
-                    _ => {}
                 }
             }
             if let TrayIconEvent::DoubleClick {

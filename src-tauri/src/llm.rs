@@ -346,7 +346,7 @@ pub fn attach_image_to_last_user(messages: &mut Vec<LlmMessage>, image_data_url:
 fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max).collect();
     if s.chars().count() > max {
-        out.push_str("…");
+        out.push('…');
     }
     out
 }

@@ -287,7 +287,7 @@ pub async fn generate_daily(app: &AppHandle) {
         if engine.persona_id() != persona_id {
             break;
         }
-        if engine.gen_has_today(&state) || engine.gen_failed(&persona_id, &state) {
+        if engine.gen_has_today(state) || engine.gen_failed(&persona_id, state) {
             continue;
         }
         let scfg = match persona.states.get(state) {
@@ -295,9 +295,9 @@ pub async fn generate_daily(app: &AppHandle) {
             None => continue,
         };
         let history = engine.gen_history();
-        match generate_lines(&llm_cfg, &persona, &state, scfg, &history).await {
-            Some(texts) => engine.record_gen_bubble(&persona_id, &state, &texts),
-            None => engine.record_gen_failure(&persona_id, &state),
+        match generate_lines(&llm_cfg, &persona, state, scfg, &history).await {
+            Some(texts) => engine.record_gen_bubble(&persona_id, state, &texts),
+            None => engine.record_gen_failure(&persona_id, state),
         }
     }
 }
