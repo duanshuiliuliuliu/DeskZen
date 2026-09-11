@@ -22,13 +22,19 @@ const PACK_PERSONA = {
   system_prompt: {
     definition: "用于冒烟测试的演示角色",
     reply_style: "简短回复",
-    state_guidelines: { idle: "你正在待机" },
   },
   states: {
-    idle: { label: "待机", bubbles: ["测试中。"] },
+    idle: { label: "待机" },
   },
   clips: {
-    observe: { spritesheet: "clips/observe.webp", frames: 60, frame_ms: 83 },
+    observe: {
+      spritesheet: "clips/observe.webp",
+      label: "观察周围",
+      description: "你正站在原地打量四周，安静地留意有没有动静",
+      frames: 60,
+      frame_ms: 83,
+      bubbles: ["看看周围。"],
+    },
   },
   scenes: {
     idle: [{ id: "look_around", label: "观察周围", steps: [{ clip: "observe" }] }],
@@ -81,10 +87,13 @@ try {
   if (clip !== "observe") throw new Error("角色窗口未播放导入角色的动作片段");
 
   // 3b. 帧条确实能解码（资源路径经 asset 协议可读）
+  //     动作现在画在 .character-layer 上（双图层交叉淡入），取当前可见的那一层
   const rendered = await evaluate(
     persona,
     `(async () => {
-       const el = document.getElementById("character");
+       const el = [...document.querySelectorAll(".character-layer")]
+         .find((layer) => getComputedStyle(layer).opacity === "1");
+       if (!el) return { url: "(无可见图层)", ok: false };
        const url = getComputedStyle(el).backgroundImage.replace(/^url\\(["']?/, "").replace(/["']?\\)$/, "");
        const ok = await new Promise((resolve) => {
          const img = new Image();

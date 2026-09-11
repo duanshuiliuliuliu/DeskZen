@@ -23,10 +23,11 @@ const settings = cdp(settingsTarget.webSocketDebuggerUrl);
 await settings.ready;
 await settings.send("Runtime.enable");
 
-// 1. 初始状态：三个侧边栏入口，默认停在「角色」
+// 1. 侧边栏结构：三个入口；先点回「角色」，避免复用已打开的设置窗时停在别的面板
 const init = await evaluate(
   settings,
   `(async () => {
+     [...document.querySelectorAll(".nav-item")].find((b) => b.dataset.panel === "role").click();
      await new Promise((r) => setTimeout(r, 500));
      return {
        nav: [...document.querySelectorAll(".nav-item")].map((b) => b.textContent.trim()),

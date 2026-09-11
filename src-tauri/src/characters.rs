@@ -312,11 +312,10 @@ mod tests {
             "display_h": 104,
             "system_prompt": {
                 "definition": "演示角色",
-                "reply_style": "简短回复",
-                "state_guidelines": { "idle": "待机中" }
+                "reply_style": "简短回复"
             },
             "states": {
-                "idle": { "label": "待机", "bubbles": ["你好"] }
+                "idle": { "label": "待机" }
             },
             "clips": {
                 "wave": { "spritesheet": "clips/wave.webp", "frames": 2, "frame_ms": 83 }
@@ -362,7 +361,7 @@ mod tests {
         persona = serde_json::from_str(minimal_persona_json()).unwrap();
         persona.states.insert(
             "extra".into(),
-            serde_json::from_str(r#"{ "label": "额外", "bubbles": [] }"#).unwrap(),
+            serde_json::from_str(r#"{ "label": "额外" }"#).unwrap(),
         );
         let error = validate_persona(&persona, &demo_files()).unwrap_err();
         assert!(error.contains("extra"), "{error}");

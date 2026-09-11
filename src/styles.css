@@ -27,12 +27,19 @@ body {
 }
 
 /* ---- 角色 ---- */
+/* #character 是尺寸与拖拽的容器；两个 .character-layer 交替承载动作，切换时交叉淡入 */
 .character {
   position: absolute;
   left: 50%;
   /* 与 Rust 端 SPRITE_BOTTOM(=24) 同步 */
   bottom: 24px;
   transform: translateX(-50%);
+  cursor: grab;
+}
+
+.character-layer {
+  position: absolute;
+  inset: 0;
   background-size: calc(var(--cols) * 100%) calc(var(--rows) * 100%);
   background-position-x: 0%;
   background-position-y: 0%;
@@ -40,7 +47,8 @@ body {
   image-rendering: auto;
   animation-timing-function: steps(var(--frames), jump-none);
   animation-iteration-count: infinite;
-  cursor: grab;
+  opacity: 0;
+  transition: opacity var(--fade-ms, 150ms) ease;
 }
 
 .character:active {

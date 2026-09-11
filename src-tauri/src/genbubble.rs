@@ -1,6 +1,7 @@
 //! 每日 AI 气泡生成：用大模型按角色设定 + 当前状态生成各状态的气泡台词，
-//! 每天每状态一批（默认 5 条），存独立缓存文件（不改写 persona.json，原配置永远只读）。
-//! 未配置大模型 / 生成失败 / 超长重复校验不通过时，回退角色自带 bubbles。
+//! 每天每个动作一批（默认 5 条），存独立缓存文件（不改写 persona.json，原配置永远只读）。
+//! 只生成「当前状态可能播到的动作」，随作息推进逐步覆盖，控制每日调用量。
+//! 未配置大模型 / 生成失败 / 超长重复校验不通过时，回退动作自带 bubbles。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,7 +10,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use crate::engine::{PersonaConfig, StateConfig, StateEngine};
+use crate::engine::{AnimationClipConfig, PersonaConfig, StateEngine};
 use crate::llm::LlmMessage;
 
 /// 提示词要求的字数上限（留余量），两行气泡的几何上限见 BUBBLE_MAX_UNITS。
@@ -17,9 +18,9 @@ const PROMPT_CHAR_LIMIT: usize = 28;
 /// 气泡几何上限：max-width 236px - 内边距 24px = 212px，字号 13px → 每行约 16 个全角字符，
 /// 两行 = 32 个全角字符（半角字符折半计）。超过即整条拒绝重试，绝不截断。
 const BUBBLE_MAX_UNITS: f64 = 32.0;
-/// 每状态每天生成的台词条数：撑住环境气泡一天的弹出量，一次调用批量生成控制成本
-const DAILY_LINES_PER_STATE: usize = 5;
-/// 生成历史保留条数（查重用，跨天累计；每状态每天 5 条，留约一天的量）
+/// 每个动作每天生成的台词条数：动作池比状态池细，条数略降以控制成本
+const DAILY_LINES_PER_CLIP: usize = 4;
+/// 生成历史保留条数（查重用，跨天累计）
 pub(crate) const HISTORY_KEEP: usize = 60;
 /// 查重时随提示词下发的近期台词条数
 const HISTORY_IN_PROMPT: usize = 10;
@@ -30,10 +31,10 @@ pub struct GenBubbleCache {
     /// 缓存归属日期 "YYYY-MM-DD"；非当日内容一律不使用（回退原配置）
     #[serde(default)]
     pub date: String,
-    /// state id -> 当日已生成的台词池（环境气泡逐条弹出，取完当天不再有 AI 文案）
+    /// clip id -> 当日已生成的台词池（环境气泡逐条弹出，取完当天不再有 AI 文案）
     #[serde(default)]
-    pub by_state: HashMap<String, Vec<String>>,
-    /// 当日生成失败的状态（网络错误/校验不过），当天不再重试
+    pub by_clip: HashMap<String, Vec<String>>,
+    /// 当日生成失败的动作（网络错误/校验不过），当天不再重试
     #[serde(default)]
     pub failed: Vec<String>,
     /// 最近生成的台词（跨天累计），用于查重
@@ -133,29 +134,45 @@ fn corrective(reason: &RejectReason) -> String {
     }
 }
 
-/// 系统提示词：角色定义 + 表达风格 + 当前状态指引
-fn build_system_prompt(persona: &PersonaConfig, state_id: &str, cfg: &StateConfig) -> String {
-    let guideline = persona
-        .system_prompt
-        .state_guidelines
-        .get(state_id)
-        .map(|s| s.as_str())
-        .unwrap_or("");
+/// 动作的画面描述：优先用 clips[].description，缺失时退回 label / 动作 id
+fn clip_scene(clip_id: &str, clip: &AnimationClipConfig) -> String {
+    if !clip.description.is_empty() {
+        return clip.description.clone();
+    }
+    if !clip.label.is_empty() {
+        return format!("角色正在「{}」", clip.label);
+    }
+    format!("角色正在做动作 {clip_id}")
+}
+
+/// 系统提示词：角色定义 + 表达风格 + **当前动作的画面描述**。
+///
+/// 刻意不带状态的 `tone` / `talkativeness` 语气：那是"聊天时怎么说话"的约束，
+/// 台词生成必须锚定在具体动作上，否则会生成"状态说得通、但画面里没这回事"的台词。
+fn build_system_prompt(persona: &PersonaConfig, clip_id: &str, clip: &AnimationClipConfig) -> String {
     format!(
-        "你是桌面宠物角色「{}」的台词作者。\n角色设定：{}\n表达风格：{}\n当前状态「{}」：{}",
-        persona.name, persona.system_prompt.definition, persona.system_prompt.reply_style, cfg.label, guideline
+        "你是桌面宠物角色「{}」的台词作者。\n角色设定：{}\n表达风格：{}\n{}{}\n只能写这一刻（这个动作进行中）说得通的话：不要提别的动作、别的时间或画面里没有的东西。",
+        persona.name,
+        persona.system_prompt.definition,
+        persona.system_prompt.reply_style,
+        clip_scene(clip_id, clip),
+        if clip.label.is_empty() {
+            String::new()
+        } else {
+            format!("（动作名：{}）", clip.label)
+        }
     )
 }
 
-/// 用户提示词：任务要求 + 查重列表（近期生成历史 + 该状态自带文案）
-fn build_user_prompt(cfg: &StateConfig, history: &[String]) -> String {
+/// 用户提示词：任务要求 + 查重列表（近期生成历史 + 该动作自带文案）
+fn build_user_prompt(clip_id: &str, clip: &AnimationClipConfig, history: &[String]) -> String {
     let mut avoid: Vec<&String> = history
         .iter()
         .rev()
         .take(HISTORY_IN_PROMPT)
         .collect::<Vec<_>>();
     avoid.reverse();
-    for b in &cfg.bubbles {
+    for b in &clip.bubbles {
         avoid.push(b);
     }
     let list = if avoid.is_empty() {
@@ -168,8 +185,11 @@ fn build_user_prompt(cfg: &StateConfig, history: &[String]) -> String {
             .join("\n")
     };
     format!(
-        "请为角色在「{}」状态下写 {} 句气泡台词：每句不超过 {} 个汉字，口语自然，符合角色人设与当前状态。每句单独一行，不要编号，不要引号和任何说明。不要与以下近期台词重复：\n{}",
-        cfg.label, DAILY_LINES_PER_STATE, PROMPT_CHAR_LIMIT, list
+        "请为下面这个画面写 {} 句气泡台词：{}。每句不超过 {} 个汉字，口语自然，符合角色人设，只写这个动作进行时说得通的话。每句单独一行，不要编号，不要引号和任何说明。不要与以下近期台词重复：\n{}",
+        DAILY_LINES_PER_CLIP,
+        clip_scene(clip_id, clip),
+        PROMPT_CHAR_LIMIT,
+        list
     )
 }
 
@@ -228,16 +248,16 @@ fn parse_lines(raw: &str, history: &[String]) -> (Vec<String>, Option<RejectReas
     (lines, first_reject)
 }
 
-/// 单个状态的台词生成（一次调用批量生成 DAILY_LINES_PER_STATE 句）：
+/// 单个动作的台词生成（一次调用批量生成 DAILY_LINES_PER_CLIP 句）：
 /// 返回通过校验的台词列表；全部不可用（网络错误或两轮校验都无合格台词）返回 None。
 async fn generate_lines(
     cfg: &crate::llm::LlmConfig,
     persona: &PersonaConfig,
-    state_id: &str,
-    scfg: &StateConfig,
+    clip_id: &str,
+    clip: &AnimationClipConfig,
     history: &[String],
 ) -> Option<Vec<String>> {
-    let system = build_system_prompt(persona, state_id, scfg);
+    let system = build_system_prompt(persona, clip_id, clip);
     let mut messages = vec![
         LlmMessage {
             role: "system".into(),
@@ -245,7 +265,7 @@ async fn generate_lines(
         },
         LlmMessage {
             role: "user".into(),
-            content: build_user_prompt(scfg, history).into(),
+            content: build_user_prompt(clip_id, clip, history).into(),
         },
     ];
     // 最多一次带反馈的重试：长度/重复问题模型通常一条反馈即可修正
@@ -273,39 +293,42 @@ async fn generate_lines(
     None
 }
 
-/// 每日全量生成：按日程顺序遍历当前角色所有状态，逐个生成当日台词。
-/// 每个状态完成即落盘（中断不丢已完成部分）；检测到角色被切换则中止剩余状态。
-pub async fn generate_daily(app: &AppHandle) {
+/// 为「当前状态」生成当日台词：只处理该状态可能播到的动作，逐个生成。
+/// 每个动作完成即落盘（中断不丢已完成部分）；检测到角色/状态变化则中止剩余动作。
+pub async fn generate_for_current_state(app: &AppHandle) {
     let engine = app.state::<StateEngine>();
     let persona = engine.persona();
     let persona_id = persona.id.clone();
+    let state = engine.current_state();
     let llm_cfg = crate::llm::load_config(app);
     if llm_cfg.api_key.is_empty() {
         return;
     }
-    for state in crate::engine::ordered_state_keys(&persona) {
-        // 切换角色后中止：剩余状态属于新角色的日程了
-        if engine.persona_id() != persona_id {
+    // 生成按「动作」而不是「状态」：提示词只带该动作的画面描述，台词才不会跑偏；
+    // 状态在这里只用来决定"这一轮该提前准备哪些动作"。
+    for clip_id in crate::engine::state_clip_ids(&persona, &state) {
+        // 切换角色/状态后中止：剩余动作属于新的日程了
+        if engine.persona_id() != persona_id || engine.current_state() != state {
             break;
         }
-        if engine.gen_has_today(&state) || engine.gen_failed(&persona_id, &state) {
+        if engine.gen_has_today(&clip_id) || engine.gen_failed(&persona_id, &clip_id) {
             continue;
         }
-        let scfg = match persona.states.get(&state) {
-            Some(c) => c,
+        let clip = match persona.clips.get(&clip_id) {
+            Some(clip) => clip.clone(),
             None => continue,
         };
         let history = engine.gen_history();
-        match generate_lines(&llm_cfg, &persona, &state, scfg, &history).await {
-            Some(texts) => engine.record_gen_bubble(&persona_id, &state, &texts),
-            None => engine.record_gen_failure(&persona_id, &state),
+        match generate_lines(&llm_cfg, &persona, &clip_id, &clip, &history).await {
+            Some(texts) => engine.record_gen_bubble(&persona_id, &clip_id, &texts),
+            None => engine.record_gen_failure(&persona_id, &clip_id),
         }
     }
 }
 
-/// 触发入口：满足条件（开关开、有未生成的当日状态、已配置 Key、无并发任务）时
-/// 后台起一个每日全量生成任务。幂等，可在启动/切角色/状态切换/开开关处随意调用。
-pub fn maybe_spawn_daily(app: &AppHandle) {
+/// 触发入口：满足条件（开关开、当前状态有用到的动作缺当日文案、已配置 Key、无并发任务）时
+/// 后台起一个生成任务。幂等，可在启动/切角色/状态切换/开开关处随意调用。
+pub fn maybe_spawn_for_state(app: &AppHandle) {
     let engine = app.state::<StateEngine>();
     if engine.generating.load(Ordering::Relaxed) {
         return;
@@ -313,7 +336,8 @@ pub fn maybe_spawn_daily(app: &AppHandle) {
     if !engine.prefs().ai_bubbles {
         return;
     }
-    if !engine.gen_needs_refresh() {
+    let state = engine.current_state();
+    if !engine.gen_needs_refresh(&state) {
         return;
     }
     // API Key 判断放最后：load_config 要读一次磁盘
@@ -338,23 +362,68 @@ pub fn maybe_spawn_daily(app: &AppHandle) {
         }
         let engine = app2.state::<StateEngine>();
         let _reset = Reset(&engine.generating);
-        generate_daily(&app2).await;
+        generate_for_current_state(&app2).await;
     });
 }
 
-/// 从内存 GenState 取某状态当日的生成台词池；非当日 / 未生成 / 空池返回 None（回退原配置）。
+/// 从内存 GenState 取某动作当日的生成台词池；非当日 / 未生成 / 空池返回 None（回退原配置）。
 /// 供引擎装填气泡洗牌袋时调用，锁内只做查表。
-pub fn today_pool(gs: &Mutex<GenState>, state: &str) -> Option<Vec<String>> {
+pub fn today_pool(gs: &Mutex<GenState>, clip_id: &str) -> Option<Vec<String>> {
     let gs = gs.lock().unwrap();
     if gs.cache.date != today_str() {
         return None;
     }
-    gs.cache.by_state.get(state).filter(|v| !v.is_empty()).cloned()
+    gs.cache.by_clip.get(clip_id).filter(|v| !v.is_empty()).cloned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn link_persona() -> PersonaConfig {
+        serde_json::from_str(include_str!(
+            "../../resources/characters/link/persona.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn generation_prompt_is_clip_level() {
+        let persona = link_persona();
+        let clip = persona.clips.get("walk").unwrap();
+        let system = build_system_prompt(&persona, "walk", clip);
+        // 提示词必须锚定在当前动作的画面上
+        assert!(system.contains(&clip.description), "{system}");
+        assert!(system.contains(&clip.label), "{system}");
+        // 不能混入对话语气（tone / talkativeness 推导结果）：那是"聊天时怎么说话"的约束
+        for state_cfg in persona.states.values() {
+            assert!(
+                !system.contains(state_cfg.chat_tone()),
+                "气泡提示词混入对话语气：{}",
+                state_cfg.chat_tone()
+            );
+        }
+        let user = build_user_prompt("walk", clip, &[]);
+        assert!(user.contains(&clip.description), "{user}");
+        assert!(user.contains(&clip.bubbles[0]), "查重列表应含动作自带文案：{user}");
+    }
+
+    #[test]
+    fn clip_scene_falls_back_to_label_then_id() {
+        let mut clip = AnimationClipConfig {
+            spritesheet: String::new(),
+            label: "走动".into(),
+            description: String::new(),
+            frames: 1,
+            frame_ms: 100,
+            bubbles: vec![],
+        };
+        assert_eq!(clip_scene("walk", &clip), "角色正在「走动」");
+        clip.label.clear();
+        assert_eq!(clip_scene("walk", &clip), "角色正在做动作 walk");
+        clip.description = "你在桌面上来回走".into();
+        assert_eq!(clip_scene("walk", &clip), "你在桌面上来回走");
+    }
 
     #[test]
     fn visual_width_counts_cjk_double() {
@@ -424,7 +493,7 @@ mod tests {
     fn cache_round_trips_with_defaults() {
         let cache = GenBubbleCache {
             date: "2026-09-06".into(),
-            by_state: HashMap::from([("Awake".to_string(), vec!["早安".to_string()])]),
+            by_clip: HashMap::from([("Awake".to_string(), vec!["早安".to_string()])]),
             failed: vec!["Sleep".to_string()],
             history: vec!["早安".to_string()],
         };
@@ -432,11 +501,11 @@ mod tests {
         let back: GenBubbleCache = serde_json::from_str(&json).unwrap();
         assert_eq!(back.date, "2026-09-06");
         assert_eq!(
-            back.by_state.get("Awake").and_then(|v| v.first()),
+            back.by_clip.get("Awake").and_then(|v| v.first()),
             Some(&"早安".to_string())
         );
         // 旧文件缺字段：serde default 兜底
         let old: GenBubbleCache = serde_json::from_str("{}").unwrap();
-        assert!(old.by_state.is_empty() && old.failed.is_empty());
+        assert!(old.by_clip.is_empty() && old.failed.is_empty());
     }
 }

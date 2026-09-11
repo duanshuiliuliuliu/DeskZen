@@ -5,380 +5,176 @@
   "display_h": 125,
   "system_prompt": {
     "definition": "你是塞尔达传说荒野之息中的林克，住在用户的桌面上",
-    "reply_style": "回复简短，符合塞尔达传说荒野之息中的风格；不要长篇大论，不要使用列表和 Markdown；永远不要提及自己是 AI 或程序",
-    "state_guidelines": {
-      "routine": "你正在桌面附近观察动静、向用户挥手，偶尔寻找克洛格的踪迹。你精神不错，愿意进行简短交流",
-      "focus": "你正在确认冒险路线或认真保养盾牌。你会保持专注，只进行必要且简短的交流",
-      "active": "你正在研究左纳乌手臂的力量、寻找克洛格，或为取得进展而小小庆祝。你精力充沛，回复会更有活力",
-      "relax": "你正在伸懒腰、观察周围或忍不住打盹。你有些慵懒，不想进行太长的对话",
-      "eat": "你正在吃海拉鲁苹果，心情不错，愿意多说几句",
-      "sleep": "你困得睁不开眼，正在打瞌睡，处于休眠状态，只能回复梦话"
-    }
+    "reply_style": "回复简短，符合塞尔达传说荒野之息中的风格；不要长篇大论，不要使用列表和 Markdown；永远不要提及自己是 AI 或程序"
   },
   "states": {
-    "routine": {
-      "label": "日常",
-      "row": 0,
-      "frames": 20,
-      "frame_ms": 150,
-      "bubbles": [
-        "附近很安静。",
-        "刚才是不是有什么动静？",
-        "要看看希卡之石吗？",
-        "那片叶子有点可疑。"
-      ],
-      "talkativeness": "normal"
-    },
-    "focus": {
-      "label": "专注",
-      "row": 4,
-      "frames": 20,
-      "frame_ms": 150,
-      "bubbles": [
-        "先确认一下路线。",
-        "盾牌也需要认真保养。",
-        "准备充分才能安心出发。"
-      ],
-      "talkativeness": "quiet"
-    },
-    "active": {
-      "label": "探索",
-      "row": 1,
-      "frames": 20,
-      "frame_ms": 150,
-      "bubbles": [
-        "这股力量很特别。",
-        "附近也许藏着克洛格。",
-        "有进展了。"
-      ],
-      "talkativeness": "chatty"
-    },
-    "relax": {
-      "label": "放松",
-      "row": 2,
-      "frames": 20,
-      "frame_ms": 150,
-      "bubbles": [
-        "伸个懒腰。",
-        "稍微休息一下。",
-        "刚才差点睡着了……"
-      ],
-      "talkativeness": "normal"
-    },
-    "eat": {
-      "label": "吃苹果",
-      "row": 3,
-      "frames": 20,
-      "frame_ms": 150,
-      "bubbles": [
-        "这个苹果很甜。",
-        "补充一点体力。",
-        "再吃一口。"
-      ],
-      "talkativeness": "chatty"
-    },
-    "sleep": {
-      "label": "睡觉",
-      "row": 5,
-      "frames": 20,
-      "frame_ms": 150,
-      "bubbles": [
-        "Zzz...",
-        "塞..尔..达..",
-        "再睡一会儿……"
-      ],
-      "talkativeness": "mute"
-    }
+    "routine": {"label": "日常", "talkativeness": "normal"},
+    "focus": {"label": "专注", "talkativeness": "quiet"},
+    "active": {"label": "探索", "talkativeness": "chatty"},
+    "relax": {"label": "放松", "talkativeness": "normal", "tone": "你有些慵懒，不想进行太长的对话。"},
+    "eat": {"label": "吃苹果", "talkativeness": "chatty"},
+    "sleep": {"label": "睡觉", "talkativeness": "mute"}
   },
   "schedule": {
     "loop": [
-      {
-        "state": "routine",
-        "duration": 30
-      },
-      {
-        "state": "active",
-        "duration": 20
-      },
-      {
-        "state": "focus",
-        "duration": 20
-      },
-      {
-        "state": "relax",
-        "duration": 30
-      }
+      {"state": "routine", "duration": 30},
+      {"state": "active", "duration": 20},
+      {"state": "focus", "duration": 20},
+      {"state": "relax", "duration": 30}
     ],
     "time": [
-      {
-        "start": "08:00",
-        "end": "09:00",
-        "state": "eat"
-      },
-      {
-        "start": "12:00",
-        "end": "13:00",
-        "state": "eat"
-      },
-      {
-        "start": "18:00",
-        "end": "19:00",
-        "state": "eat"
-      },
-      {
-        "start": "20:00",
-        "end": "08:00",
-        "state": "sleep"
-      }
+      {"start": "08:00", "end": "09:00", "state": "eat"},
+      {"start": "12:00", "end": "13:00", "state": "eat"},
+      {"start": "18:00", "end": "19:00", "state": "eat"},
+      {"start": "20:00", "end": "08:00", "state": "sleep"}
     ]
   },
   "clips": {
     "observe": {
       "spritesheet": "/characters/link/clips/observe.webp",
+      "label": "观察周围",
+      "description": "你正站在原地仔细打量四周，安静地留意有没有动静",
       "frames": 60,
-      "frame_ms": 83
+      "frame_ms": 83,
+      "bubbles": ["周围很安静。", "有什么动静吗？", "先看看情况。"]
     },
     "stretch": {
       "spritesheet": "/characters/link/clips/stretch.webp",
+      "label": "伸懒腰",
+      "description": "你正抬起手臂伸懒腰，肩膀有点酸，刚放松下来",
       "frames": 60,
-      "frame_ms": 83
+      "frame_ms": 83,
+      "bubbles": ["伸个懒腰。", "肩膀有点酸。", "活动一下。"]
     },
     "sheikah_slate": {
       "spritesheet": "/characters/link/clips/sheikah_slate.webp",
+      "label": "查看希卡之石",
+      "description": "你正低头查看希卡之石上的地图，专注地确认路线",
       "frames": 70,
-      "frame_ms": 83
+      "frame_ms": 83,
+      "bubbles": ["看看地图。", "希卡之石有反应。", "路线记下了。"]
     },
     "eat_apple": {
       "spritesheet": "/characters/link/clips/eat_apple.webp",
+      "label": "吃苹果",
+      "description": "你正咬着手里的海拉鲁苹果，吃得很香",
       "frames": 68,
-      "frame_ms": 83
+      "frame_ms": 83,
+      "bubbles": ["这个苹果很甜。", "补充点体力。", "再来一口。"]
     },
     "standing_doze": {
       "spritesheet": "/characters/link/clips/standing_doze.webp",
-      "frames": 60,
-      "frame_ms": 83
+      "label": "站着打盹",
+      "description": "你站着打起了瞌睡，眼睛半闭，说话含糊",
+      "frames": 58,
+      "frame_ms": 83,
+      "bubbles": ["有点困……", "就眯一会儿。", "差点睡着了。"]
     },
     "polish_shield": {
       "spritesheet": "/characters/link/clips/polish_shield.webp",
+      "label": "保养盾牌",
+      "description": "你正用布擦拭盾牌，认真做装备保养",
       "frames": 73,
-      "frame_ms": 83
+      "frame_ms": 83,
+      "bubbles": ["盾牌得擦干净。", "装备要保养。", "再检查一遍。"]
     },
     "korok_leaf": {
       "spritesheet": "/characters/link/clips/korok_leaf.webp",
+      "label": "寻找克洛格",
+      "description": "你正盯着一片轻轻晃动的叶子，怀疑附近藏着克洛格",
       "frames": 68,
-      "frame_ms": 83
+      "frame_ms": 83,
+      "bubbles": ["那片叶子在动。", "附近有克洛格？", "雅哈哈？"]
     },
     "zonai_hand": {
       "spritesheet": "/characters/link/clips/zonai_hand.webp",
-      "frames": 73,
-      "frame_ms": 83
+      "label": "左纳乌之力",
+      "description": "你正抬起左纳乌手臂，感受掌心流动的力量",
+      "frames": 69,
+      "frame_ms": 83,
+      "bubbles": ["这股力量很特别。", "手臂在发光。", "再试一次。"]
     },
     "task_cheer": {
       "spritesheet": "/characters/link/clips/task_cheer.webp",
+      "label": "庆祝一下",
+      "description": "你刚完成一件事，握起拳头小小地庆祝了一下",
       "frames": 60,
-      "frame_ms": 83
+      "frame_ms": 83,
+      "bubbles": ["有进展了。", "这样就行。", "搞定。"]
     },
     "greet_wave": {
       "spritesheet": "/characters/link/clips/greet_wave.webp",
+      "label": "挥手问候",
+      "description": "你正对着屏幕前的人挥手打招呼，态度友好",
       "frames": 61,
-      "frame_ms": 83
+      "frame_ms": 83,
+      "bubbles": ["你好。", "在忙吗？", "我在这儿。"]
     },
     "walk": {
       "spritesheet": "/characters/link/clips/walk.webp",
-      "frames": 20,
-      "frame_ms": 150
+      "label": "走动",
+      "description": "你正在桌面上来回走动，脚步轻快，偶尔停下来看看",
+      "frames": 16,
+      "frame_ms": 150,
+      "bubbles": ["走走看。", "巡逻一圈。", "去那边看看。"]
     },
     "ride_motorcycle": {
       "spritesheet": "/characters/link/clips/ride_motorcycle.webp",
-      "frames": 20,
-      "frame_ms": 150
+      "label": "骑摩托",
+      "description": "你正骑着摩托车出发兜风，风很大，心情不错",
+      "frames": 18,
+      "frame_ms": 150,
+      "bubbles": ["出发！", "兜一圈。", "风不错。"]
     },
     "sit_idle": {
       "spritesheet": "/characters/link/clips/sit_idle.webp",
-      "frames": 20,
-      "frame_ms": 150
+      "label": "坐着发呆",
+      "description": "你正坐着发呆，什么也不想，安安静静",
+      "frames": 18,
+      "frame_ms": 150,
+      "bubbles": ["坐一会儿。", "什么也不想。", "安静一下。"]
     },
     "lie_sleep": {
       "spritesheet": "/characters/link/clips/lie_sleep.webp",
-      "frames": 20,
-      "frame_ms": 150
+      "label": "躺下睡觉",
+      "description": "你正躺着睡觉，只会嘟囔几句梦话",
+      "frames": 15,
+      "frame_ms": 150,
+      "bubbles": ["Zzz...", "睡一会儿……", "别吵……"]
     },
     "fight": {
       "spritesheet": "/characters/link/clips/fight.webp",
-      "frames": 20,
-      "frame_ms": 150
+      "label": "挥剑战斗",
+      "description": "你正挥剑迎战，动作果断，注意力高度集中",
+      "frames": 17,
+      "frame_ms": 150,
+      "bubbles": ["来吧！", "别过来。", "喝！"]
     }
   },
   "scenes": {
     "routine": [
-      {
-        "id": "notice_the_viewer",
-        "label": "打招呼",
-        "weight": 3,
-        "steps": [
-          {
-            "clip": "greet_wave"
-          }
-        ]
-      },
-      {
-        "id": "listen_and_observe",
-        "label": "观察周围",
-        "weight": 5,
-        "steps": [
-          {
-            "clip": "observe"
-          }
-        ]
-      },
-      {
-        "id": "patrol_a_round",
-        "label": "巡视一圈",
-        "weight": 5,
-        "steps": [
-          {
-            "clip": "walk"
-          }
-        ]
-      },
-      {
-        "id": "korok_hint",
-        "label": "发现奇怪叶子",
-        "weight": 2,
-        "steps": [
-          {
-            "clip": "korok_leaf"
-          }
-        ]
-      }
+      {"id": "notice_the_viewer", "label": "打招呼", "weight": 3, "steps": [{"clip": "greet_wave"}]},
+      {"id": "listen_and_observe", "label": "观察周围", "weight": 5, "steps": [{"clip": "observe"}]},
+      {"id": "patrol_a_round", "label": "巡视一圈", "weight": 5, "steps": [{"clip": "walk"}]},
+      {"id": "korok_hint", "label": "发现奇怪叶子", "weight": 2, "steps": [{"clip": "korok_leaf"}]}
     ],
     "focus": [
-      {
-        "id": "check_the_route",
-        "label": "查看希卡之石",
-        "weight": 3,
-        "steps": [
-          {
-            "clip": "sheikah_slate"
-          }
-        ]
-      },
-      {
-        "id": "maintain_the_shield",
-        "label": "保养盾牌",
-        "weight": 5,
-        "steps": [
-          {
-            "clip": "polish_shield"
-          }
-        ]
-      },
-      {
-        "id": "focus_complete",
-        "label": "完成一轮专注",
-        "weight": 1,
-        "steps": [
-          {
-            "clip": "task_cheer"
-          }
-        ]
-      }
+      {"id": "check_the_route", "label": "查看希卡之石", "weight": 3, "steps": [{"clip": "sheikah_slate"}]},
+      {"id": "maintain_the_shield", "label": "保养盾牌", "weight": 5, "steps": [{"clip": "polish_shield"}]},
+      {"id": "focus_complete", "label": "完成一轮专注", "weight": 1, "steps": [{"clip": "task_cheer"}]}
     ],
     "active": [
-      {
-        "id": "zonai_power",
-        "label": "感受左纳乌力量",
-        "weight": 4,
-        "steps": [
-          {
-            "clip": "zonai_hand"
-          }
-        ]
-      },
-      {
-        "id": "adventure_progress",
-        "label": "冒险有所进展",
-        "weight": 2,
-        "steps": [
-          {
-            "clip": "task_cheer"
-          }
-        ]
-      },
-      {
-        "id": "ride_out",
-        "label": "骑车出门探索",
-        "weight": 5,
-        "steps": [
-          {
-            "clip": "ride_motorcycle"
-          }
-        ]
-      },
-      {
-        "id": "ambush_battle",
-        "label": "遭遇战斗",
-        "weight": 2,
-        "steps": [
-          {
-            "clip": "fight"
-          }
-        ]
-      }
+      {"id": "zonai_power", "label": "感受左纳乌力量", "weight": 4, "steps": [{"clip": "zonai_hand"}]},
+      {"id": "adventure_progress", "label": "冒险有所进展", "weight": 2, "steps": [{"clip": "task_cheer"}]},
+      {"id": "ride_out", "label": "骑车出门探索", "weight": 5, "steps": [{"clip": "ride_motorcycle"}]},
+      {"id": "ambush_battle", "label": "遭遇战斗", "weight": 2, "steps": [{"clip": "fight"}]}
     ],
     "relax": [
-      {
-        "id": "long_stretch",
-        "label": "伸个懒腰",
-        "weight": 3,
-        "steps": [
-          {
-            "clip": "stretch"
-          }
-        ]
-      },
-      {
-        "id": "brief_doze",
-        "label": "站着打盹",
-        "weight": 4,
-        "steps": [
-          {
-            "clip": "standing_doze"
-          }
-        ]
-      },
-      {
-        "id": "daydream_sit",
-        "label": "坐着发呆",
-        "weight": 5,
-        "steps": [
-          {
-            "clip": "sit_idle"
-          }
-        ]
-      }
+      {"id": "long_stretch", "label": "伸个懒腰", "weight": 3, "steps": [{"clip": "stretch"}]},
+      {"id": "brief_doze", "label": "站着打盹", "weight": 4, "steps": [{"clip": "standing_doze"}]},
+      {"id": "daydream_sit", "label": "坐着发呆", "weight": 5, "steps": [{"clip": "sit_idle"}]}
     ],
-    "eat": [
-      {
-        "id": "hyrule_apple",
-        "label": "吃海拉鲁苹果",
-        "steps": [
-          {
-            "clip": "eat_apple"
-          }
-        ]
-      }
-    ],
-    "sleep": [
-      {
-        "id": "lie_down_sleep",
-        "label": "躺下睡一会儿",
-        "steps": [
-          {
-            "clip": "lie_sleep"
-          }
-        ]
-      }
-    ]
+    "eat": [{"id": "hyrule_apple", "label": "吃海拉鲁苹果", "steps": [{"clip": "eat_apple"}]}],
+    "sleep": [{"id": "lie_down_sleep", "label": "躺下睡一会儿", "steps": [{"clip": "lie_sleep"}]}]
   }
 }

@@ -39,7 +39,6 @@ pub struct PersonaConfig {
 pub struct SystemPromptConfig {
     pub definition: String,
     pub reply_style: String,
-    pub state_guidelines: HashMap<String, String>,
 }
 
 /// 状态的话痨程度：决定该状态下环境气泡的期望间隔倍率
@@ -64,22 +63,44 @@ impl Talkativeness {
             _ => Self::Normal,
         }
     }
+
+    /// 该话痨档位对应的默认对话语气（对话 system prompt 用）。
+    /// 状态没显式写 `tone` 时用它，避免"语气"和"话痨程度"两处配置各写一遍。
+    pub fn chat_tone(self) -> &'static str {
+        match self {
+            Self::Chatty => "你心情不错，愿意多说几句，回复可以稍微活泼一些。",
+            Self::Normal => "你愿意进行简短交流。",
+            Self::Quiet => "你正在专注自己的事，只进行必要且简短的交流。",
+            Self::Mute => "你处于恍惚状态，只能含糊地回应几句，甚至只说梦话。",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StateConfig {
     /// 状态的中文显示名（对话窗头部）
     pub label: String,
-    /// 该状态下的气泡文本池
-    pub bubbles: Vec<String>,
     /// 话痨程度："chatty"|"normal"|"quiet"|"mute"；缺省或未知值按 normal
     #[serde(default)]
     pub talkativeness: String,
+    /// 对话语气（可选）：想特化这个状态的说话风格时才写；
+    /// 缺省由 `talkativeness` 推导（见 `Talkativeness::chat_tone`）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tone: String,
 }
 
 impl StateConfig {
     pub fn talkativeness(&self) -> Talkativeness {
         Talkativeness::parse(&self.talkativeness)
+    }
+
+    /// 对话语气：显式 `tone` 优先，否则按话痨档位推导
+    pub fn chat_tone(&self) -> &str {
+        if self.tone.is_empty() {
+            self.talkativeness().chat_tone()
+        } else {
+            &self.tone
+        }
     }
 }
 
@@ -92,8 +113,18 @@ fn default_unit() -> u32 {
 pub struct AnimationClipConfig {
     /// 横向帧条资源路径；内置资源以 / 开头，导入角色为磁盘绝对路径。
     pub spritesheet: String,
+    /// 动作的中文说明（气泡生成提示词与调试用）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    /// 这个动作的画面描述：写清"角色正在做什么、什么心情"，
+    /// AI 台词生成只依据它（不再依据状态级指引），保证台词贴着当前动作说。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
     pub frames: u32,
     pub frame_ms: u64,
+    /// 该动作专属的气泡文案池（优先于状态级文案，保证"说什么"和"演什么"一致）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bubbles: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -180,9 +211,10 @@ struct AmbientBubbles {
     recent: VecDeque<chrono::DateTime<chrono::Local>>,
     /// 最近一次用户发消息时刻（聊天后抑制窗口用）
     last_chat_at: Option<chrono::DateTime<chrono::Local>>,
-    /// 洗牌袋：state -> 本轮剩余未弹文案（取完一轮后重洗）
+    /// 洗牌袋：池键 -> 本轮剩余未弹文案（取完一轮后重洗）。池键为 `clip:<动作id>`，
+    /// 文案只挂在动作上，所以换动作就是换池，去重也按动作各自进行。
     bags: HashMap<String, VecDeque<String>>,
-    /// 各状态上一条弹出的文案（跨轮防重复）
+    /// 各池键上一条弹出的文案（跨轮防重复）
     last_text: HashMap<String, String>,
 }
 
@@ -199,6 +231,10 @@ const BUBBLE_HOURLY_CAP: usize = 4;
 const CHAT_SUPPRESS_MIN: i64 = 3;
 /// 剩余时长不可得时用于推导间隔的兜底 D（分钟）
 const BUBBLE_FALLBACK_REMAINING_MIN: i64 = 30;
+/// 当前动作剩余时长低于此值时不再发话：把气泡挪到动作切换之后
+const BUBBLE_CLIP_MIN_REMAINING_MS: i64 = 1500;
+/// 挪到动作切换之后再多留一点，确保画面已经换好
+const BUBBLE_CLIP_SLACK_MS: i64 = 400;
 
 /// 由「距下一次状态切换的剩余时长 D（分钟）」与话痨程度推导单次间隔范围 (min, max)（分钟）。
 /// mute 返回 None（该状态不弹气泡）。normal 状态下 E = D/2，即平均每个状态周期弹约两条。
@@ -245,6 +281,8 @@ pub struct StateEngine {
     gen_bubbles: Arc<Mutex<crate::genbubble::GenState>>,
     /// 环境气泡调度状态：随机自言自语的排期、限频与洗牌袋（见 schedule_ambient_bubble）
     ambient: Arc<Mutex<AmbientBubbles>>,
+    /// 场景播放调度：由后端决定"当前播哪个场景的哪个动作"，前端按事件渲染
+    playback: Arc<Mutex<crate::playback::Playback>>,
     /// 每日气泡生成任务是否在跑（防止重复起任务）
     pub(crate) generating: Arc<AtomicBool>,
     /// 后台节拍线程的唤醒信号：switch_persona / next_state 修改配置后 notify，
@@ -301,6 +339,7 @@ impl StateEngine {
                 cache: gen_cache,
             })),
             ambient: Arc::new(Mutex::new(AmbientBubbles::default())),
+            playback: Arc::new(Mutex::new(crate::playback::Playback::default())),
             generating: Arc::new(AtomicBool::new(false)),
             prefs: Arc::new(Mutex::new(prefs)),
             wake_lock: Arc::new(Mutex::new(())),
@@ -352,15 +391,15 @@ impl StateEngine {
 
     // ---- 每日 AI 气泡：缓存读写与触发（见 genbubble.rs）----
 
-    /// 某状态今天是否已有生成台词
-    pub(crate) fn gen_has_today(&self, state: &str) -> bool {
-        crate::genbubble::today_pool(&self.gen_bubbles, state).is_some()
+    /// 某动作今天是否已有生成台词
+    pub(crate) fn gen_has_today(&self, clip_id: &str) -> bool {
+        crate::genbubble::today_pool(&self.gen_bubbles, clip_id).is_some()
     }
 
-    /// 某状态当天是否已标记失败（当天不再重试）
-    pub(crate) fn gen_failed(&self, persona_id: &str, state: &str) -> bool {
+    /// 某动作当天是否已标记失败（当天不再重试）
+    pub(crate) fn gen_failed(&self, persona_id: &str, clip_id: &str) -> bool {
         let g = self.gen_bubbles.lock().unwrap();
-        g.persona_id == persona_id && g.cache.failed.iter().any(|s| s == state)
+        g.persona_id == persona_id && g.cache.failed.iter().any(|s| s == clip_id)
     }
 
     /// 生成历史快照（查重用）
@@ -368,9 +407,9 @@ impl StateEngine {
         self.gen_bubbles.lock().unwrap().cache.history.clone()
     }
 
-    /// 记录一个状态当日生成成功（一批台词）：更新内存缓存并落盘
+    /// 记录一个动作当日生成成功（一批台词）：更新内存缓存并落盘
     /// （切换角色后到达的迟到结果直接丢弃）
-    pub(crate) fn record_gen_bubble(&self, persona_id: &str, state: &str, texts: &[String]) {
+    pub(crate) fn record_gen_bubble(&self, persona_id: &str, clip_id: &str, texts: &[String]) {
         if texts.is_empty() {
             return;
         }
@@ -380,9 +419,7 @@ impl StateEngine {
                 return;
             }
             g.cache.date = crate::genbubble::today_str();
-            g.cache
-                .by_state
-                .insert(state.to_string(), texts.to_vec());
+            g.cache.by_clip.insert(clip_id.to_string(), texts.to_vec());
             g.cache.history.extend(texts.iter().cloned());
             let keep = g.cache.history.len().saturating_sub(crate::genbubble::HISTORY_KEEP);
             if keep > 0 {
@@ -395,15 +432,15 @@ impl StateEngine {
         }
     }
 
-    /// 记录一个状态当日生成失败（不写历史、只标记，当天回退原配置）
-    pub(crate) fn record_gen_failure(&self, persona_id: &str, state: &str) {
+    /// 记录一个动作当日生成失败（不写历史、只标记，当天回退原配置）
+    pub(crate) fn record_gen_failure(&self, persona_id: &str, clip_id: &str) {
         let (cache, changed) = {
             let mut g = self.gen_bubbles.lock().unwrap();
-            if g.persona_id != persona_id || g.cache.failed.iter().any(|s| s == state) {
+            if g.persona_id != persona_id || g.cache.failed.iter().any(|s| s == clip_id) {
                 return;
             }
             g.cache.date = crate::genbubble::today_str();
-            g.cache.failed.push(state.to_string());
+            g.cache.failed.push(clip_id.to_string());
             (g.cache.clone(), true)
         };
         if changed {
@@ -411,8 +448,8 @@ impl StateEngine {
         }
     }
 
-    /// 是否需要（重新）生成当日气泡：缓存归属角色不符 / 日期过期 / 有状态既未生成也未标记失败
-    pub(crate) fn gen_needs_refresh(&self) -> bool {
+    /// 某状态用到的动作是否有当日文案缺口（缓存归属角色不符 / 日期过期 / 有动作既未生成也未标记失败）
+    pub(crate) fn gen_needs_refresh(&self, state: &str) -> bool {
         let persona = self.persona.lock().unwrap();
         let g = self.gen_bubbles.lock().unwrap();
         if g.persona_id != persona.id {
@@ -421,9 +458,12 @@ impl StateEngine {
         if g.cache.date != crate::genbubble::today_str() {
             return true;
         }
-        persona.states.keys().any(|s| {
-            !g.cache.by_state.contains_key(s) && !g.cache.failed.iter().any(|f| f == s)
-        })
+        let clips = state_clip_ids(&persona, state);
+        // 该状态没有任何可播动作时无须生成
+        !clips.is_empty()
+            && clips.iter().any(|clip| {
+                !g.cache.by_clip.contains_key(clip) && !g.cache.failed.iter().any(|f| f == clip)
+            })
     }
 
     /// 设置页开关：写内存 prefs（落盘由调用方 save_prefs 完成）
@@ -461,6 +501,37 @@ impl StateEngine {
         let next = bubble_gap_range(remaining, talkativeness)
             .map(|(min, max)| now + chrono::Duration::minutes(rng_range_i64(min, max)));
         self.ambient.lock().unwrap().next_at = next;
+    }
+
+    /// 为某状态重开场景播放，并把第一步广播给前端。
+    /// 状态切换、切换角色、启动广播都会调用；前端只按事件渲染，不再自己挑场景。
+    fn reset_playback(&self, state: &str, now: chrono::DateTime<chrono::Local>) {
+        let persona = self.persona.lock().unwrap().clone();
+        let event = self.playback.lock().unwrap().reset(&persona, state, now);
+        if let Some(event) = event {
+            let _ = self.app.emit("playback", event);
+        }
+        // 播放排期变了 → 让节拍线程按新的 next_at 重算睡眠时长。
+        // 否则线程可能已经睡到「下一次状态切换」（最长 15 分钟），动作就不会继续往下走。
+        self.notify_wake();
+    }
+
+    /// 播放推进：到点则进入同场景的下一步，或按权重抽下一个场景
+    fn advance_playback(&self, now: chrono::DateTime<chrono::Local>) {
+        let persona = self.persona.lock().unwrap().clone();
+        let event = self.playback.lock().unwrap().advance(&persona, now);
+        if let Some(event) = event {
+            let _ = self.app.emit("playback", event);
+        }
+    }
+
+    /// 当前正在播放的动作 id（气泡文案按它取池）
+    fn current_clip(&self) -> Option<String> {
+        self.playback
+            .lock()
+            .unwrap()
+            .current_clip()
+            .map(str::to_string)
     }
 
     /// 抑制判断：角色隐藏 / 对话窗打开 / 刚聊过天——命中时气泡推迟而非取消。
@@ -502,31 +573,42 @@ impl StateEngine {
         false
     }
 
-    /// 取当前状态的下一条气泡文案：洗牌袋逐条取，取完一轮后用文案池重洗。
-    /// 池来源：当日 AI 生成台词（优先）/ 角色自带 bubbles（兜底，未配 Key 也照常弹出）。
-    fn next_ambient_text(&self, state: &str, cfg: &StateConfig) -> Option<String> {
-        // 先看袋里还有没有剩余（只锁 ambient）
+    /// 取当前动作的下一条气泡文案（池来源与优先级见 [`resolve_bubble_pool`]）。
+    fn next_ambient_text(&self) -> Option<String> {
+        let persona = self.persona.lock().unwrap().clone();
+        let clip_id = self.current_clip();
+        let ai_clip =
+            clip_id
+                .as_deref()
+                .and_then(|id| crate::genbubble::today_pool(&self.gen_bubbles, id));
+        let (key, pool) = resolve_bubble_pool(&persona, clip_id.as_deref(), ai_clip)?;
+        self.draw_from_bag(&key, || pool)
+    }
+
+    /// 从指定池键的洗牌袋取一条；袋空时用 `build_pool` 重装（避免无谓地反复取大池）
+    fn draw_from_bag(
+        &self,
+        key: &str,
+        build_pool: impl FnOnce() -> Vec<String>,
+    ) -> Option<String> {
         {
             let mut ambient = self.ambient.lock().unwrap();
-            if let Some(bag) = ambient.bags.get_mut(state) {
+            if let Some(bag) = ambient.bags.get_mut(key) {
                 if let Some(text) = bag.pop_front() {
-                    ambient.last_text.insert(state.to_string(), text.clone());
+                    ambient.last_text.insert(key.to_string(), text.clone());
                     return Some(text);
                 }
             }
         }
-        // 袋空：组装新池（此时不持 ambient 锁，避免与 gen_bubbles 锁嵌套）
-        let pool = crate::genbubble::today_pool(&self.gen_bubbles, state)
-            .filter(|p| !p.is_empty())
-            .unwrap_or_else(|| cfg.bubbles.clone());
+        let pool = build_pool();
         if pool.is_empty() {
             return None;
         }
         let mut ambient = self.ambient.lock().unwrap();
-        let mut bag = refill_bag(pool, ambient.last_text.get(state).map(String::as_str));
+        let mut bag = refill_bag(pool, ambient.last_text.get(key).map(String::as_str));
         let text = bag.pop_front()?;
-        ambient.bags.insert(state.to_string(), bag);
-        ambient.last_text.insert(state.to_string(), text.clone());
+        ambient.bags.insert(key.to_string(), bag);
+        ambient.last_text.insert(key.to_string(), text.clone());
         Some(text)
     }
 
@@ -540,12 +622,18 @@ impl StateEngine {
             self.schedule_ambient_bubble(now);
             return;
         }
-        let persona = self.persona.lock().unwrap().clone();
-        let state = self.resolve_state(&persona, now);
-        let text = persona
-            .states
-            .get(&state)
-            .and_then(|cfg| self.next_ambient_text(&state, cfg));
+        // 动作马上要切换时不发话：把气泡挪到下一个动作开始之后，
+        // 避免"话说到一半画面就换了"造成内容与画面错位。
+        if let Some(remaining) = self.playback.lock().unwrap().remaining_ms(now) {
+            if remaining < BUBBLE_CLIP_MIN_REMAINING_MS {
+                let wait = chrono::Duration::milliseconds(
+                    remaining.max(0) + BUBBLE_CLIP_SLACK_MS,
+                );
+                self.ambient.lock().unwrap().next_at = Some(now + wait);
+                return;
+            }
+        }
+        let text = self.next_ambient_text();
         if let Some(text) = text {
             {
                 let mut ambient = self.ambient.lock().unwrap();
@@ -724,14 +812,22 @@ impl StateEngine {
             ambient.bags.clear();
             ambient.last_text.clear();
         }
+        // 场景洗牌袋与"当前播放"都属于旧角色，整体清空后按新角色重开
+        self.playback.lock().unwrap().clear();
         // 按新角色的当前状态重排环境气泡
         self.schedule_ambient_bubble(chrono::Local::now());
-        crate::genbubble::maybe_spawn_daily(app);
+        crate::genbubble::maybe_spawn_for_state(app);
         // 修改完成后唤醒节拍线程，使新日程表立即生效（否则线程仍睡在旧 next_transition_at）。
         self.notify_wake();
         // 给前端的显示配置带 zoomed 尺寸，前端 applyPersona 据此零改动呈现缩放后的角色。
         let _ = app.emit("persona-changed", self.persona_view());
-        let _ = app.emit("state-changed", StateChanged { state });
+        let _ = app.emit(
+            "state-changed",
+            StateChanged {
+                state: state.clone(),
+            },
+        );
+        self.reset_playback(&state, chrono::Local::now());
         // 新角色缩放后尺寸可能不同：同步重设窗口并保持地板不动。
         crate::resize_persona_window(&self.app);
         Ok(())
@@ -740,15 +836,23 @@ impl StateEngine {
     /// 启动即广播当前角色与状态，并排出第一条环境气泡（启动时不立即弹出）
     pub fn broadcast_state(&self) {
         let persona = self.persona();
-        let state = self.resolve_state(&persona, chrono::Local::now());
+        let now = chrono::Local::now();
+        let state = self.resolve_state(&persona, now);
         // 记录“该状态已广播过”，否则节拍线程醒来读到 last_state=None 会误判为状态变化，
         // 再次 emit state-changed，导致开局重复广播。
         *self.last_state.lock().unwrap() = Some(state.clone());
         // 带 zoomed display 给前端，前端 applyPersona 不因广播而回到基准尺寸。
         let _ = self.app.emit("persona-changed", self.persona_view());
-        let _ = self.app.emit("state-changed", StateChanged { state });
+        let _ = self.app.emit(
+            "state-changed",
+            StateChanged {
+                state: state.clone(),
+            },
+        );
+        // 前端拿到角色配置后再给播放指令，顺序保证前端能解析到动作资源
+        self.reset_playback(&state, now);
         // 排出启动后的第一条环境气泡（不立即弹出，给角色一段安静期）
-        self.schedule_ambient_bubble(chrono::Local::now());
+        self.schedule_ambient_bubble(now);
     }
 
     /// 后台节拍线程：睡到「下一个状态切换时刻」与「下一条环境气泡时刻」中较早者，
@@ -757,6 +861,7 @@ impl StateEngine {
         let app = self.app.clone();
         let persona = Arc::clone(&self.persona);
         let ambient = Arc::clone(&self.ambient);
+        let playback = Arc::clone(&self.playback);
         let last_state = Arc::clone(&self.last_state);
         let manual_state = Arc::clone(&self.manual_state);
         let wake_lock = Arc::clone(&self.wake_lock);
@@ -776,10 +881,15 @@ impl StateEngine {
             // 环境气泡的预定时刻若早于状态切换，则按气泡时刻唤醒
             let wake_at = {
                 let bubble_at = ambient.lock().unwrap().next_at;
-                match bubble_at {
-                    Some(t) if t < next => t,
-                    _ => next,
+                let play_at = playback.lock().unwrap().next_at();
+                let mut earliest = next;
+                if let Some(t) = bubble_at {
+                    earliest = earliest.min(t);
                 }
+                if let Some(t) = play_at {
+                    earliest = earliest.min(t);
+                }
+                earliest
             };
             let mut sleep_dur = (wake_at - now)
                 .to_std()
@@ -810,7 +920,7 @@ impl StateEngine {
             let mut state_changed = false;
             if last.as_deref() != Some(state.as_str()) {
                 *last = Some(state.clone());
-                let _ = app.emit("state-changed", StateChanged { state });
+                let _ = app.emit("state-changed", StateChanged { state: state.clone() });
                 state_changed = true;
             }
             drop(last);
@@ -818,11 +928,15 @@ impl StateEngine {
             if state_changed {
                 // 新状态的剩余时长/话痨程度不同，气泡按新状态重排（状态切换本身不弹气泡）。
                 engine.schedule_ambient_bubble(now);
+                // 新状态换一套场景：重开播放并把第一步广播给前端
+                engine.reset_playback(&state, now);
             }
+            // 到点就推进场景步骤（同场景的下一步 / 下一个场景）
+            engine.advance_playback(now);
             // 处理到期气泡：若刚重排过，next_at 在未来，自然跳过，不会用旧状态文案。
             engine.fire_ambient_bubble_if_due(now);
             // 跨天/启动后补齐当日 AI 气泡（幂等，条件不满足时内部直接返回）
-            crate::genbubble::maybe_spawn_daily(&app);
+            crate::genbubble::maybe_spawn_for_state(&app);
         });
     }
 
@@ -851,6 +965,8 @@ impl StateEngine {
         // 新的手动覆盖带到期时间 → 唤醒线程，使该到期时刻尽早接管。
         self.notify_wake();
         let _ = self.app.emit("state-changed", StateChanged { state: next.clone() });
+        // 手动切换状态同样要换一整套场景，否则画面会停在上一个状态的动作上
+        self.reset_playback(&next, chrono::Local::now());
         // 手动覆盖改写了“下一次切换时刻”（last_state 已预先登记，节拍线程不会再触发
         // 状态变化分支），气泡需按新状态的剩余时长/话痨程度就地重排。
         self.schedule_ambient_bubble(chrono::Local::now());
@@ -1081,6 +1197,49 @@ pub(crate) fn is_playable_persona(persona: &PersonaConfig) -> bool {
             .all(|state| persona.scenes.get(state).is_some_and(|scenes| !scenes.is_empty()))
 }
 
+/// 某状态会用到哪些动作（按场景出现顺序去重）——AI 每日文案按动作粒度生成，
+/// 只需要生成当前状态可能播到的动作，控制每日调用量。
+pub(crate) fn state_clip_ids(persona: &PersonaConfig, state: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(scenes) = persona.scenes.get(state) {
+        for scene in scenes {
+            for step in &scene.steps {
+                if persona.clips.contains_key(&step.clip) && !ids.contains(&step.clip) {
+                    ids.push(step.clip.clone());
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// 决定这次气泡用哪个文案池，返回（洗牌袋键, 文案池）。
+/// 文案只挂在动作上，保证"说的话"必然对应"正在演的动作"。
+/// 当日 AI 台词与动作自带台词**合并**成一个池（AI 在前、去重）：
+/// AI 偶尔只产出 1~2 条，合并后池子才不会薄到反复念同一句；没有动作或池空则不弹。
+pub(crate) fn resolve_bubble_pool(
+    persona: &PersonaConfig,
+    clip_id: Option<&str>,
+    ai_clip: Option<Vec<String>>,
+) -> Option<(String, Vec<String>)> {
+    let clip_id = clip_id?;
+    let static_clip = persona
+        .clips
+        .get(clip_id)
+        .map(|clip| clip.bubbles.clone())
+        .unwrap_or_default();
+    let mut pool: Vec<String> = Vec::new();
+    for text in ai_clip.unwrap_or_default().into_iter().chain(static_clip) {
+        if !pool.contains(&text) {
+            pool.push(text);
+        }
+    }
+    if pool.is_empty() {
+        return None;
+    }
+    Some((format!("clip:{clip_id}"), pool))
+}
+
 /// 自动状态：time 时段优先，否则循环，最后兜底
 fn automatic_state(persona: &PersonaConfig, mins: u32) -> String {
     if let Some(slot) = find_active_slot(&persona.schedule, mins) {
@@ -1290,22 +1449,18 @@ fn next_transition_at(
         .unwrap_or_else(|| *now + chrono::Duration::seconds(30))
 }
 
-/// 根据 persona 定义与当前状态组装 LLM system prompt
+/// 根据 persona 定义与当前状态组装对话用的 LLM system prompt。
+/// 语气优先取状态的 `tone`，没写就按 `talkativeness` 推导。
 pub fn build_system_prompt(persona: &PersonaConfig, state: &str) -> String {
     let sp = &persona.system_prompt;
-    let label = persona
-        .states
-        .get(state)
-        .map(|s| s.label.as_str())
-        .unwrap_or(state);
-    let guideline = sp
-        .state_guidelines
-        .get(state)
-        .map(String::as_str)
-        .unwrap_or("");
+    let state_cfg = persona.states.get(state);
+    let label = state_cfg.map(|s| s.label.as_str()).unwrap_or(state);
+    let tone = state_cfg
+        .map(StateConfig::chat_tone)
+        .unwrap_or_else(|| Talkativeness::Normal.chat_tone());
     format!(
         "【角色定义】\n{}\n\n【回复风格】\n{}\n\n【当前状态】\n角色当前处于“{}”（{}）状态。{}",
-        sp.definition, sp.reply_style, label, state, guideline
+        sp.definition, sp.reply_style, label, state, tone
     )
 }
 
@@ -1359,7 +1514,7 @@ fn shuffle(list: &mut [String]) {
 
 /// 用文案池装填洗牌袋：打乱顺序后逐条弹出，保证一轮之内不重复；
 /// 池多于一条时，若重洗后的首条与上一轮末条相同则与第二条交换，避免跨轮连续重复。
-fn refill_bag(mut pool: Vec<String>, last_shown: Option<&str>) -> VecDeque<String> {
+pub(crate) fn refill_bag(mut pool: Vec<String>, last_shown: Option<&str>) -> VecDeque<String> {
     shuffle(&mut pool);
     if pool.len() > 1 {
         if let Some(last) = last_shown {
@@ -1740,6 +1895,30 @@ mod tests {
     }
 
     #[test]
+    fn chat_prompt_uses_tone_then_talkativeness_default() {
+        let p = link();
+
+        // 显式写了 tone 的状态用 tone
+        let relax = build_system_prompt(&p, "relax");
+        assert!(relax.contains(&p.states["relax"].tone), "{relax}");
+
+        // 没写 tone 的状态按话痨档位推导：eat=chatty、sleep=mute
+        let eat = build_system_prompt(&p, "eat");
+        assert!(eat.contains(Talkativeness::Chatty.chat_tone()), "{eat}");
+        let sleep = build_system_prompt(&p, "sleep");
+        assert!(sleep.contains(Talkativeness::Mute.chat_tone()), "{sleep}");
+        assert!(sleep.contains("梦话"), "{sleep}");
+
+        // 角色定义与回复风格始终在
+        assert!(eat.contains(&p.system_prompt.definition), "{eat}");
+        assert!(eat.contains(&p.system_prompt.reply_style), "{eat}");
+
+        // 未知状态退回 normal 语气，不 panic
+        let unknown = build_system_prompt(&p, "不存在的状态");
+        assert!(unknown.contains(Talkativeness::Normal.chat_tone()), "{unknown}");
+    }
+
+    #[test]
     fn embedded_scenes_reference_existing_states_and_clips() {
         for (id, json) in EMBEDDED_PERSONAS {
             let persona: PersonaConfig = serde_json::from_str(json).unwrap();
@@ -1777,6 +1956,60 @@ mod tests {
         let mut state_without_scene = p;
         state_without_scene.scenes.remove("sleep");
         assert!(!is_playable_persona(&state_without_scene));
+    }
+
+    #[test]
+    fn bubble_pool_uses_current_clip_only() {
+        let p = link();
+        let clip = p.clips.get("walk").unwrap();
+        assert!(!clip.bubbles.is_empty(), "内置角色每个动作都应带静态文案");
+
+        // 没有 AI 台词时用动作自带文案
+        let (key, pool) = resolve_bubble_pool(&p, Some("walk"), None).unwrap();
+        assert_eq!(key, "clip:walk");
+        assert_eq!(pool, clip.bubbles);
+
+        // 当日 AI 台词与动作自带文案合并（AI 在前），避免 AI 只产出 1 条时反复念同一句
+        let (key, pool) =
+            resolve_bubble_pool(&p, Some("walk"), Some(vec!["AI 动作台词".into()])).unwrap();
+        assert_eq!(key, "clip:walk");
+        let mut expected = vec!["AI 动作台词".to_string()];
+        expected.extend(clip.bubbles.iter().cloned());
+        assert_eq!(pool, expected);
+
+        // AI 与自带文案重复时只保留一条
+        let duplicated = resolve_bubble_pool(&p, Some("walk"), Some(clip.bubbles.clone())).unwrap();
+        assert_eq!(duplicated.1, clip.bubbles);
+    }
+
+    #[test]
+    fn bubble_pool_is_none_without_clip_or_text() {
+        let mut p = link();
+        // 没有正在播放的动作 → 不弹（文案只挂在动作上，绝不猜）
+        assert!(resolve_bubble_pool(&p, None, None).is_none());
+
+        // 动作没有自带文案且当天没有 AI 台词 → 不弹
+        p.clips.get_mut("walk").unwrap().bubbles.clear();
+        assert!(resolve_bubble_pool(&p, Some("walk"), None).is_none());
+        assert!(resolve_bubble_pool(&p, Some("walk"), Some(vec![])).is_none());
+
+        // 引用了不存在的动作 id 同样不弹（手改配置兜底）
+        assert!(resolve_bubble_pool(&p, Some("not-a-clip"), None).is_none());
+    }
+
+    #[test]
+    fn state_clip_ids_are_unique_and_in_scene_order() {
+        let p = link();
+        let ids = state_clip_ids(&p, "relax");
+        assert!(!ids.is_empty());
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "同一动作只应出现一次");
+        for id in &ids {
+            assert!(p.clips.contains_key(id), "引用了不存在的动作: {id}");
+        }
+        assert!(state_clip_ids(&p, "不存在的状态").is_empty());
     }
 
     #[test]

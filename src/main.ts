@@ -5,7 +5,6 @@ import "./styles.css";
 
 interface StateConfig {
   label: string;
-  bubbles: string[];
 }
 
 interface AnimationClipConfig {
@@ -14,16 +13,11 @@ interface AnimationClipConfig {
   frame_ms: number;
 }
 
-interface SceneStepConfig {
-  clip: string;
-  loops?: number;
-}
-
 interface SceneConfig {
   id: string;
   label?: string;
   weight?: number;
-  steps: SceneStepConfig[];
+  steps: { clip: string; loops?: number }[];
 }
 
 interface PersonaConfig {
@@ -44,16 +38,35 @@ interface BubblePayload {
   text: string;
 }
 
+/** 后端下发的播放指令：前端只负责渲染，不再自己挑场景 */
+interface PlaybackPayload {
+  state: string;
+  scene_id: string;
+  scene_label: string;
+  step_index: number;
+  clip: string;
+  spritesheet: string;
+  frames: number;
+  frame_ms: number;
+  loops: number;
+  duration_ms: number;
+}
+
 let persona: PersonaConfig | null = null;
 
 const character = document.getElementById("character") as HTMLDivElement;
+const layers = Array.from(
+  character.querySelectorAll<HTMLDivElement>(".character-layer"),
+);
 const bubble = document.getElementById("bubble") as HTMLDivElement;
 let bubbleTimer: ReturnType<typeof setTimeout> | undefined;
-let sceneTimer: ReturnType<typeof setTimeout> | undefined;
-let sceneRunId = 0;
+/** 当前显示的是哪一层（换动作时把新动作画到另一层并交叉淡入） */
+let activeLayer = 0;
 let dragging = false;
 let pointerStart = { x: 0, y: 0 };
 
+/** 交叉淡入时长（ms）：与 styles.css 里 .character-layer 的 transition 保持一致 */
+const FADE_MS = 150;
 /** 角色精灵在角色窗口内的底距（与 styles.css `.character { bottom: 24px }`、Rust SPRITE_BOTTOM 同步） */
 const SPRITE_BOTTOM = 24;
 /** 气泡相对精灵头顶的间隙：内置林克 display_h=125 时 bottom=158（24+125+9），此处对齐该几何关系 */
@@ -117,106 +130,69 @@ function applyPersona(persona: PersonaConfig): void {
   img.src = resolveSpriteUrl(clip.spritesheet);
 }
 
-function chooseScene(scenes: SceneConfig[]): SceneConfig {
-  const total = scenes.reduce((sum, scene) => sum + Math.max(1, scene.weight ?? 1), 0);
-  let cursor = Math.random() * total;
-  for (const scene of scenes) {
-    cursor -= Math.max(1, scene.weight ?? 1);
-    if (cursor <= 0) return scene;
+/** 在指定图层上准备一个动作：设置帧参数、贴图并强制从第 1 帧重新播放 */
+function prepareLayer(layer: HTMLDivElement, payload: PlaybackPayload): void {
+  const frames = Math.max(1, Math.floor(payload.frames));
+  const frameMs = Math.max(40, Math.floor(payload.frame_ms));
+  layer.style.setProperty("--cols", String(frames));
+  layer.style.setProperty("--rows", "1");
+  layer.style.setProperty("--frames", String(frames));
+  layer.style.backgroundImage = `url("${resolveSpriteUrl(payload.spritesheet)}")`;
+  layer.style.animationName = "none";
+  // 强制重排后再挂动画，保证换动作时从第 1 帧开始（而不是延续上一个动作的进度）
+  void layer.offsetWidth;
+  layer.style.animationDuration = `${frames * frameMs}ms`;
+  layer.style.animationName = frames > 1 ? "sprite-cycle" : "none";
+}
+
+/** 清空所有图层（切换角色 / 无可播配置时用） */
+function clearLayers(): void {
+  for (const layer of layers) {
+    layer.style.animationName = "none";
+    layer.style.backgroundImage = "none";
   }
-  return scenes[scenes.length - 1];
-}
-
-function applySpriteAnimation(frames: number, frameMs: number): void {
-  document.body.style.setProperty("--frames", String(frames));
-  // 强制重排后再挂动画，保证换动作时从第 1 帧重新播放（而不是延续上一个动作的进度）
-  character.style.animationName = "none";
-  void character.offsetWidth;
-  character.style.animationDuration = `${frames * frameMs}ms`;
-  character.style.animationName = frames > 1 ? "sprite-cycle" : "none";
-}
-
-function stopScene(): void {
-  sceneRunId += 1;
-  if (sceneTimer) clearTimeout(sceneTimer);
-  sceneTimer = undefined;
-  character.style.animationName = "none";
   delete character.dataset.scene;
   delete character.dataset.clip;
 }
 
-function applyClip(clipId: string, clip: AnimationClipConfig): number {
-  const frames = Math.max(1, Math.floor(clip.frames));
-  const frameMs = Math.max(40, Math.floor(clip.frame_ms));
-  document.body.style.setProperty("--cols", String(frames));
-  document.body.style.setProperty("--rows", "1");
-  character.style.backgroundImage = `url("${resolveSpriteUrl(clip.spritesheet)}")`;
-  character.style.backgroundPositionY = "0%";
-  character.dataset.clip = clipId;
-  applySpriteAnimation(frames, frameMs);
-  return frames * frameMs;
+/**
+ * 播放后端下发的动作：新动作用另一个图层渲染并交叉淡入，旧图层随后停掉。
+ * 硬切会暴露动作间的姿态/尺寸差异，淡入淡出能显著提升衔接的自然度。
+ */
+function playClip(payload: PlaybackPayload): void {
+  const incoming = layers[1 - activeLayer];
+  const outgoing = layers[activeLayer];
+  prepareLayer(incoming, payload);
+  incoming.style.zIndex = "2";
+  outgoing.style.zIndex = "1";
+  incoming.style.opacity = "0";
+  requestAnimationFrame(() => {
+    incoming.style.opacity = "1";
+    outgoing.style.opacity = "0";
+  });
+  const previous = outgoing;
+  window.setTimeout(() => {
+    // 淡出结束后停掉旧图层，避免两个无限动画白白占 CPU
+    if (previous !== layers[activeLayer]) previous.style.animationName = "none";
+  }, FADE_MS + 50);
+  activeLayer = 1 - activeLayer;
+
+  // 测试钩子与标题；气泡属于上一个动作，画面换了就作废
+  character.dataset.clip = payload.clip;
+  character.dataset.scene = payload.scene_id;
+  document.title = persona
+    ? `DeskZen · ${persona.name} · ${payload.scene_label || payload.state}`
+    : "DeskZen";
+  hideBubble();
 }
 
-function startScene(state: string, cfg: StateConfig): void {
-  const current = persona;
-  const clips = current?.clips ?? {};
-  const scenes = (current?.scenes?.[state] ?? []).filter((scene) =>
-    scene.steps.some((step) => clips[step.clip]),
-  );
-  if (scenes.length === 0) {
-    // 兜底：手改配置导致状态没有场景时，至少播一个动作，避免角色停留在上一状态的画面
-    const fallback = current ? sortedClips(current)[0] : undefined;
-    if (fallback) applyClip(fallback[0], fallback[1]);
-    return;
-  }
-
-  const runId = sceneRunId;
-  let previousSceneId = "";
-
-  const runNextScene = (): void => {
-    if (runId !== sceneRunId) return;
-
-    let scene = chooseScene(scenes);
-    if (scenes.length > 1 && scene.id === previousSceneId) {
-      scene = chooseScene(scenes);
-    }
-    previousSceneId = scene.id;
-    character.dataset.scene = scene.id;
-
-    document.title = persona
-      ? `DeskZen · ${persona.name} · ${cfg.label}${scene.label ? ` · ${scene.label}` : ""}`
-      : "DeskZen";
-
-    const steps = scene.steps.filter((step) => clips[step.clip]);
-    let stepIndex = 0;
-
-    const runNextStep = (): void => {
-      if (runId !== sceneRunId) return;
-      if (stepIndex >= steps.length) {
-        runNextScene();
-        return;
-      }
-      const step = steps[stepIndex];
-      stepIndex += 1;
-      const clip = clips[step.clip];
-      const cycleMs = applyClip(step.clip, clip);
-      const loops = Math.min(20, Math.max(1, Math.floor(step.loops ?? 1)));
-      sceneTimer = setTimeout(runNextStep, cycleMs * loops);
-    };
-
-    runNextStep();
-  };
-
-  runNextScene();
-}
-
-/** 切换角色状态：更新标题后交给场景编排播放该状态的动作片段 */
+/** 切换角色状态：只记状态，具体播什么等后端的 playback 指令 */
 function applyState(state: string, cfg: StateConfig | undefined): void {
-  stopScene();
   document.body.dataset.state = state;
   if (!cfg) return;
-  document.title = persona ? `DeskZen · ${persona.name} · ${cfg.label}` : "DeskZen";
-  startScene(state, cfg);
+  if (!character.dataset.clip) {
+    document.title = persona ? `DeskZen · ${persona.name} · ${cfg.label}` : "DeskZen";
+  }
 }
 
 function showBubble(text: string): void {
@@ -228,6 +204,14 @@ function showBubble(text: string): void {
     bubble.classList.remove("show");
     bubble.classList.add("hidden");
   }, 6000);
+}
+
+/** 收起当前气泡：动作已经切换，这条文案不再对应当前画面 */
+function hideBubble(): void {
+  if (bubbleTimer) clearTimeout(bubbleTimer);
+  bubbleTimer = undefined;
+  bubble.classList.remove("show");
+  bubble.classList.add("hidden");
 }
 
 async function init(): Promise<void> {
@@ -275,11 +259,17 @@ async function init(): Promise<void> {
     applyState(e.payload.state, persona.states[e.payload.state]);
   });
 
+  // 后端决定播什么：前端只负责渲染 + 交叉淡入
+  await listen<PlaybackPayload>("playback", (e) => {
+    playClip(e.payload);
+  });
+
   await listen<PersonaConfig>("persona-changed", (e) => {
-    stopScene();
+    hideBubble();
+    clearLayers();
     persona = e.payload;
     applyPersona(persona);
-    // 切换后引擎会紧接着广播 state-changed，这里只刷新标题
+    // 切换后引擎会紧接着广播 state-changed / playback，这里只刷新标题
     const cfg = persona.states[document.body.dataset.state ?? ""];
     document.title = `DeskZen · ${persona.name} · ${cfg?.label ?? ""}`;
   });
