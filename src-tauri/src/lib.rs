@@ -5,6 +5,7 @@ mod characters;
 mod playback;
 mod prefs;
 mod screen;
+mod util;
 
 use std::{
     collections::HashMap,
@@ -409,7 +410,7 @@ fn save_llm_config(
 
 #[tauri::command]
 fn get_passthrough(state: tauri::State<'_, AppState>) -> bool {
-    *state.passthrough.lock().unwrap()
+    *crate::util::lock(&state.passthrough)
 }
 
 #[tauri::command]
@@ -418,7 +419,7 @@ fn set_passthrough(
     enabled: bool,
     state: tauri::State<'_, AppState>,
 ) {
-    *state.passthrough.lock().unwrap() = enabled;
+    *crate::util::lock(&state.passthrough) = enabled;
     if let Some(win) = app.get_webview_window("persona") {
         let _ = win.set_ignore_cursor_events(enabled);
     }
@@ -567,31 +568,20 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         persona_item_map.insert(id, item.clone());
         persona_items.push(item);
     }
-    app.state::<AppState>()
-        .persona_items
-        .lock()
-        .unwrap()
-        .extend(persona_item_map);
+    let state = app.state::<AppState>();
+    crate::util::lock(&state.persona_items).extend(persona_item_map);
     let persona_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = persona_items
         .iter()
         .map(|i| i as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
         .collect();
     let persona_menu = Submenu::with_items(app, "更换角色", true, &persona_refs)?;
-    app.state::<AppState>()
-        .persona_submenu
-        .lock()
-        .unwrap()
-        .replace(persona_menu.clone());
+    crate::util::lock(&state.persona_submenu).replace(persona_menu.clone());
 
     let menu = Menu::with_items(
         app,
         &[&settings, &toggle_persona, &persona_menu, &quit],
     )?;
-    app.state::<AppState>()
-        .persona_menu_item
-        .lock()
-        .unwrap()
-        .replace(toggle_persona.clone());
+    crate::util::lock(&state.persona_menu_item).replace(toggle_persona.clone());
 
     TrayIconBuilder::with_id("deskzen-tray")
         .icon(app.default_window_icon().unwrap().clone())
@@ -682,7 +672,7 @@ fn update_persona_menu_label(app: &AppHandle) {
         .unwrap_or(false);
     let label = if visible { "隐藏角色" } else { "显示角色" };
     let state = app.state::<AppState>();
-    let guard = state.persona_menu_item.lock().unwrap();
+    let guard = crate::util::lock(&state.persona_menu_item);
     if let Some(item) = guard.as_ref() {
         let _ = item.set_text(label);
     }
@@ -694,7 +684,7 @@ fn update_persona_menu_labels(app: &AppHandle) {
     let active = engine.persona_id();
     let names: HashMap<String, String> = engine.list_personas().into_iter().collect();
     let state = app.state::<AppState>();
-    let guard = state.persona_items.lock().unwrap();
+    let guard = crate::util::lock(&state.persona_items);
     for (id, item) in guard.iter() {
         let name = names.get(id).cloned().unwrap_or_default();
         let label = if *id == active { format!("✓ {name}") } else { name };
@@ -711,20 +701,16 @@ pub(crate) fn add_persona_menu_item(
     let item = MenuItem::with_id(app, format!("persona_{id}"), name, true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let state = app.state::<AppState>();
-    let old_item = state
-        .persona_items
-        .lock()
-        .unwrap()
-        .insert(id.to_string(), item.clone());
+    let old_item = crate::util::lock(&state.persona_items).insert(id.to_string(), item.clone());
     // 重复导入同一角色时，persona_items 虽然会覆盖旧菜单项，但旧项仍残留在“更换角色”
     // 子菜单里，导致菜单出现两个同名项（删除时也只会移除一个）；这里先移除旧项，
     // 保证 map 与子菜单始终一一对应（参考 remove_persona_menu_item 的做法）。
     if let Some(old_item) = old_item {
-        if let Some(submenu) = state.persona_submenu.lock().unwrap().as_ref() {
+        if let Some(submenu) = crate::util::lock(&state.persona_submenu).as_ref() {
             let _ = submenu.remove(&old_item);
         }
     }
-    if let Some(submenu) = state.persona_submenu.lock().unwrap().as_ref() {
+    if let Some(submenu) = crate::util::lock(&state.persona_submenu).as_ref() {
         let _ = submenu.append(&item);
     }
     update_persona_menu_labels(app);
@@ -735,12 +721,12 @@ pub(crate) fn add_persona_menu_item(
 pub(crate) fn remove_persona_menu_item(app: &AppHandle, id: &str) {
     let state = app.state::<AppState>();
     let item = {
-        let mut guard = state.persona_items.lock().unwrap();
+        let mut guard = crate::util::lock(&state.persona_items);
         guard.remove(id)
     };
     if let (Some(item), Some(submenu)) = (
         item,
-        state.persona_submenu.lock().unwrap().as_ref(),
+        crate::util::lock(&state.persona_submenu).as_ref(),
     ) {
         let _ = submenu.remove(&item);
     }

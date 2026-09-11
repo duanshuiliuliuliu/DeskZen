@@ -267,8 +267,9 @@ const EMBEDDED_PERSONAS: &[(&str, &str)] = &[
 /// 变化时向所有窗口广播事件。只依赖 Rust 进程，不依赖 WebView 存活。
 pub struct StateEngine {
     app: AppHandle,
-    personas: Arc<Mutex<HashMap<String, PersonaConfig>>>,
-    persona: Arc<Mutex<PersonaConfig>>,
+    personas: Arc<Mutex<HashMap<String, Arc<PersonaConfig>>>>,
+    /// 当前角色配置；用 Arc 包一层，热路径（动作结束/气泡）克隆引用计数而不是整份配置
+    persona: Arc<Mutex<Arc<PersonaConfig>>>,
     last_state: Arc<Mutex<Option<String>>>,
     /// 手动指定的状态覆盖（右键“下个状态”）；到期后自动恢复日程计算
     manual_state: Arc<Mutex<Option<ManualOverride>>>,
@@ -297,7 +298,7 @@ impl StateEngine {
         for (id, json) in EMBEDDED_PERSONAS {
             let cfg: PersonaConfig =
                 serde_json::from_str(json).expect("persona 配置解析失败");
-            personas.insert((*id).to_string(), cfg);
+            personas.insert((*id).to_string(), Arc::new(cfg));
         }
         // 加载用户导入的角色（持久化在用户数据目录；clips/scenes 格式由导入时校验）
         if let Ok(chars_dir) = Self::characters_dir_for(&app) {
@@ -310,7 +311,7 @@ impl StateEngine {
                     // 只加载当前 clips/scenes 格式的完整角色；旧格式或手改坏了的目录直接跳过
                     if let Ok(cfg) = serde_json::from_str::<PersonaConfig>(&json) {
                         if is_playable_persona(&cfg) {
-                            personas.insert(cfg.id.clone(), cfg);
+                            personas.insert(cfg.id.clone(), Arc::new(cfg));
                         }
                     }
                 }
@@ -349,7 +350,7 @@ impl StateEngine {
 
     /// 当前状态：若手动指定则用之，否则按本地时间实时计算
     pub fn current_state(&self) -> String {
-        let persona = self.persona.lock().unwrap();
+        let persona = crate::util::lock(&self.persona);
         self.resolve_state(&persona, chrono::Local::now())
     }
 
@@ -359,7 +360,7 @@ impl StateEngine {
         persona: &PersonaConfig,
         now: chrono::DateTime<chrono::Local>,
     ) -> String {
-        let mut guard = self.manual_state.lock().unwrap();
+        let mut guard = crate::util::lock(&self.manual_state);
         if let Some(ov) = guard.as_ref() {
             if let Some(exp) = ov.expire_at {
                 if now >= exp {
@@ -371,22 +372,22 @@ impl StateEngine {
     }
 
     /// 当前角色配置（克隆）
-    pub fn persona(&self) -> PersonaConfig {
-        self.persona.lock().unwrap().clone()
+    pub fn persona(&self) -> Arc<PersonaConfig> {
+        Arc::clone(&crate::util::lock(&self.persona))
     }
 
     pub fn persona_id(&self) -> String {
-        self.persona.lock().unwrap().id.clone()
+        crate::util::lock(&self.persona).id.clone()
     }
 
     /// 当前角色的有效显示尺寸（缓存值），供贴气泡等高频 UI 计算使用。
     pub fn display_size(&self) -> (u32, u32) {
-        *self.display_size.lock().unwrap()
+        *crate::util::lock(&self.display_size)
     }
 
     /// 当前缩放偏好（克隆），供 set_zoom / get_prefs 读取。
     pub fn prefs(&self) -> crate::prefs::Prefs {
-        self.prefs.lock().unwrap().clone()
+        crate::util::lock(&self.prefs).clone()
     }
 
     // ---- 每日 AI 气泡：缓存读写与触发（见 genbubble.rs）----
@@ -398,13 +399,13 @@ impl StateEngine {
 
     /// 某动作当天是否已标记失败（当天不再重试）
     pub(crate) fn gen_failed(&self, persona_id: &str, clip_id: &str) -> bool {
-        let g = self.gen_bubbles.lock().unwrap();
+        let g = crate::util::lock(&self.gen_bubbles);
         g.persona_id == persona_id && g.cache.failed.iter().any(|s| s == clip_id)
     }
 
     /// 生成历史快照（查重用）
     pub(crate) fn gen_history(&self) -> Vec<String> {
-        self.gen_bubbles.lock().unwrap().cache.history.clone()
+        crate::util::lock(&self.gen_bubbles).cache.history.clone()
     }
 
     /// 记录一个动作当日生成成功（一批台词）：更新内存缓存并落盘
@@ -414,7 +415,7 @@ impl StateEngine {
             return;
         }
         let (cache, changed) = {
-            let mut g = self.gen_bubbles.lock().unwrap();
+            let mut g = crate::util::lock(&self.gen_bubbles);
             if g.persona_id != persona_id {
                 return;
             }
@@ -435,7 +436,7 @@ impl StateEngine {
     /// 记录一个动作当日生成失败（不写历史、只标记，当天回退原配置）
     pub(crate) fn record_gen_failure(&self, persona_id: &str, clip_id: &str) {
         let (cache, changed) = {
-            let mut g = self.gen_bubbles.lock().unwrap();
+            let mut g = crate::util::lock(&self.gen_bubbles);
             if g.persona_id != persona_id || g.cache.failed.iter().any(|s| s == clip_id) {
                 return;
             }
@@ -450,8 +451,8 @@ impl StateEngine {
 
     /// 某状态用到的动作是否有当日文案缺口（缓存归属角色不符 / 日期过期 / 有动作既未生成也未标记失败）
     pub(crate) fn gen_needs_refresh(&self, state: &str) -> bool {
-        let persona = self.persona.lock().unwrap();
-        let g = self.gen_bubbles.lock().unwrap();
+        let persona = crate::util::lock(&self.persona);
+        let g = crate::util::lock(&self.gen_bubbles);
         if g.persona_id != persona.id {
             return true;
         }
@@ -468,23 +469,23 @@ impl StateEngine {
 
     /// 设置页开关：写内存 prefs（落盘由调用方 save_prefs 完成）
     pub(crate) fn set_ai_bubbles(&self, enabled: bool) {
-        self.prefs.lock().unwrap().ai_bubbles = enabled;
+        crate::util::lock(&self.prefs).ai_bubbles = enabled;
     }
 
     // ---- 环境气泡：随机自言自语（与状态切换解耦，机制见 README「主动交互与防打扰机制」）----
 
     /// 记录一次用户聊天互动（chat_send 入口调用）：随后数分钟内抑制环境气泡
     pub(crate) fn record_chat_activity(&self) {
-        self.ambient.lock().unwrap().last_chat_at = Some(chrono::Local::now());
+        crate::util::lock(&self.ambient).last_chat_at = Some(chrono::Local::now());
     }
 
     /// 按「当前状态的话痨程度 + 距下一次状态切换的剩余时长」重排下一条气泡时刻。
     /// 启动、状态切换、右键“下个状态”、切换角色、每次弹出/抑制后都会调用。
     /// mute 状态排为 None（不弹）；其余状态在 [min_gap, max_gap] 内均匀取一个时刻。
     fn schedule_ambient_bubble(&self, now: chrono::DateTime<chrono::Local>) {
-        let persona = self.persona.lock().unwrap().clone();
+        let persona = self.persona();
         let state = self.resolve_state(&persona, now);
-        let manual = self.manual_state.lock().unwrap().clone();
+        let manual = crate::util::lock(&self.manual_state).clone();
         let remaining = (next_transition_at(&persona, &manual, &now) - now).num_minutes();
         // 剩余时长不可得（如完全无日程配置时 next_transition_at 的兜底只有 30s）时，
         // 按 30 分钟的周期长度推导间隔，避免短周期把气泡排得过密。
@@ -500,14 +501,14 @@ impl StateEngine {
             .unwrap_or_default();
         let next = bubble_gap_range(remaining, talkativeness)
             .map(|(min, max)| now + chrono::Duration::minutes(rng_range_i64(min, max)));
-        self.ambient.lock().unwrap().next_at = next;
+        crate::util::lock(&self.ambient).next_at = next;
     }
 
     /// 为某状态重开场景播放，并把第一步广播给前端。
     /// 状态切换、切换角色、启动广播都会调用；前端只按事件渲染，不再自己挑场景。
     fn reset_playback(&self, state: &str, now: chrono::DateTime<chrono::Local>) {
-        let persona = self.persona.lock().unwrap().clone();
-        let event = self.playback.lock().unwrap().reset(&persona, state, now);
+        let persona = self.persona();
+        let event = crate::util::lock(&self.playback).reset(&persona, state, now);
         if let Some(event) = event {
             let _ = self.app.emit("playback", event);
         }
@@ -518,8 +519,12 @@ impl StateEngine {
 
     /// 播放推进：到点则进入同场景的下一步，或按权重抽下一个场景
     fn advance_playback(&self, now: chrono::DateTime<chrono::Local>) {
-        let persona = self.persona.lock().unwrap().clone();
-        let event = self.playback.lock().unwrap().advance(&persona, now);
+        // 先看是否到点：节拍线程每次唤醒都会调到这里，没到点就别克隆整份 persona
+        if !crate::util::lock(&self.playback).is_due(now) {
+            return;
+        }
+        let persona = self.persona();
+        let event = crate::util::lock(&self.playback).advance(&persona, now);
         if let Some(event) = event {
             let _ = self.app.emit("playback", event);
         }
@@ -527,9 +532,7 @@ impl StateEngine {
 
     /// 当前正在播放的动作 id（气泡文案按它取池）
     fn current_clip(&self) -> Option<String> {
-        self.playback
-            .lock()
-            .unwrap()
+        crate::util::lock(&self.playback)
             .current_clip()
             .map(str::to_string)
     }
@@ -547,7 +550,7 @@ impl StateEngine {
                 return true;
             }
         }
-        if let Some(t) = self.ambient.lock().unwrap().last_chat_at {
+        if let Some(t) = crate::util::lock(&self.ambient).last_chat_at {
             if *now - t < chrono::Duration::minutes(CHAT_SUPPRESS_MIN) {
                 return true;
             }
@@ -557,7 +560,7 @@ impl StateEngine {
 
     /// 频率护栏：硬性最小间隔 + 每小时上限（滑动窗口）
     fn bubble_rate_limited(&self, now: &chrono::DateTime<chrono::Local>) -> bool {
-        let mut ambient = self.ambient.lock().unwrap();
+        let mut ambient = crate::util::lock(&self.ambient);
         let cutoff = *now - chrono::Duration::hours(1);
         while ambient.recent.front().is_some_and(|t| *t < cutoff) {
             ambient.recent.pop_front();
@@ -575,7 +578,7 @@ impl StateEngine {
 
     /// 取当前动作的下一条气泡文案（池来源与优先级见 [`resolve_bubble_pool`]）。
     fn next_ambient_text(&self) -> Option<String> {
-        let persona = self.persona.lock().unwrap().clone();
+        let persona = self.persona();
         let clip_id = self.current_clip();
         let ai_clip =
             clip_id
@@ -592,7 +595,7 @@ impl StateEngine {
         build_pool: impl FnOnce() -> Vec<String>,
     ) -> Option<String> {
         {
-            let mut ambient = self.ambient.lock().unwrap();
+            let mut ambient = crate::util::lock(&self.ambient);
             if let Some(bag) = ambient.bags.get_mut(key) {
                 if let Some(text) = bag.pop_front() {
                     ambient.last_text.insert(key.to_string(), text.clone());
@@ -604,7 +607,7 @@ impl StateEngine {
         if pool.is_empty() {
             return None;
         }
-        let mut ambient = self.ambient.lock().unwrap();
+        let mut ambient = crate::util::lock(&self.ambient);
         let mut bag = refill_bag(pool, ambient.last_text.get(key).map(String::as_str));
         let text = bag.pop_front()?;
         ambient.bags.insert(key.to_string(), bag);
@@ -614,7 +617,7 @@ impl StateEngine {
 
     /// 气泡到期处理：被抑制或触发护栏则直接重排（推迟而非丢弃）；否则取文案弹出并记录。
     fn fire_ambient_bubble_if_due(&self, now: chrono::DateTime<chrono::Local>) {
-        let due = self.ambient.lock().unwrap().next_at.is_some_and(|t| now >= t);
+        let due = crate::util::lock(&self.ambient).next_at.is_some_and(|t| now >= t);
         if !due {
             return;
         }
@@ -624,19 +627,19 @@ impl StateEngine {
         }
         // 动作马上要切换时不发话：把气泡挪到下一个动作开始之后，
         // 避免"话说到一半画面就换了"造成内容与画面错位。
-        if let Some(remaining) = self.playback.lock().unwrap().remaining_ms(now) {
+        if let Some(remaining) = crate::util::lock(&self.playback).remaining_ms(now) {
             if remaining < BUBBLE_CLIP_MIN_REMAINING_MS {
                 let wait = chrono::Duration::milliseconds(
                     remaining.max(0) + BUBBLE_CLIP_SLACK_MS,
                 );
-                self.ambient.lock().unwrap().next_at = Some(now + wait);
+                crate::util::lock(&self.ambient).next_at = Some(now + wait);
                 return;
             }
         }
         let text = self.next_ambient_text();
         if let Some(text) = text {
             {
-                let mut ambient = self.ambient.lock().unwrap();
+                let mut ambient = crate::util::lock(&self.ambient);
                 ambient.last_shown_at = Some(now);
                 ambient.recent.push_back(now);
             }
@@ -654,7 +657,7 @@ impl StateEngine {
             crate::prefs::default_zoom()
         };
         {
-            let mut p = self.prefs.lock().unwrap();
+            let mut p = crate::util::lock(&self.prefs);
             if p.zoom == zoom {
                 return false;
             }
@@ -667,21 +670,21 @@ impl StateEngine {
     /// 重新计算当前角色的缩放后显示尺寸并写回缓存。各个锁按序获取、互不嵌套，
     /// 符合项目“锁内不做耗时操作、先算后写”的约定，避免锁序问题。
     pub fn refresh_display_size(&self) {
-        let zoom = self.prefs.lock().unwrap().zoom;
-        let persona = self.persona.lock().unwrap().clone();
+        let zoom = crate::util::lock(&self.prefs).zoom;
+        let persona = self.persona();
         let mut display = effective_display_size_zoomed(&persona, zoom);
         // 此刻未持有任何锁：取工作区（UI 查询不做锁内操作），按工作区等比适配后写回缓存。
         if let Some((mw, mh)) = work_area_content_limit(&self.app) {
             display = fit_display_size_proportional(display.0, display.1, mw, mh);
         }
-        *self.display_size.lock().unwrap() = display;
+        *crate::util::lock(&self.display_size) = display;
     }
 
     /// 返回给前端用的角色配置：display_w/display_h 替换为缩放后的显示尺寸（缓存值），
     /// 其余字段保持基准语义。persona.json 本体（含 build_system_prompt 使用的
     /// system_prompt/state 字段）不受影响，因此替换 display 不影响对话提示词。
     pub fn persona_view(&self) -> PersonaConfig {
-        let mut p = self.persona();
+        let mut p = (*self.persona()).clone();
         let (w, h) = self.display_size();
         p.display_w = w;
         p.display_h = h;
@@ -692,7 +695,7 @@ impl StateEngine {
     /// 让它在新的日程/覆盖下重新计算下一次切换时刻，避免睡到旧的 next_transition_at。
     /// 只锁 wake_lock（不持有 persona / manual_state），与线程侧锁序保持一致，避免死锁。
     fn notify_wake(&self) {
-        let _guard = self.wake_lock.lock().unwrap();
+        let _guard = crate::util::lock(&self.wake_lock);
         self.wake_cond.notify_one();
     }
 
@@ -711,7 +714,7 @@ impl StateEngine {
 
     /// 运行时注册一个角色（本地导入后调用；已存在则覆盖）
     pub fn register_persona(&self, cfg: PersonaConfig) {
-        self.personas.lock().unwrap().insert(cfg.id.clone(), cfg);
+        crate::util::lock(&self.personas).insert(cfg.id.clone(), Arc::new(cfg));
     }
 
     /// 删除导入角色（local-*）：先删除磁盘目录，再从注册表移除。
@@ -738,22 +741,16 @@ impl StateEngine {
                 let _ = std::fs::remove_file(&history_file);
             }
         }
-        let name = self
-            .personas
-            .lock()
-            .unwrap()
+        let name = crate::util::lock(&self.personas)
             .remove(id)
-            .map(|p| p.name)
+            .map(|p| p.name.clone())
             .ok_or_else(|| format!("角色不存在: {id}"))?;
         Ok(name)
     }
 
     /// 所有可切换角色 (id, 显示名)
     pub fn list_personas(&self) -> Vec<(String, String)> {
-        let mut sorted: Vec<(String, String)> = self
-            .personas
-            .lock()
-            .unwrap()
+        let mut sorted: Vec<(String, String)> = crate::util::lock(&self.personas)
             .iter()
             .map(|(id, p)| (id.clone(), p.name.clone()))
             .collect();
@@ -774,14 +771,11 @@ impl StateEngine {
 
     /// 运行时切换角色：更新配置与作息表，并广播事件让前端重新渲染
     pub fn switch_persona(&self, app: &AppHandle, id: &str) -> Result<(), String> {
-        let persona = self
-            .personas
-            .lock()
-            .unwrap()
+        let persona = crate::util::lock(&self.personas)
             .get(id)
             .cloned()
             .ok_or_else(|| format!("角色不存在: {id}"))?;
-        let zoom = self.prefs.lock().unwrap().zoom;
+        let zoom = crate::util::lock(&self.prefs).zoom;
         let mut display = effective_display_size_zoomed(&persona, zoom);
         // 切换后同样按工作区等比适配，避免新角色尺寸过大出屏。
         if let Some((mw, mh)) = work_area_content_limit(&self.app) {
@@ -791,16 +785,16 @@ impl StateEngine {
         // 避免节拍线程醒来误判为状态切换而重复广播（气泡重排由下方显式完成）。
         let state = self.resolve_state(&persona, chrono::Local::now());
         {
-            let mut cur = self.persona.lock().unwrap();
-            *cur = persona.clone();
-            *self.last_state.lock().unwrap() = Some(state.clone());
-            *self.manual_state.lock().unwrap() = None;
-            *self.display_size.lock().unwrap() = display;
+            let mut cur = crate::util::lock(&self.persona);
+            *cur = Arc::clone(&persona);
+            *crate::util::lock(&self.last_state) = Some(state.clone());
+            *crate::util::lock(&self.manual_state) = None;
+            *crate::util::lock(&self.display_size) = display;
         }
         // 气泡缓存整体切到新角色（内存换绑 + 磁盘加载），并视条件补跑当日生成
         {
             let cache = crate::genbubble::load(&self.app, id);
-            *self.gen_bubbles.lock().unwrap() = crate::genbubble::GenState {
+            *crate::util::lock(&self.gen_bubbles) = crate::genbubble::GenState {
                 persona_id: id.to_string(),
                 cache,
             };
@@ -808,12 +802,12 @@ impl StateEngine {
         // 洗牌袋与“上一条文案”属于旧角色，整体清空；限频窗口（recent/last_shown_at/
         // last_chat_at）保留——防止借连续切角色绕过小时上限。
         {
-            let mut ambient = self.ambient.lock().unwrap();
+            let mut ambient = crate::util::lock(&self.ambient);
             ambient.bags.clear();
             ambient.last_text.clear();
         }
         // 场景洗牌袋与"当前播放"都属于旧角色，整体清空后按新角色重开
-        self.playback.lock().unwrap().clear();
+        crate::util::lock(&self.playback).clear();
         // 按新角色的当前状态重排环境气泡
         self.schedule_ambient_bubble(chrono::Local::now());
         crate::genbubble::maybe_spawn_for_state(app);
@@ -840,7 +834,7 @@ impl StateEngine {
         let state = self.resolve_state(&persona, now);
         // 记录“该状态已广播过”，否则节拍线程醒来读到 last_state=None 会误判为状态变化，
         // 再次 emit state-changed，导致开局重复广播。
-        *self.last_state.lock().unwrap() = Some(state.clone());
+        *crate::util::lock(&self.last_state) = Some(state.clone());
         // 带 zoomed display 给前端，前端 applyPersona 不因广播而回到基准尺寸。
         let _ = self.app.emit("persona-changed", self.persona_view());
         let _ = self.app.emit(
@@ -872,16 +866,16 @@ impl StateEngine {
             // 持有 wake_lock 计算并进入 wait：switch_persona / next_state 的 notify
             // 必然在本线程进入等待后送达，不会丢失唤醒（唤醒后统一走下面的重算）。
             let now = chrono::Local::now();
-            let wake = wake_lock.lock().unwrap();
+            let wake = crate::util::lock(&wake_lock);
             let next = {
-                let p = persona.lock().unwrap();
-                let m = manual_state.lock().unwrap();
+                let p = crate::util::lock(&persona);
+                let m = crate::util::lock(&manual_state);
                 next_transition_at(&p, &m, &now)
             };
             // 环境气泡的预定时刻若早于状态切换，则按气泡时刻唤醒
             let (wake_at, playback_leads) = {
-                let bubble_at = ambient.lock().unwrap().next_at;
-                let play_at = playback.lock().unwrap().next_at();
+                let bubble_at = crate::util::lock(&ambient).next_at;
+                let play_at = crate::util::lock(&playback).next_at();
                 let mut earliest = next;
                 if let Some(t) = bubble_at {
                     earliest = earliest.min(t);
@@ -912,8 +906,8 @@ impl StateEngine {
 
             let now = chrono::Local::now();
             let state = {
-                let p = persona.lock().unwrap();
-                let mut m = manual_state.lock().unwrap();
+                let p = crate::util::lock(&persona);
+                let mut m = crate::util::lock(&manual_state);
                 if let Some(ov) = m.as_ref() {
                     if let Some(exp) = ov.expire_at {
                         if now >= exp {
@@ -923,7 +917,7 @@ impl StateEngine {
                 }
                 effective_state(&m, &p, &now)
             };
-            let mut last = last_state.lock().unwrap();
+            let mut last = crate::util::lock(&last_state);
             let mut state_changed = false;
             if last.as_deref() != Some(state.as_str()) {
                 *last = Some(state.clone());
@@ -937,13 +931,14 @@ impl StateEngine {
                 engine.schedule_ambient_bubble(now);
                 // 新状态换一套场景：重开播放并把第一步广播给前端
                 engine.reset_playback(&state, now);
+                // 跨天/换状态时才需要补齐当日 AI 气泡：放在这里避免每个动作（几秒一次）
+                // 都去锁 persona + 缓存做一遍无谓检查
+                crate::genbubble::maybe_spawn_for_state(&app);
             }
             // 到点就推进场景步骤（同场景的下一步 / 下一个场景）
             engine.advance_playback(now);
             // 处理到期气泡：若刚重排过，next_at 在未来，自然跳过，不会用旧状态文案。
             engine.fire_ambient_bubble_if_due(now);
-            // 跨天/启动后补齐当日 AI 气泡（幂等，条件不满足时内部直接返回）
-            crate::genbubble::maybe_spawn_for_state(&app);
         });
     }
 
@@ -953,7 +948,7 @@ impl StateEngine {
         // 先在作用域内读取 persona 并算出下一个状态/到期时刻，随后释放 persona 锁，
         // 再写覆盖并 notify（避免在持有 persona 锁时再锁 wake_lock）。
         let (next, expire_at) = {
-            let persona = self.persona.lock().unwrap();
+            let persona = crate::util::lock(&self.persona);
             let now = chrono::Local::now();
             let current = self.resolve_state(&persona, now);
             // states 为空（正常导入已在 characters 侧校验，这里仅作防御）时没有可切换的下一状态，
@@ -964,11 +959,11 @@ impl StateEngine {
             let expire_at = next_state_expire_at(&persona.schedule, &next, now);
             (next, expire_at)
         };
-        *self.manual_state.lock().unwrap() = Some(ManualOverride {
+        *crate::util::lock(&self.manual_state) = Some(ManualOverride {
             state: next.clone(),
             expire_at,
         });
-        *self.last_state.lock().unwrap() = Some(next.clone());
+        *crate::util::lock(&self.last_state) = Some(next.clone());
         // 新的手动覆盖带到期时间 → 唤醒线程，使该到期时刻尽早接管。
         self.notify_wake();
         let _ = self.app.emit("state-changed", StateChanged { state: next.clone() });

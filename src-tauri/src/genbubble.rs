@@ -369,7 +369,7 @@ pub fn maybe_spawn_for_state(app: &AppHandle) {
 /// 从内存 GenState 取某动作当日的生成台词池；非当日 / 未生成 / 空池返回 None（回退原配置）。
 /// 供引擎装填气泡洗牌袋时调用，锁内只做查表。
 pub fn today_pool(gs: &Mutex<GenState>, clip_id: &str) -> Option<Vec<String>> {
-    let gs = gs.lock().unwrap();
+    let gs = crate::util::lock(gs);
     if gs.cache.date != today_str() {
         return None;
     }

@@ -126,6 +126,14 @@ impl Playback {
         self.current.as_ref().map(|current| current.next_at)
     }
 
+    /// 是否到了推进时刻。引擎先用它判断，没到点就直接返回，
+    /// 避免每次节拍唤醒都去克隆整份 persona 配置。
+    pub fn is_due(&self, now: DateTime<Local>) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|current| now >= current.next_at)
+    }
+
     /// 当前在播的动作 id
     pub fn current_clip(&self) -> Option<&str> {
         self.current.as_ref().map(|current| current.clip.as_str())
