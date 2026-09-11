@@ -879,7 +879,7 @@ impl StateEngine {
                 next_transition_at(&p, &m, &now)
             };
             // 环境气泡的预定时刻若早于状态切换，则按气泡时刻唤醒
-            let wake_at = {
+            let (wake_at, playback_leads) = {
                 let bubble_at = ambient.lock().unwrap().next_at;
                 let play_at = playback.lock().unwrap().next_at();
                 let mut earliest = next;
@@ -889,12 +889,19 @@ impl StateEngine {
                 if let Some(t) = play_at {
                     earliest = earliest.min(t);
                 }
-                earliest
+                // 播放是否是最早的那个唤醒时刻：是的话要踩点，不能按状态切换那样多睡 1 秒
+                (earliest, play_at.is_some_and(|t| t == earliest))
             };
             let mut sleep_dur = (wake_at - now)
                 .to_std()
                 .unwrap_or(Duration::from_secs(0));
-            sleep_dur += Duration::from_secs(1);
+            // 状态切换按分钟对齐，多睡 1 秒可避开边界竞态；动作播放是毫秒级接力，
+            // 多睡 1 秒会让画面在切换前"定格一下"，所以只留 60ms 余量。
+            sleep_dur += if playback_leads {
+                Duration::from_millis(60)
+            } else {
+                Duration::from_secs(1)
+            };
             let cap = Duration::from_secs(15 * 60);
             if sleep_dur > cap {
                 sleep_dur = cap;

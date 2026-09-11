@@ -12,6 +12,9 @@ use crate::engine::{refill_bag, AnimationClipConfig, PersonaConfig, SceneConfig}
 
 /// 单个动作的循环次数上限：防止手改配置把角色卡在同一个动作上
 pub const MAX_STEP_LOOPS: u32 = 20;
+/// 一个场景至少持续多久（毫秒）：太短会让角色像"坐不住"，每隔几秒就换一件事做。
+/// 场景走完一遍后，若整体还不到这个时长就再走一遍（同一动作自然循环，不会看起来被打断）。
+const MIN_SCENE_HOLD_MS: i64 = 12_000;
 
 /// 发给前端的播放指令（前端只负责按它渲染，不再自己挑场景）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -39,6 +42,8 @@ pub struct PlaybackEvent {
 struct Current {
     state: String,
     scene_id: String,
+    /// 本场景第一次开播的时刻（用于「同一场景至少播 N 秒」）
+    scene_started_at: DateTime<Local>,
     step_index: usize,
     clip: String,
     next_at: DateTime<Local>,
@@ -83,13 +88,32 @@ impl Playback {
         }
         let scenes = valid_scenes(persona, &current.state);
         if let Some(scene) = scenes.iter().find(|scene| scene.id == current.scene_id) {
+            // 同场景还有下一步 → 继续走（沿用场景起始时刻，别把"这段已播多久"重置掉）
             if scene.steps.len() > current.step_index + 1 {
-                return self.start_step(
+                return self.start_step_with_start(
                     persona,
                     &current.state,
                     scene,
                     current.step_index + 1,
                     now,
+                    current.scene_started_at,
+                );
+            }
+            // 已走完一遍：如果整段还太短，就从头再走一遍同一个场景。
+            // 判据用「已播时长 + 本遍时长的一半」，让最终时长贴近 MIN_SCENE_HOLD_MS 而不是明显超出。
+            let played_ms = (now - current.scene_started_at).num_milliseconds();
+            let pass_ms = now
+                .signed_duration_since(current.next_at)
+                .num_milliseconds()
+                .max(0);
+            if played_ms + pass_ms / 2 < MIN_SCENE_HOLD_MS {
+                return self.start_step_with_start(
+                    persona,
+                    &current.state,
+                    scene,
+                    0,
+                    now,
+                    current.scene_started_at,
                 );
             }
         }
@@ -123,25 +147,32 @@ impl Playback {
         if scenes.is_empty() {
             return None;
         }
-        // 先从袋里取；袋里可能残留已失效的场景 id，跳过即可
-        while let Some(id) = self.bags.get_mut(state).and_then(|bag| bag.pop_front()) {
-            if let Some(scene) = scenes.iter().find(|scene| scene.id == id) {
-                return Some(*scene);
-            }
-        }
         // 袋空：按权重装填（权重 k 就放 k 份），洗牌后逐条弹出
-        let mut pool: Vec<String> = Vec::new();
-        for scene in scenes {
-            for _ in 0..scene.weight.max(1) {
-                pool.push(scene.id.clone());
+        if self.bags.get(state).is_none_or(|bag| bag.is_empty()) {
+            let mut pool: Vec<String> = Vec::new();
+            for scene in scenes {
+                for _ in 0..scene.weight.max(1) {
+                    pool.push(scene.id.clone());
+                }
             }
+            let last = self.last_scene.get(state).cloned();
+            self.bags
+                .insert(state.to_string(), refill_bag(pool, last.as_deref()));
         }
+        // 取一个「和上一次不同」的场景：同一动作连续播两次会看起来像被自己打断
         let last = self.last_scene.get(state).cloned();
-        let mut bag = refill_bag(pool, last.as_deref());
-        let id = bag.pop_front()?;
-        let picked = *scenes.iter().find(|scene| scene.id == id)?;
+        let bag = self.bags.get_mut(state)?;
+        let index = bag
+            .iter()
+            .position(|id| Some(id) != last.as_ref())
+            .unwrap_or(0);
+        let id = bag.remove(index)?;
+        // 袋里残留的失效场景 id（手改配置/切角色）直接丢弃后重挑
+        let picked = match scenes.iter().find(|scene| scene.id == id) {
+            Some(scene) => *scene,
+            None => return self.pick_scene(state, scenes),
+        };
         self.last_scene.insert(state.to_string(), id);
-        self.bags.insert(state.to_string(), bag);
         Some(picked)
     }
 
@@ -153,6 +184,19 @@ impl Playback {
         index: usize,
         now: DateTime<Local>,
     ) -> Option<PlaybackEvent> {
+        self.start_step_with_start(persona, state, scene, index, now, now)
+    }
+
+    /// 开播某一步；`scene_started_at` 用来保留场景的起始时刻（同场景循环时不被重置）
+    fn start_step_with_start(
+        &mut self,
+        persona: &PersonaConfig,
+        state: &str,
+        scene: &SceneConfig,
+        index: usize,
+        now: DateTime<Local>,
+        scene_started_at: DateTime<Local>,
+    ) -> Option<PlaybackEvent> {
         let step = scene.steps.get(index)?;
         let clip: &AnimationClipConfig = persona.clips.get(&step.clip)?;
         let loops = step.loops.clamp(1, MAX_STEP_LOOPS);
@@ -162,6 +206,7 @@ impl Playback {
         self.current = Some(Current {
             state: state.to_string(),
             scene_id: scene.id.clone(),
+            scene_started_at,
             step_index: index,
             clip: step.clip.clone(),
             next_at: now + chrono::Duration::milliseconds(duration_ms as i64),
@@ -323,24 +368,60 @@ mod tests {
     }
 
     #[test]
-    fn weighted_bag_covers_every_scene_before_repeating() {
+    fn every_scene_appears_within_one_bag_round() {
         let p = persona();
         let mut playback = Playback::default();
-        let mut now = at(10, 0, 0);
-        let mut seen = Vec::new();
-        for _ in 0..2 {
-            let event = playback.reset(&p, "idle", now).unwrap();
-            seen.push(event.scene_id.clone());
-            now += chrono::Duration::milliseconds(event.duration_ms as i64);
-            // 走完当前场景剩余步骤，直到换场景
-            while let Some(next) = playback.advance(&p, now) {
-                if next.scene_id != event.scene_id {
-                    break;
-                }
-                now += chrono::Duration::milliseconds(next.duration_ms as i64);
+        let mut seen: Vec<String> = Vec::new();
+        // 洗牌袋保证一轮内每个场景都出现，不会一直只抽到同一个
+        for minute in 0..20 {
+            let event = playback.reset(&p, "idle", at(10, minute, 0)).unwrap();
+            if !seen.contains(&event.scene_id) {
+                seen.push(event.scene_id.clone());
             }
         }
-        assert!(seen.contains(&"a".to_string()) && seen.contains(&"b".to_string()));
+        seen.sort();
+        assert_eq!(seen, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn scene_pick_never_repeats_back_to_back() {
+        let p = persona();
+        let mut playback = Playback::default();
+        let mut previous = String::new();
+        // 连续重开 10 次：同一个动作连着播两次会看起来像"被自己打断"
+        for minute in 0..10 {
+            let event = playback.reset(&p, "idle", at(10, minute, 0)).unwrap();
+            assert_ne!(event.scene_id, previous, "连续两次抽到同一个场景");
+            previous = event.scene_id;
+        }
+    }
+
+    #[test]
+    fn scene_holds_for_min_duration_before_switching() {
+        let p = persona();
+        let mut playback = Playback::default();
+        let start = at(10, 0, 0);
+        let first = playback.reset(&p, "idle", start).unwrap();
+        let mut now = start + chrono::Duration::milliseconds(first.duration_ms as i64);
+        let mut switched_at = None;
+        for _ in 0..1000 {
+            match playback.advance(&p, now) {
+                Some(event) => {
+                    if event.scene_id != first.scene_id {
+                        switched_at = Some(now);
+                        break;
+                    }
+                    now += chrono::Duration::milliseconds(event.duration_ms as i64);
+                }
+                None => break,
+            }
+        }
+        let switched_at = switched_at.expect("场景最终应切换");
+        let held_ms = (switched_at - start).num_milliseconds();
+        assert!(
+            (MIN_SCENE_HOLD_MS - 500..=MIN_SCENE_HOLD_MS + 1500).contains(&held_ms),
+            "场景保持时长应接近 {MIN_SCENE_HOLD_MS}ms，实际 {held_ms}ms"
+        );
     }
 
     #[test]
