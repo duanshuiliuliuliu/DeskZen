@@ -19,14 +19,6 @@ use crate::llm::LlmMessage;
 pub struct PersonaConfig {
     pub id: String,
     pub name: String,
-    /// spritesheet 前端资源路径
-    pub spritesheet: String,
-    /// spritesheet 总列数（整张图的列数）
-    pub cols: u32,
-    /// spritesheet 总行数（每个状态一行）
-    pub rows: u32,
-    /// 是否像素画（决定放大渲染方式）
-    pub pixel_art: bool,
     /// 角色在窗口中的显示尺寸
     #[serde(default)]
     pub display_w: u32,
@@ -34,6 +26,12 @@ pub struct PersonaConfig {
     pub display_h: u32,
     pub system_prompt: SystemPromptConfig,
     pub states: HashMap<String, StateConfig>,
+    /// 可复用动画片段；每个片段可来自独立的横向 spritesheet。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub clips: HashMap<String, AnimationClipConfig>,
+    /// 语义状态对应的微场景池；场景只影响视觉表现，不参与状态机计算。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub scenes: HashMap<String, Vec<SceneConfig>>,
     pub schedule: ScheduleConfig,
 }
 
@@ -72,12 +70,6 @@ impl Talkativeness {
 pub struct StateConfig {
     /// 状态的中文显示名（对话窗头部）
     pub label: String,
-    /// spritesheet 中该状态所在的行
-    pub row: u32,
-    /// 该状态的帧数
-    pub frames: u32,
-    /// 每帧时长（毫秒）
-    pub frame_ms: u64,
     /// 该状态下的气泡文本池
     pub bubbles: Vec<String>,
     /// 话痨程度："chatty"|"normal"|"quiet"|"mute"；缺省或未知值按 normal
@@ -89,6 +81,37 @@ impl StateConfig {
     pub fn talkativeness(&self) -> Talkativeness {
         Talkativeness::parse(&self.talkativeness)
     }
+}
+
+/// 场景权重与步骤循环次数的缺省值：均为 1
+fn default_unit() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnimationClipConfig {
+    /// 横向帧条资源路径；内置资源以 / 开头，导入角色为磁盘绝对路径。
+    pub spritesheet: String,
+    pub frames: u32,
+    pub frame_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SceneConfig {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    #[serde(default = "default_unit")]
+    pub weight: u32,
+    #[serde(default)]
+    pub steps: Vec<SceneStepConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SceneStepConfig {
+    pub clip: String,
+    #[serde(default = "default_unit")]
+    pub loops: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -238,7 +261,7 @@ impl StateEngine {
                 serde_json::from_str(json).expect("persona 配置解析失败");
             personas.insert((*id).to_string(), cfg);
         }
-        // 加载用户通过 petdex 导入的角色（持久化在用户数据目录）
+        // 加载用户导入的角色（持久化在用户数据目录；clips/scenes 格式由导入时校验）
         if let Ok(chars_dir) = Self::characters_dir_for(&app) {
             if let Ok(entries) = std::fs::read_dir(&chars_dir) {
                 for entry in entries.flatten() {
@@ -246,8 +269,11 @@ impl StateEngine {
                     let Ok(json) = std::fs::read_to_string(&cfg_path) else {
                         continue;
                     };
+                    // 只加载当前 clips/scenes 格式的完整角色；旧格式或手改坏了的目录直接跳过
                     if let Ok(cfg) = serde_json::from_str::<PersonaConfig>(&json) {
-                        personas.insert(cfg.id.clone(), cfg);
+                        if is_playable_persona(&cfg) {
+                            personas.insert(cfg.id.clone(), cfg);
+                        }
                     }
                 }
             }
@@ -595,15 +621,15 @@ impl StateEngine {
         Ok(dir.join("characters"))
     }
 
-    /// 运行时注册一个角色（petdex 导入后调用；已存在则覆盖）
+    /// 运行时注册一个角色（本地导入后调用；已存在则覆盖）
     pub fn register_persona(&self, cfg: PersonaConfig) {
         self.personas.lock().unwrap().insert(cfg.id.clone(), cfg);
     }
 
-    /// 删除导入角色：先删除磁盘目录，再从注册表移除。
+    /// 删除导入角色（local-*）：先删除磁盘目录，再从注册表移除。
     /// 内置角色（如 link）不允许删除。返回被删除角色的显示名。
     pub fn remove_persona(&self, id: &str) -> Result<String, String> {
-        if !(id.starts_with("petdex-") || id.starts_with("local-")) {
+        if !id.starts_with("local-") {
             return Err("内置角色不可删除".into());
         }
         if !id
@@ -800,7 +826,7 @@ impl StateEngine {
         });
     }
 
-    /// 切换到“下一个状态”（按 spritesheet 行号排序循环），并手动锁定该状态。
+    /// 切换到“下一个状态”（优先按日程 loop 顺序），并手动锁定该状态。
     /// 返回切换后的状态 id。
     pub fn next_state(&self) -> String {
         // 先在作用域内读取 persona 并算出下一个状态/到期时刻，随后释放 persona 锁，
@@ -809,7 +835,7 @@ impl StateEngine {
             let persona = self.persona.lock().unwrap();
             let now = chrono::Local::now();
             let current = self.resolve_state(&persona, now);
-            // states 为空（正常导入已在 petdex 侧校验，这里仅作防御）时没有可切换的下一状态，
+            // states 为空（正常导入已在 characters 侧校验，这里仅作防御）时没有可切换的下一状态，
             // 停留在当前状态，避免进入后续手动覆盖逻辑时状态为空。
             let next = next_loop_state(&persona, &current).unwrap_or_else(|| current.clone());
             // 到期时间：time 时段内 → 到该时段结束；否则按 loop 时长；
@@ -1024,6 +1050,37 @@ fn next_state_expire_at(
     }
 }
 
+/// 状态遍历顺序：优先按 schedule.loop 的出场顺序（去重），其余状态按字典序排在后面。
+/// clips/scenes 模型不再有 spritesheet 行号，行为顺序改由日程定义，避免 HashMap 无序遍历。
+pub(crate) fn ordered_state_keys(persona: &PersonaConfig) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for entry in persona.schedule.loop_entries() {
+        if persona.states.contains_key(&entry.state) && !keys.contains(&entry.state) {
+            keys.push(entry.state.clone());
+        }
+    }
+    let mut rest: Vec<String> = persona
+        .states
+        .keys()
+        .filter(|key| !keys.contains(key))
+        .cloned()
+        .collect();
+    rest.sort();
+    keys.extend(rest);
+    keys
+}
+
+/// 当前渲染模型能否播放该角色：必须有 clips，且每个状态都有非空场景。
+/// 角色注册（导入 / 启动扫描）都用它做准入，保证前端永远拿得到可播放的配置。
+pub(crate) fn is_playable_persona(persona: &PersonaConfig) -> bool {
+    !persona.clips.is_empty()
+        && !persona.scenes.is_empty()
+        && persona
+            .states
+            .keys()
+            .all(|state| persona.scenes.get(state).is_some_and(|scenes| !scenes.is_empty()))
+}
+
 /// 自动状态：time 时段优先，否则循环，最后兜底
 fn automatic_state(persona: &PersonaConfig, mins: u32) -> String {
     if let Some(slot) = find_active_slot(&persona.schedule, mins) {
@@ -1032,32 +1089,37 @@ fn automatic_state(persona: &PersonaConfig, mins: u32) -> String {
     if let Some(s) = loop_state_at(&persona.schedule, mins) {
         return s;
     }
-    // 兜底：按 spritesheet 行号取第一个状态（与 next_loop_state 的排序一致）；
+    // 兜底：按日程顺序取第一个状态（与 next_loop_state 的排序一致）；
     // 仅当角色完全没有定义状态时才使用硬编码值。
-    let mut keys: Vec<&String> = persona.states.keys().collect();
-    keys.sort_by_key(|k| persona.states[*k].row);
-    keys.first()
-        .map(|k| (*k).clone())
+    ordered_state_keys(persona)
+        .first()
+        .cloned()
         .unwrap_or_else(|| "Awake".into())
 }
 
-/// 计算角色的有效显示尺寸：优先用配置文件；为 0（未配置）时按精灵图实际尺寸 ÷ cols/rows 计算。
+/// 计算角色的有效显示尺寸：优先用配置文件；为 0（未配置）时按第一个可读动作帧条的
+/// 实际尺寸 ÷ frames 计算（clips 模型下同一角色的各动作帧尺寸一致）。
 pub fn effective_display_size(persona: &PersonaConfig) -> (u32, u32) {
     let (w, h) = (persona.display_w, persona.display_h);
     if w > 0 && h > 0 {
         return (w, h);
     }
-    // 内置角色 spritesheet 是站点路径(/…)，无法直接读文件；导入角色是磁盘路径
-    if !persona.spritesheet.starts_with('/') {
-        if let Ok(p) = Path::new(&persona.spritesheet).canonicalize() {
-            if let Ok((sw, sh)) = image::image_dimensions(&p) {
-                let cols = persona.cols.max(1);
-                let rows = persona.rows.max(1);
-                let cw = ((sw as f64 / cols as f64).round() as u32).max(1);
-                let ch = ((sh as f64 / rows as f64).round() as u32).max(1);
-                return (cw, ch);
-            }
+    // 内置角色资源是站点路径（/…），无法直接读文件；导入角色为磁盘绝对路径。
+    let mut clips: Vec<&AnimationClipConfig> = persona.clips.values().collect();
+    clips.sort_by(|a, b| a.spritesheet.cmp(&b.spritesheet));
+    for clip in clips {
+        if clip.spritesheet.starts_with('/') {
+            continue;
         }
+        let Ok(path) = Path::new(&clip.spritesheet).canonicalize() else {
+            continue;
+        };
+        let Ok((sw, sh)) = image::image_dimensions(&path) else {
+            continue;
+        };
+        let frames = clip.frames.max(1);
+        let cw = ((sw as f64 / frames as f64).round() as u32).max(1);
+        return (cw, sh.max(1));
     }
     (w.max(1), h.max(1))
 }
@@ -1108,7 +1170,7 @@ fn work_area_content_limit(app: &AppHandle) -> Option<(u32, u32)> {
 }
 
 /// “下一个状态”：优先取循环列表中的下一个；当前不在循环列表则取循环第一个；
-/// 若无循环配置，按 spritesheet 行号排序取下一个。
+/// 若无循环配置，按日程顺序取下一个。
 fn next_loop_state(persona: &PersonaConfig, current: &str) -> Option<String> {
     let entries = persona.schedule.loop_entries();
     if !entries.is_empty() {
@@ -1118,16 +1180,15 @@ fn next_loop_state(persona: &PersonaConfig, current: &str) -> Option<String> {
             None => Some(entries[0].state.clone()),
         };
     }
-    // 无循环配置 → 按行号排序兜底
-    let mut keys: Vec<&String> = persona.states.keys().collect();
-    keys.sort_by_key(|k| persona.states[*k].row);
+    // 无循环配置 → 按日程顺序兜底
+    let keys = ordered_state_keys(persona);
     // states 为空时 keys.len() 为 0，`(pos + 1) % keys.len()` 会除零 panic；
     // 且该调用发生在持有 persona 锁的上下文，panic 会毒化 Mutex 导致后续连环崩溃。
-    // 这里直接返回 None，由调用方安全跳过（正常导入已在 petdex 侧校验 states 非空）。
+    // 这里直接返回 None，由调用方安全跳过（正常导入已在 characters 侧校验 states 非空）。
     if keys.is_empty() {
         return None;
     }
-    let pos = keys.iter().position(|k| *k == current).unwrap_or(0);
+    let pos = keys.iter().position(|key| key == current).unwrap_or(0);
     Some(keys[(pos + 1) % keys.len()].clone())
 }
 
@@ -1427,15 +1488,41 @@ mod tests {
     }
 
     #[test]
-    fn effective_display_computes_from_sprite() {
+    fn effective_display_computes_from_clip_strip() {
         let mut p = link();
         p.display_w = 0;
         p.display_h = 0;
-        // 用仓库内真实 spritesheet 路径（文件系统可读）：3840/20=192, 1248/6=208
-        let sprite = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../resources/characters/link/spritesheet.webp");
-        p.spritesheet = sprite.to_string_lossy().into_owned();
+        // 用仓库内真实动作帧条（文件系统可读）：observe 11520×208、60 帧 → 每帧 192×208
+        let strip = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../resources/characters/link/clips/observe.webp");
+        p.clips.get_mut("observe").unwrap().spritesheet =
+            strip.to_string_lossy().into_owned();
         assert_eq!(effective_display_size(&p), (192, 208));
+    }
+
+    #[test]
+    fn embedded_clip_strips_match_declared_frame_counts() {
+        let p = link();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources");
+        let mut frame_size: Option<(u32, u32)> = None;
+        for (id, clip) in &p.clips {
+            assert!(clip.frames > 0 && clip.frame_ms > 0, "动作 {id} 帧参数非法");
+            let path = root.join(clip.spritesheet.trim_start_matches('/'));
+            let (width, height) = image::image_dimensions(&path)
+                .unwrap_or_else(|e| panic!("动作 {id} 读取失败 {}: {e}", path.display()));
+            assert_eq!(
+                width % clip.frames,
+                0,
+                "动作 {id} 帧条宽度 {width} 不是帧数 {} 的整数倍",
+                clip.frames
+            );
+            let current = (width / clip.frames, height);
+            assert_eq!(
+                *frame_size.get_or_insert(current),
+                current,
+                "动作 {id} 的帧尺寸与其他动作不一致"
+            );
+        }
     }
 
     #[test]
@@ -1477,7 +1564,7 @@ mod tests {
     #[test]
     fn history_id_validation() {
         assert!(is_valid_history_id("link"));
-        assert!(is_valid_history_id("petdex-doraemon"));
+        assert!(is_valid_history_id("local-doraemon"));
         assert!(!is_valid_history_id(""));
         // 路径穿越 / 非法字符应被拒绝（与 remove_persona 校验一致）
         assert!(!is_valid_history_id("../etc/passwd"));
@@ -1515,49 +1602,107 @@ mod tests {
             .unwrap()
     }
 
+    /// 按「当日第几分钟」构造今天的本地时刻
+    fn today_at(mins: u32) -> chrono::DateTime<chrono::Local> {
+        local_at(mins / 60, mins % 60)
+    }
+
+    /// 独立参照：把 loop 边界当作「loop 状态发生变化的下一分钟」扫描出来，
+    /// 与生产实现（按累计时长推算）走的是不同路径，可交叉校验。
+    fn scanned_loop_boundary(
+        schedule: &ScheduleConfig,
+        now: &chrono::DateTime<chrono::Local>,
+    ) -> chrono::DateTime<chrono::Local> {
+        let start = now_minutes(now);
+        let current = loop_state_at(schedule, start);
+        for offset in 1..=(24 * 60) {
+            if loop_state_at(schedule, start + offset) != current {
+                return *now + chrono::Duration::minutes(offset as i64);
+            }
+        }
+        panic!("24 小时内没有 loop 状态变化");
+    }
+
+    /// 在日程里找一个「位于 time 时段内、且 loop 边界早于时段结束」的时刻
+    fn find_slot_with_earlier_loop_boundary(
+        persona: &PersonaConfig,
+    ) -> (chrono::DateTime<chrono::Local>, chrono::DateTime<chrono::Local>) {
+        for mins in 0..24 * 60 {
+            let Some(slot) = find_active_slot(&persona.schedule, mins) else {
+                continue;
+            };
+            let now = today_at(mins);
+            let end = slot_end_datetime(&now, slot);
+            if end <= now {
+                continue;
+            }
+            let boundary = scanned_loop_boundary(&persona.schedule, &now);
+            if boundary < end {
+                return (now, boundary);
+            }
+        }
+        panic!("当前日程里不存在「时段内 loop 边界更早」的时刻");
+    }
+
     #[test]
     fn next_transition_uses_loop_boundary_in_time_slot() {
         let p = link();
-        // 12:30 落在 [12:00-13:00] 时段：loop 边界(now+10=12:40)早于时段结束(13:00)
-        let now = local_at(12, 30);
-        assert_eq!(
-            next_transition_at(&p, &None, &now),
-            now + chrono::Duration::minutes(10)
-        );
+        let (now, boundary) = find_slot_with_earlier_loop_boundary(&p);
+        assert!(boundary > now, "loop 边界必须在 now 之后");
+        assert_eq!(next_transition_at(&p, &None, &now), boundary);
     }
 
     #[test]
     fn next_transition_uses_time_slot_end() {
         let p = link();
-        // 14:29 落在 [13:00-14:30] 时段：时段结束(14:30)早于 next loop 边界(14:40)
-        let now = local_at(14, 29);
-        assert_eq!(next_transition_at(&p, &None, &now), local_at(14, 30));
+        // 找出「时段结束早于 loop 边界」的时刻，验证时段结束优先
+        let found = (0..24 * 60).find_map(|mins| {
+            let now = today_at(mins);
+            let slot = find_active_slot(&p.schedule, mins)?;
+            let end = slot_end_datetime(&now, slot);
+            (end > now && end < scanned_loop_boundary(&p.schedule, &now)).then_some((now, end))
+        });
+        let (now, end) = found.expect("当前日程里不存在「时段结束更早」的时刻");
+        assert_eq!(next_transition_at(&p, &None, &now), end);
     }
 
     #[test]
     fn next_transition_uses_manual_expiry() {
         let p = link();
-        // 09:00 无时段：manual 到期(09:05)最早，早于 next loop 边界(09:20)
-        let now = local_at(9, 0);
+        // 找一个无时段、且下一分钟早于 loop 边界的时刻，验证 manual 到期优先
+        let found = (0..24 * 60).find_map(|mins| {
+            if find_active_slot(&p.schedule, mins).is_some() {
+                return None;
+            }
+            let now = today_at(mins);
+            let expire = now + chrono::Duration::minutes(1);
+            (expire < scanned_loop_boundary(&p.schedule, &now)).then_some((now, expire))
+        });
+        let (now, expire) = found.expect("当前日程里不存在可验证 manual 到期的时刻");
         let manual = Some(ManualOverride {
             state: "idle".into(),
-            expire_at: Some(local_at(9, 5)),
+            expire_at: Some(expire),
         });
-        assert_eq!(
-            next_transition_at(&p, &manual, &now),
-            local_at(9, 5)
-        );
+        assert_eq!(next_transition_at(&p, &manual, &now), expire);
     }
 
     #[test]
     fn next_transition_crosses_midnight_boundary() {
         let p = link();
-        // 23:50 在跨午夜 sleep 时段内：loop 边界(now+10=次日 00:00)早于时段结束(次日 08:00)
-        let now = local_at(23, 50);
-        assert_eq!(
-            next_transition_at(&p, &None, &now),
-            now + chrono::Duration::minutes(10)
-        );
+        // 找跨午夜时段内「loop 边界更早」的时刻，验证边界会自然落到次日
+        let found = (0..24 * 60).find_map(|mins| {
+            let slot = find_active_slot(&p.schedule, mins)?;
+            let (start, end_min) = (parse_mins(&slot.start)?, parse_mins(&slot.end)?);
+            if start <= end_min {
+                return None;
+            }
+            let now = today_at(mins);
+            let end = slot_end_datetime(&now, slot);
+            let boundary = scanned_loop_boundary(&p.schedule, &now);
+            (boundary < end && boundary.date_naive() > now.date_naive()).then_some((now, boundary))
+        });
+        let (now, boundary) = found.expect("当前日程里不存在跨午夜且 loop 边界更早的时刻");
+        assert_eq!(next_transition_at(&p, &None, &now), boundary);
     }
 
     #[test]
@@ -1591,7 +1736,47 @@ mod tests {
         // link 的 sleep 配了 mute、eat 配了 chatty；其余缺省 normal
         assert_eq!(p.states["sleep"].talkativeness(), Talkativeness::Mute);
         assert_eq!(p.states["eat"].talkativeness(), Talkativeness::Chatty);
-        assert_eq!(p.states["walking"].talkativeness(), Talkativeness::Normal);
+        assert_eq!(p.states["routine"].talkativeness(), Talkativeness::Normal);
+    }
+
+    #[test]
+    fn embedded_scenes_reference_existing_states_and_clips() {
+        for (id, json) in EMBEDDED_PERSONAS {
+            let persona: PersonaConfig = serde_json::from_str(json).unwrap();
+            for state in persona.states.keys() {
+                assert!(persona.scenes.contains_key(state), "{id}: 状态 {state} 缺少场景");
+            }
+            for (state, scenes) in &persona.scenes {
+                assert!(persona.states.contains_key(state), "{id}: 场景引用未知状态 {state}");
+                for scene in scenes {
+                    assert!(!scene.steps.is_empty(), "{id}: 场景 {} 没有动作步骤", scene.id);
+                    for step in &scene.steps {
+                        assert!(
+                            persona.clips.contains_key(&step.clip),
+                            "{id}: 场景 {} 引用未知动作 {}",
+                            scene.id,
+                            step.clip
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn playable_persona_requires_clips_and_scenes() {
+        let p = link();
+        assert!(is_playable_persona(&p));
+        let mut no_clips = p.clone();
+        no_clips.clips.clear();
+        assert!(!is_playable_persona(&no_clips));
+        let mut no_scenes = p.clone();
+        no_scenes.scenes.clear();
+        assert!(!is_playable_persona(&no_scenes));
+        // 任一状态缺少场景都视为不可播放（前端不做兜底假设）
+        let mut state_without_scene = p;
+        state_without_scene.scenes.remove("sleep");
+        assert!(!is_playable_persona(&state_without_scene));
     }
 
     #[test]

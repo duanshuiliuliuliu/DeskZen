@@ -250,7 +250,10 @@ async fn generate_lines(
     ];
     // 最多一次带反馈的重试：长度/重复问题模型通常一条反馈即可修正
     for _ in 0..2 {
-        let raw = crate::llm::chat_completion(cfg, &cfg.model, &messages).await.ok()?;
+        // 批量生成不需要边出边显示，复用唯一一条流式通道（回调留空）
+        let raw = crate::llm::chat_completion_stream(cfg, &cfg.model, &messages, |_| {})
+            .await
+            .ok()?;
         let (lines, first_reject) = parse_lines(&raw, history);
         // 有合格台词即收下（不足 N 条也够用，环境气泡会回退静态池补位）
         if !lines.is_empty() {
@@ -270,7 +273,7 @@ async fn generate_lines(
     None
 }
 
-/// 每日全量生成：按 spritesheet 行序遍历当前角色所有状态，逐个生成当日台词。
+/// 每日全量生成：按日程顺序遍历当前角色所有状态，逐个生成当日台词。
 /// 每个状态完成即落盘（中断不丢已完成部分）；检测到角色被切换则中止剩余状态。
 pub async fn generate_daily(app: &AppHandle) {
     let engine = app.state::<StateEngine>();
@@ -280,24 +283,22 @@ pub async fn generate_daily(app: &AppHandle) {
     if llm_cfg.api_key.is_empty() {
         return;
     }
-    let mut states: Vec<&String> = persona.states.keys().collect();
-    states.sort_by_key(|s| persona.states[*s].row);
-    for state in states {
+    for state in crate::engine::ordered_state_keys(&persona) {
         // 切换角色后中止：剩余状态属于新角色的日程了
         if engine.persona_id() != persona_id {
             break;
         }
-        if engine.gen_has_today(state) || engine.gen_failed(&persona_id, state) {
+        if engine.gen_has_today(&state) || engine.gen_failed(&persona_id, &state) {
             continue;
         }
-        let scfg = match persona.states.get(state) {
+        let scfg = match persona.states.get(&state) {
             Some(c) => c,
             None => continue,
         };
         let history = engine.gen_history();
-        match generate_lines(&llm_cfg, &persona, state, scfg, &history).await {
-            Some(texts) => engine.record_gen_bubble(&persona_id, state, &texts),
-            None => engine.record_gen_failure(&persona_id, state),
+        match generate_lines(&llm_cfg, &persona, &state, scfg, &history).await {
+            Some(texts) => engine.record_gen_bubble(&persona_id, &state, &texts),
+            None => engine.record_gen_failure(&persona_id, &state),
         }
     }
 }

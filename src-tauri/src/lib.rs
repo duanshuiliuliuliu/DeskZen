@@ -1,7 +1,7 @@
 mod engine;
 mod genbubble;
 mod llm;
-mod petdex;
+mod characters;
 mod prefs;
 mod screen;
 
@@ -122,9 +122,8 @@ pub fn run() {
             switch_persona,
             list_personas,
             frontend_ready,
-            petdex::import_petdex_pet,
-            petdex::import_local_character,
-            petdex::delete_persona,
+            characters::import_local_character,
+            characters::delete_persona,
             get_llm_config,
             save_llm_config,
             get_passthrough,

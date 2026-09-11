@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -23,9 +24,6 @@ const personaZoom = $("persona-zoom") as HTMLSelectElement;
 const personaZoomStatus = $("persona-zoom-status") as HTMLElement;
 const saveBtn = $("llm-save") as HTMLButtonElement;
 const quitBtn = $("quit-app") as HTMLButtonElement;
-const petdexUrl = $("petdex-url") as HTMLInputElement;
-const petdexImportBtn = $("petdex-import") as HTMLButtonElement;
-const petdexStatus = $("petdex-status") as HTMLElement;
 const localImportBtn = $("local-import") as HTMLButtonElement;
 const localImportZipBtn = $("local-import-zip") as HTMLButtonElement;
 const localImportDrop = $("local-import-drop") as HTMLDivElement;
@@ -33,6 +31,7 @@ const localImportStatus = $("local-import-status") as HTMLElement;
 const importedList = $("imported-list") as HTMLDivElement;
 const importedHint = $("imported-hint") as HTMLElement;
 const importedStatus = $("imported-status") as HTMLElement;
+const appVersion = $("app-version") as HTMLElement;
 const navItems = document.querySelectorAll<HTMLButtonElement>(".nav-item");
 const settingsContent = document.querySelector(".settings-content") as HTMLElement;
 const panels: Record<"role" | "llm" | "about", HTMLElement> = {
@@ -40,9 +39,6 @@ const panels: Record<"role" | "llm" | "about", HTMLElement> = {
   llm: $("panel-llm"),
   about: $("panel-about"),
 };
-
-/** Petdex 链接校验：仅接受 https://petdex.dev/pets/{slug} */
-const PETDEX_URL_RE = /^https:\/\/petdex\.dev\/pets\/[a-z0-9][a-z0-9-]{0,62}\/?$/i;
 
 /** 角色缩放可选档位：与后端 [0.5, 2.0] 范围一致，步进 25%。 */
 const ZOOM_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
@@ -77,11 +73,6 @@ function updateMaskHint(): void {
 }
 
 apiKey.addEventListener("input", updateMaskHint);
-
-function setPetdexStatus(text: string, error = false): void {
-  petdexStatus.textContent = text;
-  petdexStatus.classList.toggle("error", error);
-}
 
 function setLocalImportStatus(text: string, error = false): void {
   localImportStatus.textContent = text;
@@ -139,7 +130,7 @@ async function refreshImported(): Promise<void> {
   }
   importedHint.textContent = "";
   for (const p of personas) {
-    const isImported = p.id.startsWith("petdex-") || p.id.startsWith("local-");
+    const isImported = p.id.startsWith("local-");
     const isCurrent = p.id === currentId;
     const row = document.createElement("div");
     row.className = `imported-item${isCurrent ? " active" : ""}`;
@@ -270,32 +261,6 @@ quitBtn.addEventListener("click", () => {
   void invoke("quit_app");
 });
 
-petdexImportBtn.addEventListener("click", async () => {
-  const url = petdexUrl.value.trim();
-  if (!url) {
-    setPetdexStatus("请输入 Petdex 角色链接", true);
-    petdexUrl.focus();
-    return;
-  }
-  if (!PETDEX_URL_RE.test(url)) {
-    setPetdexStatus("链接格式不正确，示例：https://petdex.dev/pets/doraemon", true);
-    return;
-  }
-  petdexImportBtn.disabled = true;
-  setPetdexStatus("正在下载并导入…");
-  try {
-    const pet = await invoke<{ id: string; name: string }>("import_petdex_pet", {
-      url,
-    });
-    setPetdexStatus(`导入成功：${pet.name}（已切换）`);
-    await refreshImported();
-  } catch (err) {
-    setPetdexStatus(`导入失败：${String(err)}`, true);
-  } finally {
-    petdexImportBtn.disabled = false;
-  }
-});
-
 /** 从本地 zip / 文件夹导入 */
 async function importFromPath(
   path: string,
@@ -365,6 +330,14 @@ void listen("persona-changed", () => {
 
 void refresh();
 void refreshImported();
+// 关于面板的版本号取运行时版本（与 tauri.conf.json 同一来源，避免手写值漂移）
+void getVersion()
+  .then((version) => {
+    appVersion.textContent = version;
+  })
+  .catch(() => {
+    // 取不到时保留占位符，不影响其它设置项
+  });
 
 // 等前端就绪再显示设置窗，避免 WebView2 未渲染时闪现空白窗口（白屏闪烁）。
 void getCurrentWindow().show();

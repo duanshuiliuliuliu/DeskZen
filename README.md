@@ -12,9 +12,9 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
 |---|---|
 | 生活状态引擎 | 每个角色独立的状态机：默认按 `loop`（逐状态 `{state,duration}`）循环；`time` 时段内固定为对应状态；后台线程按「下一个切换时刻」定时唤醒（manual 到期 / 时段结束 / loop 边界），变化时广播状态 |
 | 多角色运行时切换 | 内置林克；托盘「更换角色」子菜单即时切换（✓ 标记当前角色） |
-| Petdex 角色导入 | 从 petdex.dev 链接下载 zip 包（或直接资源），自动生成角色配置并持久化 |
 | 角色删除 | 设置界面一键删除导入角色，删除当前角色时自动回退到默认角色 |
-| 桌面角色动画 | spritesheet + CSS steps 帧动画（内置林克 20×6，6 种状态各占一行） |
+| 动作片段（clips） | 每个动作一份独立的横向 WebP 帧条（自带帧数与帧时长），CSS `steps()` 逐帧播放 |
+| 场景编排（scenes） | 每个状态配一个加权场景池，一个场景可由多个 `{clip,loops}` 步骤组成；状态切换即随机轮换完整生活片段 |
 | 对话面板 | 双击角色打开，跟随角色的对话气泡（尖角指向角色、高度自适应），接入 OpenAI 兼容大模型，流式输出，支持图片消息 |
 | 状态气泡 | 角色随机「自言自语」的环境气泡（间隔随状态时长与话痨程度自适应），头顶轻量弹出、超时自动消失 |
 | AI 每日气泡 | 每个状态每天由大模型批量生成一批台词供环境气泡优先使用（可开关，未配置时回退角色静态池） |
@@ -22,7 +22,7 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
 | 截图问答 | 对话框「📷」截取当前屏幕（或直接粘贴图片）发给大模型，角色「看」屏幕回答（需模型支持图像输入） |
 | 角色缩放 | 设置界面调整角色显示尺寸，缩放即时生效并持久化 |
 | 本地角色导入 | 设置界面从本地文件夹 / zip 导入角色，或直接把文件夹 / zip 拖入设置窗口 |
-| 角色右键菜单 | 右键角色弹出「下个状态 / 隐藏」：循环切换角色动画状态（按 spritesheet 行序），或隐藏角色窗口 |
+| 角色右键菜单 | 右键角色弹出「下个状态 / 隐藏」：按日程 `loop` 顺序切换角色状态，或隐藏角色窗口 |
 | 点击穿透 | 可选整窗点击穿透，不遮挡下层操作 |
 | 托盘控制 | 显示/隐藏角色、更换角色、打开设置、退出 |
 
@@ -32,9 +32,10 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
 
 核心引擎，决定角色的行为与回复逻辑，全部在 Rust 主进程运行。
 
-- 多角色支持：内置角色 + 用户导入角色，运行时切换。
+- 多角色支持：内置角色 + 用户导入角色，运行时切换；内置林克使用独立动作片段与生活场景编排。
 - 状态机驱动：默认按 `loop` 列表（每项 `{state,duration}` 分钟）循环；`time` 配置的时段内固定为对应状态（支持跨午夜），时段外回到循环。
-- 内置角色状态由 persona.json 定义（林克：`walking`/`motorcycle`/`idle`/`eat`/`fight`/`sleep`）；Petdex 导入角色默认 9 个标准状态（`Idle`、`RunRight`、`RunLeft`、`Waving`、`Jumping`、`Failed`、`Waiting`、`Running`、`Review`，与 Petdex 规范一致，spritesheet 每状态一行）。
+- 内置角色状态由 persona.json 定义（林克：`routine`/`focus`/`active`/`relax`/`eat`/`sleep`），每个状态绑定一组 `scenes` 微场景；导入角色可自定义任意状态集合。
+- 状态遍历顺序统一按 `schedule.loop` 的出场顺序（其余状态按名称排序兜底），避免依赖精灵图行号。
 - 状态与回复绑定：对话时 system prompt 注入「角色定义 + 回复风格 + 当前状态约束」，同一角色在不同状态下回复风格不同。
 - 环境气泡：随机自言自语，间隔按状态时长与话痨程度自适应（见「主动交互与防打扰机制」）。
 
@@ -48,9 +49,9 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
 
 ### 角色导入与删除
 
-- Petdex 导入：设置界面「角色导入」，输入 `https://petdex.dev/pets/{slug}` 链接，流程见下文「核心流程」。
-- 本地导入：设置界面「角色导入」支持从本地文件夹 / zip 导入（`persona.json` + `spritesheet.webp`），也可直接把文件夹 / zip 拖入设置窗口的导入区域。
-- 删除：设置界面「已支持角色」列表可删除；同时移除磁盘文件与托盘菜单项；删除当前角色时自动回退到内置默认角色（林克）；内置角色不可删除。
+- 本地导入：设置界面「角色导入」支持从本地文件夹 / zip 导入（`persona.json` + `clips/` 动作帧条），也可直接把文件夹 / zip 拖入设置窗口的导入区域。
+- 导入校验：状态非空、每个状态都有场景、每个场景的步骤都引用已定义动作、动作资源必须是 `clips/` 下的 WebP；任一不满足即拒绝导入。
+- 删除：设置界面角色列表可删除导入角色；同时移除磁盘文件与托盘菜单项；删除当前角色时自动回退到内置默认角色（林克）；内置角色不可删除。
 
 ### 聊天窗口
 
@@ -63,21 +64,21 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
 
 ## 视觉表现与桌面渲染
 
-- 渲染层：WebView2 + Vite + TypeScript（无框架），spritesheet + CSS `steps()` 帧动画。
+- 渲染层：WebView2 + Vite + TypeScript（无框架），横向 WebP 动作帧条 + CSS `steps()` 帧动画。
 - 角色窗口：无边框透明、置顶、跳过任务栏，仅角色精灵区域可见。
-- 精灵图规范：8 列 × 9 行、每帧 192×208（Petdex 规范）；内置角色位于 `resources/characters/`，导入角色位于用户数据目录，通过 Tauri asset 协议加载。
+- 动作帧条规范：每个动作一份横向 WebP（左→右为帧序），帧尺寸全角色一致；内置林克为每帧 192×208（帧率随动作声明：视频动作 12fps、旧精灵图动作 6.7fps），位于 `resources/characters/link/clips/`；导入角色位于用户数据目录，通过 Tauri asset 协议加载。
 
 ## 技术架构
 
 ```
 ┌─ 渲染层（WebView2 + Vite + TypeScript，无框架）────────────────┐
-│ 角色动画（spritesheet + CSS steps）│气泡│对话/设置页 │
+│ 角色动画（clips 场景编排 + CSS steps）│气泡│对话/设置页 │
 └───────────────▲───────────────────────────────▲──────────────┘
    Tauri IPC（command / event）                   │
 ┌───────────────┴───────────────────────────────┴──────────────┐
 │ Rust 核心进程（常驻，低占用）                                 │
 │ 生活状态引擎 │ 气泡调度 │ LLM 网关(OpenAI 兼容) │ AI 每日气泡生成   │
-│ Petdex/本地导入 │ 窗口管理 │ 托盘 │ 屏幕截图 │ 角色持久化            │
+│ 角色导入/删除 │ 窗口管理 │ 托盘 │ 屏幕截图 │ 角色持久化              │
 └───────────────▲─────────────────────────────────────────────┘
    Tauri 窗口能力：透明无边框、点击穿透、按需创建/销毁窗口、asset 协议
 ```
@@ -101,20 +102,21 @@ DeskZen/
 │  └─ styles.css
 ├─ resources/                                资源目录（Vite publicDir）
 │  ├─ characters/link/
-│  │  ├─ persona.json     角色配置（作息/状态/气泡/提示词）
-│  │  └─ spritesheet.webp 角色精灵图（20×6）
+│  │  ├─ persona.json     角色配置（作息/状态/气泡/提示词/动作/场景）
+│  │  └─ clips/           动作帧条（15 个动作，横向 WebP，每帧 192×208）
 │  └─ icons/              应用图标（32/128/256 + ico）
 ├─ scripts/                                  开发与测试脚本
-│  ├─ gen_icons.py    从源 PNG 生成应用图标
-│  ├─ tauri.mjs       Tauri 启动包装脚本
-│  ├─ smoke_test.ps1 / llm_test.ps1
-│  └─ petdex_e2e.mjs / petdex_ui_e2e.mjs / petdex_delete_chat_e2e.mjs / settings_sidebar_e2e.mjs（共用 petdex_e2e_lib.mjs）
+│  ├─ gen_icons.py                  从源 PNG 生成应用图标
+│  ├─ convert_link_videos.py        图生视频 → 动作帧条（含背景剔除与裁切）
+│  ├─ extract_spritesheet_clips.py  旧精灵图逐行抽取 → 动作帧条
+│  ├─ tauri.mjs                     Tauri 启动包装脚本
+│  └─ local_import_e2e.mjs / settings_sidebar_e2e.mjs（共用 cdp_e2e_lib.mjs）
 └─ src-tauri/
    ├─ src/
    │  ├─ main.rs / lib.rs   入口、窗口、托盘、命令
    │  ├─ engine.rs          生活状态引擎 + 环境气泡调度 + persona/对话历史持久化
    │  ├─ genbubble.rs       AI 每日气泡：每状态每日批量生成台词、校验与缓存
-   │  ├─ petdex.rs          Petdex 导入/本地导入/删除命令
+   │  ├─ characters.rs      角色包校验、本地导入/删除命令
    │  ├─ prefs.rs           LLM 配置与偏好持久化
    │  ├─ screen.rs          屏幕截图（截图问答）
    │  └─ llm.rs             LLM 网关（OpenAI 兼容）
@@ -137,30 +139,23 @@ DeskZen/
 
 ### 状态引擎流程
 
-1. 启动时加载角色：编译期内嵌的内置角色（`resources/characters/link/persona.json`）+ 扫描用户数据目录（`%APPDATA%\com.deskzen.app\characters\*\persona.json`）中已导入的角色。
+1. 启动时加载角色：编译期内嵌的内置角色（`resources/characters/link/persona.json`）+ 扫描用户数据目录（`%APPDATA%\com.deskzen.app\characters\*\persona.json`）中已导入的角色；只有 clips/scenes 齐全的完整角色会被注册，格式不全的目录直接跳过。
 2. Rust 引擎按「下一次唤醒时刻」（状态切换 / 环境气泡到期，取较早者；单次睡眠最多 15 分钟）定时唤醒：状态变化时广播 `state-changed` 事件并重排气泡；气泡到期时按抑制/护栏判断后弹出（见「主动交互与防打扰机制」）。
-3. 前端收到事件后切换 spritesheet 行（动画）；切换角色时广播 `persona-changed` 让前端重新渲染。
+3. 前端收到 `state-changed` 后按该状态的 `scenes` 池随机挑一个场景，逐步播放场景里的 `clips`（含场景/步骤切换与标题刷新）；切换角色时广播 `persona-changed` 让前端重新渲染。
 
 ### 角色切换
 
 托盘「更换角色」子菜单 → `switch_persona`：更新引擎当前角色并广播 `persona-changed` / `state-changed`，动画、作息、LLM 人设同步切换；对话窗同步清空上一角色的对话历史并显示「开始新对话」提示，避免旧上下文混入新角色的 system prompt。
 
-### Petdex 导入流程
-
-1. 前端校验链接格式（`https://petdex.dev/pets/{slug}`），调用 `import_petdex_pet`。
-2. 后端通过官方接口 `GET /api/install-pet/{slug}` 解析角色资源地址。
-3. 优先下载 zip（`pets/…/zip.zip`，社区角色为 `{slug}.zip`）并解压出 `pet.json` + `spritesheet.webp/png`；zip 不可用时回退为直接下载 `petjson.json` + `sprite.webp`。
-4. 按 8×9 网格规范生成 DeskZen `persona.json`（`description` 作为 LLM 角色定义，作息/话痨程度/气泡/提示词取默认值；9 个标准状态按规范映射 `talkativeness`：Idle/Waving/Waiting=chatty、RunRight/RunLeft/Running/Jumping/Review=quiet、Failed=normal）。
-5. 写入 `%APPDATA%\com.deskzen.app\characters\petdex-{slug}\`，注册进状态引擎、追加托盘菜单项并立即切换。
-6. 精灵图通过 Tauri asset 协议加载（`convertFileSrc`，scope 为 `$APPCONFIG/characters/**`）。
-
 ### 本地导入流程
 
-设置界面「角色导入」→ `import_local_character`：支持本地文件夹与本地 zip（也可直接拖入导入区域）。读取 `persona.json` + `spritesheet.webp`（zip 内或递归扫描文件夹），校验 persona 格式与 WebP 后写入用户数据目录并注册切换。同样支持删除与托盘菜单同步。
+设置界面「角色导入」→ `import_local_character`：支持本地文件夹与本地 zip（也可直接拖入导入区域）。读取根目录 `persona.json` + `clips/` 目录下的动作帧条，校验状态/场景/动作引用与资源（clips 内必须为 WebP、单文件 ≤64MB），随后重写每个动作的资源路径，原子写入 `%APPDATA%\com.deskzen.app\characters\local-{slug}\` 并注册切换、追加托盘菜单项。
+
+导入后用 Tauri asset 协议加载动作帧条（`convertFileSrc`，scope 为 `$APPCONFIG/characters/**`）。
 
 ### 删除角色流程
 
-设置界面「已导入角色」→ `delete_persona`：校验仅允许 `petdex-` 前缀的导入角色 → 删除磁盘目录 → 移除引擎注册与托盘菜单项；若删除的是当前角色，自动切换到内置默认角色。
+设置界面角色列表 → `delete_persona`：校验仅允许导入角色（`local-`）→ 删除磁盘目录与对话历史 → 移除引擎注册与托盘菜单项；若删除的是当前角色，自动切换到内置默认角色。
 
 ### 对话流程
 
@@ -188,12 +183,12 @@ DeskZen/
 
 ## 设置界面
 
-设置窗口（560×620）为侧边栏布局，三个板块：
+设置窗口（480×620，侧边栏收窄到 76px）为侧边栏布局，三个板块：
 
 - **角色**：
   - 已支持角色：内置与导入角色列表，可设为当前角色或删除；
   - 桌面表现：点击穿透开关、角色缩放（即时生效并持久化）；
-  - 角色导入：Petdex 链接导入（前端校验 + 导入状态）、本地文件夹 / zip 导入、拖拽导入。
+  - 角色导入：本地文件夹 / zip 导入、拖拽导入（含导入校验与状态提示）。
 - **大模型**：接口地址、模型、API Key、温度（0.0~2.0）、最大输出 Token（64~4096）、AI 每日气泡开关、保存按钮与保存状态。
 - **关于**：应用简介与版本信息；页脚提供「退出 DeskZen」按钮。
 
@@ -226,14 +221,26 @@ DeskZen/
 
 ### 角色
 
-内置角色：`resources/characters/<id>/`（随应用打包），含 `persona.json` 与 `spritesheet`：
+内置角色：`resources/characters/<id>/`（随应用打包），含 `persona.json` 与 `clips/` 动作帧条目录：
 
 - `system_prompt`：角色定义、回复风格、各状态行为约束（注入 LLM）；
-- `spritesheet` / `cols` / `rows` / `pixel_art` / `display_w` / `display_h`：精灵图与渲染参数（`display_w`/`display_h` 可省略，缺省时按精灵图实际尺寸 ÷ `cols`/`rows` 自动计算）；
-- `states`：状态中文名、spritesheet 行/帧/帧时长、气泡文本池、话痨程度（`talkativeness`，可选：`chatty`/`normal`/`quiet`/`mute`，缺省 `normal`，决定环境气泡间隔倍率）；
+- `display_w` / `display_h`：角色显示尺寸（可省略，缺省时按第一个动作帧条的实际尺寸 ÷ 帧数自动计算）；
+- `states`：状态中文名、气泡文本池、话痨程度（`talkativeness`，可选：`chatty`/`normal`/`quiet`/`mute`，缺省 `normal`，决定环境气泡间隔倍率）；
+- `clips`：独立动作片段表，每个动作使用自己的横向 `spritesheet`、`frames` 与 `frame_ms`（同一角色内各动作的帧尺寸需一致）；
+- `scenes`：状态 → 微场景池，一个场景由多个 `{clip,loops}` 步骤组成，`weight` 控制随机权重。每次进入状态时按权重挑一个场景播放完整序列；每个状态都必须至少有一个场景；
 - `schedule`：状态机配置 `{ "loop": [ {state,duration 分钟}... ], "time": [ {start,end,state}... ] }`——默认按 `loop` 逐状态循环，`time` 时段内固定为对应状态（支持跨午夜）。
 
-导入角色：`%APPDATA%\com.deskzen.app\characters\petdex-{slug}\`，与内置角色同构（`persona.json` + `spritesheet` + 原始 `pet.json`），启动时自动扫描加载。
+导入角色包示例：
+
+```
+my-character/
+├─ persona.json          # 同内置角色结构；clips 内用 clips/xxx.webp 相对路径
+└─ clips/
+   ├─ idle.webp          # 横向帧条，帧数与 frame_ms 在 persona.json 里声明
+   └─ wave.webp
+```
+
+导入后写入 `%APPDATA%\com.deskzen.app\characters\local-{slug}\`（同构布局，资源路径被重写为绝对路径），启动时自动扫描加载。
 
 ## 运行与构建
 
@@ -250,12 +257,11 @@ npm run tauri build -- --no-bundle  # 仅生成 deskzen.exe，不打包安装包
 
 ## 测试
 
-- Rust 单元测试：在 `src-tauri/` 下运行 `cargo test --lib`，覆盖 Petdex 链接解析、zip 解压、persona 生成、LLM 网关、状态引擎与环境气泡调度（间隔推导/洗牌袋/频率护栏）、AI 气泡文案校验、对话历史持久化、偏好读写。
+- Rust 单元测试：在 `src-tauri/` 下运行 `cargo test --lib`，覆盖角色包校验与导入（状态/场景/动作引用、WebP 校验、路径重写）、动作帧条与声明帧数一致性、LLM 网关、状态引擎与环境气泡调度（间隔推导/洗牌袋/频率护栏）、AI 气泡文案校验、对话历史持久化、偏好读写。真实调用大模型的用例默认忽略（需已配置 Key 与网络）：`cargo test --lib -- --ignored`。
 - 端到端冒烟测试（`scripts/`，需先以 CDP 调试端口启动应用）：
-  - `petdex_e2e.mjs`：导入命令 + 精灵图加载；
-  - `petdex_ui_e2e.mjs`：设置界面导入流程 + 前端校验；
-  - `petdex_delete_chat_e2e.mjs`：删除角色 + 聊天窗口 UI；
-  - `settings_sidebar_e2e.mjs`：设置侧边栏切换。
+  - 启动方式（PowerShell，先构建再带调试端口运行）：`cargo build --manifest-path src-tauri/Cargo.toml`，然后 `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222"; .\src-tauri\target\debug\deskzen.exe`；
+  - `local_import_e2e.mjs`：临时拼一个最小角色包 → 导入 → 校验切换与动作播放 → 删除回退 → 聊天窗口 UI；
+  - `settings_sidebar_e2e.mjs`：设置侧边栏切换与关键元素。
 
 ## MVP 交付状态
 
@@ -268,8 +274,8 @@ npm run tauri build -- --no-bundle  # 仅生成 deskzen.exe，不打包安装包
 | 对话面板 + LLM + 状态注入 | ✅ 完成（OpenAI 兼容大模型） |
 | LLM 流式输出 | ✅ 完成（chat-delta 事件逐字显示） |
 | 多角色运行时切换 | ✅ 完成（托盘「更换角色」子菜单） |
-| Petdex 角色导入 / 删除 | ✅ 完成（zip 下载解压 + 前端校验 + 持久化） |
-| 本地角色导入 / 拖拽导入 | ✅ 完成（文件夹 / zip，含拖入导入区域） |
+| 动作片段 + 场景编排 | ✅ 完成（林克 15 个动作 / 6 个状态场景池，随机加权轮换，支持多步场景） |
+| 本地角色导入 / 拖拽导入 / 删除 | ✅ 完成（文件夹 / zip，clips 包校验，回退默认角色） |
 | 角色缩放 | ✅ 完成（0.5~2.0 档位，持久化） |
 | 对话历史持久化 | ✅ 完成（按角色原子写盘，重启恢复） |
 | 截图问答 | ✅ 完成（📷 截屏 + 粘贴图片，多模态消息） |

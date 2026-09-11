@@ -1,58 +1,67 @@
 {
   "id": "link",
   "name": "林克",
-  "spritesheet": "/characters/link/spritesheet.webp",
-  "cols": 20,
-  "rows": 6,
-  "pixel_art": false,
   "display_w": 116,
   "display_h": 125,
   "system_prompt": {
     "definition": "你是塞尔达传说荒野之息中的林克，住在用户的桌面上",
     "reply_style": "回复简短，符合塞尔达传说荒野之息中的风格；不要长篇大论，不要使用列表和 Markdown；永远不要提及自己是 AI 或程序",
     "state_guidelines": {
-      "walking": "你正在海拉鲁大陆上行走，精神不错，愿意聊天",
-      "motorcycle": "你正在海拉鲁大陆上骑着摩托车, 很开心",
-      "idle": "你正在休息，昏昏欲睡，不太想搭理人",
-      "eat": "你正在吃苹果，心情不错。处于话痨状态",
-      "fight": "你正在战斗中，心情紧张，专注于战斗，不太想搭理人",
-      "sleep": "你正在睡觉，处于休眠状态，只能回复梦话"
+      "routine": "你正在桌面附近观察动静、向用户挥手，偶尔寻找克洛格的踪迹。你精神不错，愿意进行简短交流",
+      "focus": "你正在确认冒险路线或认真保养盾牌。你会保持专注，只进行必要且简短的交流",
+      "active": "你正在研究左纳乌手臂的力量、寻找克洛格，或为取得进展而小小庆祝。你精力充沛，回复会更有活力",
+      "relax": "你正在伸懒腰、观察周围或忍不住打盹。你有些慵懒，不想进行太长的对话",
+      "eat": "你正在吃海拉鲁苹果，心情不错，愿意多说几句",
+      "sleep": "你困得睁不开眼，正在打瞌睡，处于休眠状态，只能回复梦话"
     }
   },
   "states": {
-    "walking": {
-      "label": "行走中",
+    "routine": {
+      "label": "日常",
       "row": 0,
       "frames": 20,
       "frame_ms": 150,
       "bubbles": [
-        "去救公主的路上～",
-        "要不要一起去打败灾厄？",
-        "我是勇者"
+        "附近很安静。",
+        "刚才是不是有什么动静？",
+        "要看看希卡之石吗？",
+        "那片叶子有点可疑。"
       ],
       "talkativeness": "normal"
     },
-    "motorcycle": {
-      "label": "骑摩托车",
+    "focus": {
+      "label": "专注",
+      "row": 4,
+      "frames": 20,
+      "frame_ms": 150,
+      "bubbles": [
+        "先确认一下路线。",
+        "盾牌也需要认真保养。",
+        "准备充分才能安心出发。"
+      ],
+      "talkativeness": "quiet"
+    },
+    "active": {
+      "label": "探索",
       "row": 1,
       "frames": 20,
       "frame_ms": 150,
       "bubbles": [
-        "海拉鲁大陆兜风中～",
-        "要不要一起去冒险？",
-        "管他什么勇者不勇者呢"
+        "这股力量很特别。",
+        "附近也许藏着克洛格。",
+        "有进展了。"
       ],
       "talkativeness": "chatty"
     },
-    "idle": {
-      "label": "休息中",
+    "relax": {
+      "label": "放松",
       "row": 2,
       "frames": 20,
       "frame_ms": 150,
       "bubbles": [
-        "休息中～",
-        "好累,睡一会吧",
-        "想梦到塞尔达公主"
+        "伸个懒腰。",
+        "稍微休息一下。",
+        "刚才差点睡着了……"
       ],
       "talkativeness": "normal"
     },
@@ -62,33 +71,21 @@
       "frames": 20,
       "frame_ms": 150,
       "bubbles": [
-        "吃苹果中～",
-        "好甜,再吃一口",
-        "等会再摘几个"
+        "这个苹果很甜。",
+        "补充一点体力。",
+        "再吃一口。"
       ],
       "talkativeness": "chatty"
     },
-    "fight": {
-      "label": "战斗中",
-      "row": 4,
-      "frames": 20,
-      "frame_ms": 150,
-      "bubbles": [
-        "战斗中～",
-        "敌人来了！",
-        "吃我一剑！"
-      ],
-      "talkativeness": "quiet"
-    },
     "sleep": {
-      "label": "睡觉中",
+      "label": "睡觉",
       "row": 5,
       "frames": 20,
       "frame_ms": 150,
       "bubbles": [
         "Zzz...",
         "塞..尔..达..",
-        "米..法.."
+        "再睡一会儿……"
       ],
       "talkativeness": "mute"
     }
@@ -96,34 +93,26 @@
   "schedule": {
     "loop": [
       {
-        "state": "walking",
+        "state": "routine",
+        "duration": 30
+      },
+      {
+        "state": "active",
         "duration": 20
       },
       {
-        "state": "motorcycle",
+        "state": "focus",
         "duration": 20
       },
       {
-        "state": "fight",
-        "duration": 20
-      },
-      {
-        "state": "idle",
-        "duration": 20
-      },
-      {
-        "state": "eat",
-        "duration": 20
-      },
-      {
-        "state": "sleep",
-        "duration": 20
+        "state": "relax",
+        "duration": 30
       }
     ],
     "time": [
       {
         "start": "08:00",
-        "end": "9:00",
+        "end": "09:00",
         "state": "eat"
       },
       {
@@ -137,14 +126,258 @@
         "state": "eat"
       },
       {
-        "start": "13:00",
-        "end": "14:30",
-        "state": "idle"
-      },
-      {
         "start": "20:00",
         "end": "08:00",
         "state": "sleep"
+      }
+    ]
+  },
+  "clips": {
+    "observe": {
+      "spritesheet": "/characters/link/clips/observe.webp",
+      "frames": 60,
+      "frame_ms": 83
+    },
+    "stretch": {
+      "spritesheet": "/characters/link/clips/stretch.webp",
+      "frames": 60,
+      "frame_ms": 83
+    },
+    "sheikah_slate": {
+      "spritesheet": "/characters/link/clips/sheikah_slate.webp",
+      "frames": 70,
+      "frame_ms": 83
+    },
+    "eat_apple": {
+      "spritesheet": "/characters/link/clips/eat_apple.webp",
+      "frames": 68,
+      "frame_ms": 83
+    },
+    "standing_doze": {
+      "spritesheet": "/characters/link/clips/standing_doze.webp",
+      "frames": 60,
+      "frame_ms": 83
+    },
+    "polish_shield": {
+      "spritesheet": "/characters/link/clips/polish_shield.webp",
+      "frames": 73,
+      "frame_ms": 83
+    },
+    "korok_leaf": {
+      "spritesheet": "/characters/link/clips/korok_leaf.webp",
+      "frames": 68,
+      "frame_ms": 83
+    },
+    "zonai_hand": {
+      "spritesheet": "/characters/link/clips/zonai_hand.webp",
+      "frames": 73,
+      "frame_ms": 83
+    },
+    "task_cheer": {
+      "spritesheet": "/characters/link/clips/task_cheer.webp",
+      "frames": 60,
+      "frame_ms": 83
+    },
+    "greet_wave": {
+      "spritesheet": "/characters/link/clips/greet_wave.webp",
+      "frames": 61,
+      "frame_ms": 83
+    },
+    "walk": {
+      "spritesheet": "/characters/link/clips/walk.webp",
+      "frames": 20,
+      "frame_ms": 150
+    },
+    "ride_motorcycle": {
+      "spritesheet": "/characters/link/clips/ride_motorcycle.webp",
+      "frames": 20,
+      "frame_ms": 150
+    },
+    "sit_idle": {
+      "spritesheet": "/characters/link/clips/sit_idle.webp",
+      "frames": 20,
+      "frame_ms": 150
+    },
+    "lie_sleep": {
+      "spritesheet": "/characters/link/clips/lie_sleep.webp",
+      "frames": 20,
+      "frame_ms": 150
+    },
+    "fight": {
+      "spritesheet": "/characters/link/clips/fight.webp",
+      "frames": 20,
+      "frame_ms": 150
+    }
+  },
+  "scenes": {
+    "routine": [
+      {
+        "id": "notice_the_viewer",
+        "label": "打招呼",
+        "weight": 3,
+        "steps": [
+          {
+            "clip": "greet_wave"
+          }
+        ]
+      },
+      {
+        "id": "listen_and_observe",
+        "label": "观察周围",
+        "weight": 5,
+        "steps": [
+          {
+            "clip": "observe"
+          }
+        ]
+      },
+      {
+        "id": "patrol_a_round",
+        "label": "巡视一圈",
+        "weight": 5,
+        "steps": [
+          {
+            "clip": "walk"
+          }
+        ]
+      },
+      {
+        "id": "korok_hint",
+        "label": "发现奇怪叶子",
+        "weight": 2,
+        "steps": [
+          {
+            "clip": "korok_leaf"
+          }
+        ]
+      }
+    ],
+    "focus": [
+      {
+        "id": "check_the_route",
+        "label": "查看希卡之石",
+        "weight": 3,
+        "steps": [
+          {
+            "clip": "sheikah_slate"
+          }
+        ]
+      },
+      {
+        "id": "maintain_the_shield",
+        "label": "保养盾牌",
+        "weight": 5,
+        "steps": [
+          {
+            "clip": "polish_shield"
+          }
+        ]
+      },
+      {
+        "id": "focus_complete",
+        "label": "完成一轮专注",
+        "weight": 1,
+        "steps": [
+          {
+            "clip": "task_cheer"
+          }
+        ]
+      }
+    ],
+    "active": [
+      {
+        "id": "zonai_power",
+        "label": "感受左纳乌力量",
+        "weight": 4,
+        "steps": [
+          {
+            "clip": "zonai_hand"
+          }
+        ]
+      },
+      {
+        "id": "adventure_progress",
+        "label": "冒险有所进展",
+        "weight": 2,
+        "steps": [
+          {
+            "clip": "task_cheer"
+          }
+        ]
+      },
+      {
+        "id": "ride_out",
+        "label": "骑车出门探索",
+        "weight": 5,
+        "steps": [
+          {
+            "clip": "ride_motorcycle"
+          }
+        ]
+      },
+      {
+        "id": "ambush_battle",
+        "label": "遭遇战斗",
+        "weight": 2,
+        "steps": [
+          {
+            "clip": "fight"
+          }
+        ]
+      }
+    ],
+    "relax": [
+      {
+        "id": "long_stretch",
+        "label": "伸个懒腰",
+        "weight": 3,
+        "steps": [
+          {
+            "clip": "stretch"
+          }
+        ]
+      },
+      {
+        "id": "brief_doze",
+        "label": "站着打盹",
+        "weight": 4,
+        "steps": [
+          {
+            "clip": "standing_doze"
+          }
+        ]
+      },
+      {
+        "id": "daydream_sit",
+        "label": "坐着发呆",
+        "weight": 5,
+        "steps": [
+          {
+            "clip": "sit_idle"
+          }
+        ]
+      }
+    ],
+    "eat": [
+      {
+        "id": "hyrule_apple",
+        "label": "吃海拉鲁苹果",
+        "steps": [
+          {
+            "clip": "eat_apple"
+          }
+        ]
+      }
+    ],
+    "sleep": [
+      {
+        "id": "lie_down_sleep",
+        "label": "躺下睡一会儿",
+        "steps": [
+          {
+            "clip": "lie_sleep"
+          }
+        ]
       }
     ]
   }

@@ -1,8 +1,9 @@
-export const CDP_PORT = 9222;
+const CDP_PORT = 9222;
 
-/** 角色主页（http://tauri.localhost/）目标过滤 */
+/** 角色主页目标过滤：生产包为 http://tauri.localhost/，dev（vite）为 http://localhost:1420/ */
 export const personaTargetFilter = (t) =>
-  t.type === "page" && t.url.replace(/\/$/, "") === "http://tauri.localhost";
+  t.type === "page" &&
+  /^http:\/\/(tauri\.localhost|localhost:1420)$/.test(t.url.replace(/\/$/, ""));
 
 export async function getTargets(filter) {
   for (let i = 0; i < 40; i++) {

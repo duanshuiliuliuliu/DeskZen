@@ -55,15 +55,7 @@
 
           <section class="settings-group">
             <h2>角色导入</h2>
-            <div class="settings-sub">从 Petdex 导入</div>
-            <label class="settings-field">
-              <span>Petdex 链接</span>
-              <input id="petdex-url" type="url" placeholder="https://petdex.dev/pets/doraemon" autocomplete="off" />
-            </label>
-            <button id="petdex-import" class="btn btn-primary">导入角色</button>
-            <p id="petdex-status" class="settings-hint"></p>
-            <div class="settings-sub">从本地导入</div>
-            <p class="settings-hint">选择一个包含 persona.json 与 spritesheet.webp 的文件夹，或直接选择打包好的 zip 文件。</p>
+            <p class="settings-hint">选择一个包含 persona.json 与 clips/ 动作帧条的文件夹，或直接选择打包好的 zip 文件。</p>
             <div id="local-import-drop" class="local-import-drop">
               <span class="local-import-drop-icon">📦</span>
               <span>将角色文件夹或 zip 拖到此处导入</span>
@@ -122,7 +114,7 @@
           <section class="settings-group">
             <h2>DeskZen</h2>
             <div class="about-list">
-              <p><span>版本号</span>1.0</p>
+              <p><span>版本号</span><span id="app-version">—</span></p>
               <p><span>内置角色</span>林克</p>
               <p><span>作者</span>duanshuiliuliuliu</p>
             </div>

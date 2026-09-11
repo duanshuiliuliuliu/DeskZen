@@ -139,18 +139,6 @@ struct ChatRequest<'a> {
     stream: bool,
 }
 
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-struct Choice {
-    message: LlmMessage,
-}
-
 /// 读取 LLM 配置：优先级 环境变量 DESKZEN_API_KEY > AppData 下 llm.json > 默认值
 pub fn load_config(app: &AppHandle) -> LlmConfig {
     let mut cfg = LlmConfig::default();
@@ -182,50 +170,6 @@ pub fn load_config(app: &AppHandle) -> LlmConfig {
         cfg.api_key = key;
     }
     cfg
-}
-
-/// 调用 chat completions，返回模型回复文本
-#[allow(dead_code)]
-pub async fn chat_completion(
-    cfg: &LlmConfig,
-    model: &str,
-    messages: &[LlmMessage],
-) -> Result<String, String> {
-    if cfg.api_key.is_empty() {
-        return Err("尚未配置 API Key。请在 AppData/com.deskzen.app/llm.json 或环境变量 DESKZEN_API_KEY 中配置。".into());
-    }
-    let client = http_client();
-    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let body = ChatRequest {
-        model,
-        messages,
-        temperature: cfg.temperature,
-        max_tokens: cfg.max_tokens,
-        stream: false,
-    };
-    let resp = client
-        .post(&url)
-        .bearer_auth(&cfg.api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("请求 LLM 接口失败：{e}"))?;
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败：{e}"))?;
-    if !status.is_success() {
-        return Err(format!("LLM 接口返回错误（{status}）：{}", truncate(&text, 300)));
-    }
-    let parsed: ChatResponse =
-        serde_json::from_str(&text).map_err(|e| format!("响应解析失败：{e}"))?;
-    parsed
-        .choices
-        .into_iter()
-        .next()
-        .map(|c| c.message.content.as_text().trim().to_string())
-        .ok_or_else(|| "LLM 返回了空响应".into())
 }
 
 /// 流式调用 chat completions：以 SSE 逐段回调增量文本，返回完整累积文本。
@@ -436,11 +380,11 @@ mod tests {
         assert_eq!(clamp_max_tokens(512), 512);
     }
 
-    /// 真实调用 LLM，验证网关代码路径（读取 AppData 中的 llm.json）。
+    /// 真实调用 LLM，验证流式网关代码路径（读取 AppData 中的 llm.json）。
     /// 需要真实配置与网络，默认忽略；可用 `cargo test -- --ignored` 手动运行。
     #[ignore]
     #[tokio::test]
-    async fn chat_completion_works() {
+    async fn chat_completion_stream_works() {
         let appdata = std::env::var("APPDATA").expect("APPDATA 未设置");
         let path = std::path::Path::new(&appdata).join("com.deskzen.app\\llm.json");
         let content = std::fs::read_to_string(path).expect("llm.json 不存在，请先配置 API Key");
@@ -457,9 +401,14 @@ mod tests {
                 content: "Say hi in one short sentence".into(),
             },
         ];
-        let reply = chat_completion(&cfg, &cfg.model, &messages)
-            .await
-            .expect("LLM 调用失败");
+        let mut streamed = String::new();
+        let reply = chat_completion_stream(&cfg, &cfg.model, &messages, |delta| {
+            streamed.push_str(delta);
+        })
+        .await
+        .expect("LLM 调用失败");
+        // 回调累计的增量应与最终返回的完整文本一致
+        assert_eq!(reply, streamed, "流式增量与最终文本不一致");
         assert!(!reply.trim().is_empty());
         println!("reply: {reply}");
     }
