@@ -7,27 +7,13 @@ interface StateConfig {
   label: string;
 }
 
-interface AnimationClipConfig {
-  spritesheet: string;
-  frames: number;
-  frame_ms: number;
-}
-
-interface SceneConfig {
-  id: string;
-  label?: string;
-  weight?: number;
-  steps: { clip: string; loops?: number }[];
-}
-
+/** 后端下发的角色视图：只有尺寸与状态名；动作参数随 playback 事件一起到达 */
 interface PersonaConfig {
   id: string;
   name: string;
   display_w: number;
   display_h: number;
   states: Record<string, StateConfig>;
-  clips?: Record<string, AnimationClipConfig>;
-  scenes?: Record<string, SceneConfig[]>;
 }
 
 interface StateChangedPayload {
@@ -65,8 +51,9 @@ let activeLayer = 0;
 let dragging = false;
 let pointerStart = { x: 0, y: 0 };
 
-/** 交叉淡入时长（ms）：与 styles.css 里 .character-layer 的 transition 保持一致 */
+/** 交叉淡入时长（ms）：写进 CSS 变量 --fade-ms，样式与这里的清理定时器同源 */
 const FADE_MS = 150;
+document.documentElement.style.setProperty("--fade-ms", `${FADE_MS}ms`);
 /** 角色精灵在角色窗口内的底距（与 styles.css `.character { bottom: 24px }`、Rust SPRITE_BOTTOM 同步） */
 const SPRITE_BOTTOM = 24;
 /** 气泡相对精灵头顶的间隙：内置林克 display_h=125 时 bottom=158（24+125+9），此处对齐该几何关系 */
@@ -93,41 +80,12 @@ function resolveSpriteUrl(path: string): string {
   return path.startsWith("/") ? path : convertFileSrc(path);
 }
 
-/** 角色动作按 id 排序，取第一个可用动作作为兜底/尺寸探测对象 */
-function sortedClips(persona: PersonaConfig): [string, AnimationClipConfig][] {
-  const clips = persona.clips ?? {};
-  return Object.keys(clips)
-    .sort()
-    .map((id) => [id, clips[id]] as [string, AnimationClipConfig]);
-}
-
-/** 应用角色外观：确定角色元素尺寸（具体帧条与动画由 applyClip 设置） */
+/** 应用角色外观尺寸（后端已把 display 尺寸算好并乘过全局缩放） */
 function applyPersona(persona: PersonaConfig): void {
-  if (persona.display_w > 0 && persona.display_h > 0) {
-    setCharSize(persona.display_w, persona.display_h);
-    applyBubblePosition(persona.display_h);
-    return;
-  }
-  // 未配置显示尺寸：用第一个动作帧条的实际尺寸 ÷ frames 计算
-  const clip = sortedClips(persona)[0]?.[1];
-  if (!clip) {
-    setCharSize(1, 1);
-    applyBubblePosition(0);
-    return;
-  }
-  const img = new Image();
-  img.onload = () => {
-    const frames = Math.max(1, Math.floor(clip.frames));
-    const w = Math.round(img.naturalWidth / frames);
-    const h = img.naturalHeight;
-    setCharSize(w, h);
-    applyBubblePosition(h);
-  };
-  img.onerror = () => {
-    setCharSize(1, 1);
-    applyBubblePosition(0);
-  };
-  img.src = resolveSpriteUrl(clip.spritesheet);
+  const w = Math.max(1, persona.display_w);
+  const h = Math.max(1, persona.display_h);
+  setCharSize(w, h);
+  applyBubblePosition(h);
 }
 
 /** 在指定图层上准备一个动作：设置帧参数、贴图并强制从第 1 帧重新播放 */

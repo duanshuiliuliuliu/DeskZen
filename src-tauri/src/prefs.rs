@@ -60,16 +60,11 @@ pub fn load_prefs(app: &AppHandle) -> Prefs {
     p
 }
 
-/// 保存 prefs.json：先写临时文件再 rename 原子替换，避免写一半崩溃导致文件截断损坏。
+/// 保存 prefs.json（原子写，见 util::atomic_write）
 pub fn save_prefs(app: &AppHandle, prefs: &Prefs) -> Result<(), String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let tmp = dir.join("prefs.json.tmp");
     let json = serde_json::to_string_pretty(prefs).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    // Windows 下 fs::rename 用 MoveFileEx + REPLACE_EXISTING，可原子覆盖已存在的目标文件。
-    std::fs::rename(&tmp, dir.join("prefs.json")).map_err(|e| e.to_string())?;
-    Ok(())
+    crate::util::atomic_write(&dir.join("prefs.json"), &json)
 }
 
 #[cfg(test)]

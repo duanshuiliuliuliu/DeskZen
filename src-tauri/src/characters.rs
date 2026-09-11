@@ -98,12 +98,12 @@ fn read_directory_pack(root: &Path) -> Result<CharacterPack, String> {
         return Err("角色文件夹根目录缺少 clips 文件夹".to_string());
     }
     let mut files = HashMap::new();
-    collect_directory_files(root, root, &mut files)?;
-    files.remove(Path::new("persona.json"));
+    // 只读 clips/ 下的 WebP：角色包里可能还放着源视频、草稿图等，没必要读进内存
+    collect_clip_files(root, &clips_root, &mut files)?;
     Ok(CharacterPack { persona_json, files })
 }
 
-fn collect_directory_files(
+fn collect_clip_files(
     root: &Path,
     directory: &Path,
     files: &mut HashMap<PathBuf, Vec<u8>>,
@@ -112,8 +112,8 @@ fn collect_directory_files(
         let entry = entry.map_err(|e| format!("读取角色目录项失败: {e}"))?;
         let path = entry.path();
         if path.is_dir() {
-            collect_directory_files(root, &path, files)?;
-        } else if path.is_file() {
+            collect_clip_files(root, &path, files)?;
+        } else if path.is_file() && has_webp_extension(&path) {
             let relative = path
                 .strip_prefix(root)
                 .map_err(|e| format!("读取角色资源路径失败: {e}"))?
@@ -122,6 +122,11 @@ fn collect_directory_files(
         }
     }
     Ok(())
+}
+
+/// 是否是动作资源后缀（.webp）；不看文件是否存在，zip 里的相对路径也能判断
+fn has_webp_extension(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("webp")
 }
 
 fn read_zip_pack(path: &Path) -> Result<CharacterPack, String> {
@@ -141,11 +146,16 @@ fn read_zip_pack(path: &Path) -> Result<CharacterPack, String> {
             return Err("角色包中包含超过 64 MB 的文件".to_string());
         }
         let relative = normalize_relative_path(Path::new(entry.name()))?;
+        let is_persona = relative == Path::new("persona.json");
+        // 其余条目只关心 clips/ 下的 WebP：其它内容不解压、不占内存
+        if !is_persona && !(relative.starts_with("clips") && has_webp_extension(&relative)) {
+            continue;
+        }
         let mut content = Vec::with_capacity(entry.size() as usize);
         entry
             .read_to_end(&mut content)
             .map_err(|e| format!("读取 zip 内容失败: {e}"))?;
-        if relative == Path::new("persona.json") {
+        if is_persona {
             if persona_json.replace(content).is_some() {
                 return Err("zip 中包含多个 persona.json".to_string());
             }
@@ -160,24 +170,9 @@ fn read_zip_pack(path: &Path) -> Result<CharacterPack, String> {
 }
 
 fn validate_persona(persona: &PersonaConfig, files: &HashMap<PathBuf, Vec<u8>>) -> Result<(), String> {
-    if persona.states.is_empty() {
-        return Err("角色配置缺少状态定义".to_string());
-    }
-    if persona.clips.is_empty() {
-        return Err("角色配置缺少 clips 定义".to_string());
-    }
-    if persona.scenes.is_empty() {
-        return Err("角色配置缺少 scenes 定义".to_string());
-    }
-    for state in persona.states.keys() {
-        if !persona.scenes.contains_key(state) {
-            return Err(format!("状态 {state} 缺少 scenes 场景定义"));
-        }
-    }
+    // 结构判据与启动加载共用（engine::validate_persona_structure），避免两边口径不一致
+    crate::engine::validate_persona_structure(persona)?;
     for (clip_id, clip) in &persona.clips {
-        if clip.frames == 0 || clip.frame_ms == 0 {
-            return Err(format!("动作 {clip_id} 的 frames 与 frame_ms 必须大于 0"));
-        }
         let path = normalize_clip_asset(&clip.spritesheet)?;
         let bytes = files
             .get(&path)
@@ -302,6 +297,7 @@ fn sanitize_slug(id: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     /// 最小合法角色包：1 个状态 + 1 个动作 + 1 个场景
     fn minimal_persona_json() -> &'static str {
@@ -393,6 +389,46 @@ mod tests {
         assert!(destination.join("persona.json").is_file());
         // staging 目录应已改名，不残留半成品
         assert!(!destination.with_extension("installing").exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn directory_pack_reads_only_clip_assets() {
+        let root = temp_dir("dir-pack");
+        fs::create_dir_all(root.join("clips")).unwrap();
+        fs::write(root.join("persona.json"), minimal_persona_json()).unwrap();
+        fs::write(root.join("clips/wave.webp"), webp_bytes()).unwrap();
+        // 包里常见的"额外内容"：源视频、草稿文件——都不该被读进内存
+        fs::write(root.join("source.mp4"), vec![0u8; 4096]).unwrap();
+        fs::write(root.join("clips/notes.txt"), b"draft").unwrap();
+
+        let pack = read_directory_pack(&root).unwrap();
+        assert_eq!(pack.files.len(), 1, "只应读入 clips 下的 WebP");
+        assert!(pack.files.contains_key(Path::new("clips/wave.webp")));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn zip_pack_reads_only_clip_assets() {
+        let root = temp_dir("zip-pack");
+        let zip_path = root.join("pack.zip");
+        {
+            let mut writer = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+            let options = zip::write::SimpleFileOptions::default();
+            writer.start_file("persona.json", options).unwrap();
+            writer.write_all(minimal_persona_json().as_bytes()).unwrap();
+            writer.start_file("clips/wave.webp", options).unwrap();
+            writer.write_all(&webp_bytes()).unwrap();
+            writer.start_file("source.mp4", options).unwrap();
+            writer.write_all(&[0u8; 4096]).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let pack = read_zip_pack(&zip_path).unwrap();
+        assert_eq!(pack.files.len(), 1, "只应解压 clips 下的 WebP");
+        assert!(pack.files.contains_key(Path::new("clips/wave.webp")));
 
         let _ = fs::remove_dir_all(&root);
     }

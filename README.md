@@ -147,7 +147,7 @@ DeskZen/
 
 ### 状态引擎流程
 
-1. 启动时加载角色：编译期内嵌的内置角色（`resources/characters/link/persona.json`）+ 扫描用户数据目录（`%APPDATA%\com.deskzen.app\characters\*\persona.json`）中已导入的角色；只有 clips/scenes 齐全的完整角色会被注册，格式不全的目录直接跳过。
+1. 启动时加载角色：编译期内嵌的内置角色（`resources/characters/link/persona.json`）+ 扫描用户数据目录（`%APPDATA%\com.deskzen.app\characters\*\persona.json`）中已导入的角色。加载与导入共用同一套**结构校验**（状态/场景齐备、场景引用的动作必须存在等），不通过的目录跳过并在控制台打印原因——避免"注册进来但某些状态什么都不播"。
 2. Rust 引擎按「下一次唤醒时刻」（状态切换 / 环境气泡到期 / **当前动作播完**，取最早者；单次睡眠最多 15 分钟）定时唤醒：状态变化时广播 `state-changed` 并重排气泡；动作到点时推进播放（同场景的下一步 → 场景不足 12 秒则再走一遍 → 否则按权重抽下一个场景，且不与上一次相同）。动作接力只留 60ms 余量，避免切换前定格。
 3. 后端把要播的动作用 `playback` 事件下发（场景/动作/帧参数/时长），前端只负责渲染与交叉淡入；因为后端始终知道"当前在演哪个动作"，气泡文案与画面天然对齐。切换角色时广播 `persona-changed` 让前端重新渲染。
 
@@ -157,7 +157,7 @@ DeskZen/
 
 ### 本地导入流程
 
-设置界面「角色导入」→ `import_local_character`：支持本地文件夹与本地 zip（也可直接拖入导入区域）。读取根目录 `persona.json` + `clips/` 目录下的动作帧条，校验状态/场景/动作引用与资源（clips 内必须为 WebP、单文件 ≤64MB），随后重写每个动作的资源路径，原子写入 `%APPDATA%\com.deskzen.app\characters\local-{slug}\` 并注册切换、追加托盘菜单项。
+设置界面「角色导入」→ `import_local_character`：支持本地文件夹与本地 zip（也可直接拖入导入区域）。只读取根目录 `persona.json` 与 `clips/` 下的 WebP 帧条（包里的源视频、草稿等不会被读进内存），校验结构与资源（动作必须有对应 WebP、单文件 ≤64MB、路径不得越界），随后重写每个动作的资源路径，原子写入 `%APPDATA%\com.deskzen.app\characters\local-{slug}\` 并注册切换、追加托盘菜单项。
 
 导入后用 Tauri asset 协议加载动作帧条（`convertFileSrc`，scope 为 `$APPCONFIG/characters/**`）。
 

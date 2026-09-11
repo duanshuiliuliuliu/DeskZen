@@ -162,6 +162,28 @@ async function sendMessage(text: string, image: string | null = null): Promise<v
   const pending = addTypingIndicator();
   const epoch = chatEpoch;
   let streamStarted = false;
+  // 流式增量先入缓冲、按帧刷一次 DOM：模型逐 token 推送时，
+  // 每个 token 都写一次 textContent + 读一次 scrollHeight 会打断布局（掉帧）
+  let buffer = "";
+  let flushHandle: number | undefined;
+  const flush = (): void => {
+    flushHandle = undefined;
+    if (!buffer) return;
+    pending.textContent += buffer;
+    buffer = "";
+    messages.scrollTop = messages.scrollHeight;
+  };
+  const scheduleFlush = (): void => {
+    if (flushHandle === undefined) flushHandle = requestAnimationFrame(flush);
+  };
+  /** 丢弃未刷新的增量（用于重试/结束，避免残留回调再改已经定稿的内容） */
+  const clearBuffer = (): void => {
+    buffer = "";
+    if (flushHandle !== undefined) {
+      cancelAnimationFrame(flushHandle);
+      flushHandle = undefined;
+    }
+  };
   // 订阅流式增量：首个增量到来时撤下“正在输入…”，随后逐字追加。
   // 回调必须校验 epoch，角色切换后旧会话的增量（连同旧请求）一律丢弃。
   let unlistenDelta: (() => void) | null = null;
@@ -176,12 +198,13 @@ async function sendMessage(text: string, image: string | null = null): Promise<v
         pending.classList.remove("typing");
         streamStarted = true;
       }
-      pending.textContent += delta;
-      messages.scrollTop = messages.scrollHeight;
+      buffer += delta;
+      scheduleFlush();
     });
     // 空回复重试前由后端发出：把输入区重置为“正在输入…”，避免残留旧流。
     unlistenReset = await listen("chat-reset", () => {
       if (epoch !== chatEpoch) return;
+      clearBuffer();
       pending.textContent = "正在输入…";
       pending.classList.add("typing");
       streamStarted = false;
@@ -192,6 +215,7 @@ async function sendMessage(text: string, image: string | null = null): Promise<v
     });
     if (epoch !== chatEpoch) return; // 期间切换了角色，丢弃旧会话的回复
     const fallback = image ? "我没看清，再发一次看看" : "我没听清，再说一次";
+    clearBuffer();
     pending.textContent = reply.trim() || fallback;
     pending.classList.remove("typing");
     history.push({ role: "assistant", content: reply });
@@ -206,6 +230,8 @@ async function sendMessage(text: string, image: string | null = null): Promise<v
       // 已收到部分回复：把界面上的半截回复作为事实保留（末尾追加错误标注），
       // history 保留用户消息并把半截回复记为 assistant，保证界面与上下文一致；
       // 若此时 pop 用户消息，下一轮上下文会与界面对不上。
+      flush(); // 先把缓冲里的增量落到界面，半截回复才算完整
+      clearBuffer();
       const partial = pending.textContent;
       pending.textContent = `${partial}（回复中断：出错了）`;
       pending.classList.remove("typing");
@@ -216,12 +242,14 @@ async function sendMessage(text: string, image: string | null = null): Promise<v
       persistHistory(pid);
     } else {
       // 一个字都没收到：维持现状——显示错误并撤回本次用户消息，允许重试。
+      clearBuffer();
       pending.textContent = `出错了：${String(err)}`;
       pending.classList.remove("typing");
       history.pop();
       persistHistory(pid);
     }
   } finally {
+    clearBuffer();
     unlistenDelta?.();
     unlistenReset?.();
     sending = false;

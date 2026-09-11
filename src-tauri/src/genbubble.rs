@@ -213,16 +213,11 @@ pub fn load(app: &AppHandle, persona_id: &str) -> GenBubbleCache {
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-/// 原子保存缓存（临时文件 + rename，与 prefs/history 同套路）
+/// 保存缓存（原子写，见 util::atomic_write）
 pub(crate) fn save(app: &AppHandle, persona_id: &str, cache: &GenBubbleCache) -> Result<(), String> {
     let path = cache_file_path(app, persona_id)?;
-    let dir = path.parent().ok_or("缓存目录不存在")?;
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let tmp = dir.join(format!("{}.tmp", path.file_name().unwrap_or_default().to_string_lossy()));
     let json = serde_json::to_string_pretty(cache).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-    Ok(())
+    crate::util::atomic_write(&path, &json)
 }
 
 /// 解析模型输出：逐行清洗校验，返回合格台词（批内去重）与首个拒绝原因（供重试反馈）

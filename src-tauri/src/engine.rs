@@ -258,6 +258,19 @@ pub struct ZoomChanged {
     pub h: u32,
 }
 
+/// 发给前端的角色视图：只含渲染需要的字段。
+/// 动作（clips）与场景（scenes）留在后端：场景由后端调度，动作参数随 `playback` 事件下发。
+#[derive(Debug, Clone, Serialize)]
+pub struct PersonaView {
+    pub id: String,
+    pub name: String,
+    /// 已乘全局缩放的显示尺寸
+    pub display_w: u32,
+    pub display_h: u32,
+    /// 状态 id -> { label, talkativeness, tone }
+    pub states: HashMap<String, StateConfig>,
+}
+
 /// 内置角色：id -> 配置文件（编译期内嵌，运行时切换）
 const EMBEDDED_PERSONAS: &[(&str, &str)] = &[
     ("link", include_str!("../../resources/characters/link/persona.json")),
@@ -308,11 +321,22 @@ impl StateEngine {
                     let Ok(json) = std::fs::read_to_string(&cfg_path) else {
                         continue;
                     };
-                    // 只加载当前 clips/scenes 格式的完整角色；旧格式或手改坏了的目录直接跳过
-                    if let Ok(cfg) = serde_json::from_str::<PersonaConfig>(&json) {
-                        if is_playable_persona(&cfg) {
-                            personas.insert(cfg.id.clone(), Arc::new(cfg));
-                        }
+                    // 只加载结构完整的角色（与导入用同一套判据）；坏包跳过并说明原因，
+                    // 避免注册进去后某些状态静默不播
+                    match serde_json::from_str::<PersonaConfig>(&json) {
+                        Ok(cfg) => match validate_persona_structure(&cfg) {
+                            Ok(()) => {
+                                personas.insert(cfg.id.clone(), Arc::new(cfg));
+                            }
+                            Err(reason) => eprintln!(
+                                "跳过角色目录 {}：{reason}",
+                                entry.path().display()
+                            ),
+                        },
+                        Err(error) => eprintln!(
+                            "跳过角色目录 {}：persona.json 解析失败（{error}）",
+                            entry.path().display()
+                        ),
                     }
                 }
             }
@@ -680,15 +704,19 @@ impl StateEngine {
         *crate::util::lock(&self.display_size) = display;
     }
 
-    /// 返回给前端用的角色配置：display_w/display_h 替换为缩放后的显示尺寸（缓存值），
-    /// 其余字段保持基准语义。persona.json 本体（含 build_system_prompt 使用的
-    /// system_prompt/state 字段）不受影响，因此替换 display 不影响对话提示词。
-    pub fn persona_view(&self) -> PersonaConfig {
-        let mut p = (*self.persona()).clone();
+    /// 返回给前端的角色视图：只带渲染需要的字段（缩放后的显示尺寸 + 状态名）。
+    /// 动作的渲染参数由 `playback` 事件自带，clips/scenes 不再推给前端，省掉每次广播的
+    /// 大段序列化与解析。
+    pub fn persona_view(&self) -> PersonaView {
+        let persona = self.persona();
         let (w, h) = self.display_size();
-        p.display_w = w;
-        p.display_h = h;
-        p
+        PersonaView {
+            id: persona.id.clone(),
+            name: persona.name.clone(),
+            display_w: w,
+            display_h: h,
+            states: persona.states.clone(),
+        }
     }
 
     /// 唤醒后台节拍线程：switch_persona / next_state 在修改 persona / manual_state 后调用，
@@ -977,7 +1005,7 @@ impl StateEngine {
 }
 
 #[tauri::command]
-pub fn get_persona_config(engine: tauri::State<'_, StateEngine>) -> PersonaConfig {
+pub fn get_persona_config(engine: tauri::State<'_, StateEngine>) -> PersonaView {
     // 返回带缩放后 display_w/h 的视图：前端 applyPersona 据此直接呈现缩放后的角色。
     engine.persona_view()
 }
@@ -1069,15 +1097,8 @@ pub fn save_chat_history(
         messages,
     };
     let path = history_file_path(&app, &persona_id)?;
-    let dir = path
-        .parent()
-        .ok_or_else(|| "历史文件路径不合法".to_string())?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("创建历史目录失败: {e}"))?;
-    let tmp = dir.join(format!("{persona_id}.json.tmp"));
     let json = serde_json::to_string_pretty(&record).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-    Ok(())
+    crate::util::atomic_write(&path, &json)
 }
 
 fn now_minutes(now: &chrono::DateTime<chrono::Local>) -> u32 {
@@ -1188,15 +1209,49 @@ pub(crate) fn ordered_state_keys(persona: &PersonaConfig) -> Vec<String> {
     keys
 }
 
-/// 当前渲染模型能否播放该角色：必须有 clips，且每个状态都有非空场景。
-/// 角色注册（导入 / 启动扫描）都用它做准入，保证前端永远拿得到可播放的配置。
-pub(crate) fn is_playable_persona(persona: &PersonaConfig) -> bool {
-    !persona.clips.is_empty()
-        && !persona.scenes.is_empty()
-        && persona
-            .states
-            .keys()
-            .all(|state| persona.scenes.get(state).is_some_and(|scenes| !scenes.is_empty()))
+/// 角色配置的**结构**校验（不含资源文件）：导入与启动扫描共用同一套判据。
+///
+/// 之前导入侧校验很严、加载侧只做粗略准入，结果是"手改过或旧版本写的"角色包能被注册，
+/// 但某些状态引用的动作不存在，运行时被静默过滤——那个状态就什么都不播，前端停在上一个画面。
+pub(crate) fn validate_persona_structure(persona: &PersonaConfig) -> Result<(), String> {
+    if persona.states.is_empty() {
+        return Err("缺少 states 状态定义".into());
+    }
+    if persona.clips.is_empty() {
+        return Err("缺少 clips 动作定义".into());
+    }
+    if persona.scenes.is_empty() {
+        return Err("缺少 scenes 场景定义".into());
+    }
+    for (clip_id, clip) in &persona.clips {
+        if clip.frames == 0 || clip.frame_ms == 0 {
+            return Err(format!("动作 {clip_id} 的 frames 与 frame_ms 必须大于 0"));
+        }
+    }
+    for (state, scenes) in &persona.scenes {
+        if !persona.states.contains_key(state) {
+            return Err(format!("场景引用了未定义状态 {state}"));
+        }
+        if scenes.is_empty() {
+            return Err(format!("状态 {state} 没有可播放场景"));
+        }
+        for scene in scenes {
+            if scene.steps.is_empty() {
+                return Err(format!("场景 {} 没有动作步骤", scene.id));
+            }
+            for step in &scene.steps {
+                if !persona.clips.contains_key(&step.clip) {
+                    return Err(format!("场景 {} 引用了未知动作 {}", scene.id, step.clip));
+                }
+            }
+        }
+    }
+    for state in persona.states.keys() {
+        if !persona.scenes.contains_key(state) {
+            return Err(format!("状态 {state} 缺少 scenes 场景定义"));
+        }
+    }
+    Ok(())
 }
 
 /// 某状态会用到哪些动作（按场景出现顺序去重）——AI 每日文案按动作粒度生成，
@@ -1945,19 +2000,24 @@ mod tests {
     }
 
     #[test]
-    fn playable_persona_requires_clips_and_scenes() {
+    fn structure_validation_rejects_incomplete_personas() {
         let p = link();
-        assert!(is_playable_persona(&p));
+        assert!(validate_persona_structure(&p).is_ok());
         let mut no_clips = p.clone();
         no_clips.clips.clear();
-        assert!(!is_playable_persona(&no_clips));
+        assert!(validate_persona_structure(&no_clips).is_err());
         let mut no_scenes = p.clone();
         no_scenes.scenes.clear();
-        assert!(!is_playable_persona(&no_scenes));
+        assert!(validate_persona_structure(&no_scenes).is_err());
         // 任一状态缺少场景都视为不可播放（前端不做兜底假设）
-        let mut state_without_scene = p;
+        let mut state_without_scene = p.clone();
         state_without_scene.scenes.remove("sleep");
-        assert!(!is_playable_persona(&state_without_scene));
+        assert!(validate_persona_structure(&state_without_scene).is_err());
+        // 场景引用了不存在的动作：这正是"加载侧宽松"时会被静默过滤、什么都不播的情况
+        let mut bad_step = p;
+        bad_step.scenes.get_mut("relax").unwrap()[0].steps[0].clip = "不存在的动作".into();
+        let error = validate_persona_structure(&bad_step).unwrap_err();
+        assert!(error.contains("未知动作"), "{error}");
     }
 
     #[test]
