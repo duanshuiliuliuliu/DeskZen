@@ -1,7 +1,7 @@
 //! 通用小工具
 
-use std::sync::{Mutex, MutexGuard};
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
 
 /// 取互斥锁；**锁中毒时恢复而不是 panic**。
 ///
@@ -10,7 +10,9 @@ use std::path::Path;
 /// 表现为"角色悄悄不动了"。中毒意味着上一个持锁者的临界区被中断，但本项目所有临界区
 /// 都只做内存读写（不做 IO/回调），恢复后继续用是安全的。
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// 原子写文本文件：先写同目录的 `<文件名>.tmp`，再 rename 覆盖目标。
@@ -26,6 +28,26 @@ pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
     std::fs::write(&tmp, contents).map_err(|e| format!("写入临时文件失败: {e}"))?;
     // Windows 下 rename 使用 MoveFileEx + REPLACE_EXISTING，可原子覆盖已存在的目标文件
     std::fs::rename(&tmp, path).map_err(|e| format!("替换文件失败: {e}"))?;
+    Ok(())
+}
+
+/// 递归复制目录内容到 `dst`（`dst` 可不存在）。用于旧版数据目录迁移。
+/// 只做普通文件与子目录复制；遇到符号链接按文件复制（Windows 上角色目录不含链接）。
+pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("创建目录失败 {}: {e}", dst.display()))?;
+    let entries =
+        std::fs::read_dir(src).map_err(|e| format!("读取目录失败 {}: {e}", src.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("读取目录项失败: {e}"))?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)
+                .map_err(|e| format!("复制文件失败 {}: {e}", from.display()))?;
+        }
+    }
     Ok(())
 }
 
@@ -74,5 +96,33 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "不应残留临时文件");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_dir_recursive_copies_nested_tree() {
+        let root = std::env::temp_dir().join(format!(
+            "deskzen-util-copy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let src = root.join("old");
+        let dst = root.join("new");
+        std::fs::create_dir_all(src.join("characters/local-demo/clips")).unwrap();
+        std::fs::write(src.join("prefs.json"), "{\"zoom\":1.5}").unwrap();
+        std::fs::write(src.join("characters/local-demo/clips/wave.webp"), b"RIFF").unwrap();
+
+        copy_dir_recursive(&src, &dst).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.join("prefs.json")).unwrap(),
+            "{\"zoom\":1.5}"
+        );
+        assert_eq!(
+            std::fs::read(dst.join("characters/local-demo/clips/wave.webp")).unwrap(),
+            b"RIFF"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

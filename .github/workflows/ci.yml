@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    # 项目依赖 Windows（WebView2、Win32 API、xcap），只在 windows-latest 上验证
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 版本号与 identifier 校验
+        run: npm run check:versions
+
+      - name: 前端构建（tsc + vite）
+        run: npm run build
+
+      - name: Rust 格式检查
+        run: cargo fmt --all -- --check
+        working-directory: src-tauri
+
+      - name: Clippy（警告即错误）
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: src-tauri
+
+      - name: Rust 单元测试
+        run: cargo test --lib
+        working-directory: src-tauri

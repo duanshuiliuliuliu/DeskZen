@@ -1,7 +1,7 @@
+mod characters;
 mod engine;
 mod genbubble;
 mod llm;
-mod characters;
 mod playback;
 mod prefs;
 mod screen;
@@ -56,8 +56,41 @@ struct PersonaInfo {
     name: String,
 }
 
+/// 应用 identifier 从旧的 `com.deskzen.app` 改为 `com.deskzen.desktop` 后，`%APPDATA%`
+/// 下的数据目录随之改变。首次用新版本启动时把旧目录整体复制过来，保证已导入角色、
+/// 对话历史、llm.json、prefs.json 不丢；仅当新目录不存在时执行（幂等），失败只记日志不阻塞启动。
+fn migrate_legacy_data_dir(app: &AppHandle) {
+    let Ok(new_dir) = app.path().app_config_dir() else {
+        return;
+    };
+    if new_dir.exists() {
+        return;
+    }
+    let Some(parent) = new_dir.parent() else {
+        return;
+    };
+    let legacy = parent.join("com.deskzen.app");
+    if !legacy.is_dir() {
+        return;
+    }
+    if let Err(error) = crate::util::copy_dir_recursive(&legacy, &new_dir) {
+        eprintln!(
+            "迁移旧数据目录失败（{} -> {}）：{error}",
+            legacy.display(),
+            new_dir.display()
+        );
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
+        // 单实例插件必须最先注册：第二次启动不再开新进程，而是唤起已有实例的角色窗口。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(win) = app.get_webview_window("persona") {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             passthrough: Mutex::new(false),
@@ -68,6 +101,8 @@ pub fn run() {
         })
         .on_menu_event(handle_menu_event)
         .setup(|app| {
+            // 必须在读取 prefs / 角色 / 对话历史之前完成旧数据目录迁移
+            migrate_legacy_data_dir(app.handle());
             let engine = engine::StateEngine::new(app.handle().clone());
             app.manage(engine);
             app.state::<engine::StateEngine>().start();
@@ -152,9 +187,7 @@ fn show_persona_menu(app: AppHandle) -> Result<(), String> {
     let hide = MenuItem::with_id(&app, "ctx_hide", "隐藏", true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let menu = Menu::with_items(&app, &[&next, &hide]).map_err(|e| e.to_string())?;
-    let persona = app
-        .get_webview_window("persona")
-        .ok_or("找不到角色窗口")?;
+    let persona = app.get_webview_window("persona").ok_or("找不到角色窗口")?;
     persona.popup_menu(&menu).map_err(|e| e.to_string())
 }
 
@@ -206,11 +239,21 @@ async fn open_chat(app: AppHandle) -> Result<(), String> {
 /// 把对话气泡摆到角色上方/左上方（尖角指向角色）；上方放不下则放到角色右侧。
 /// 限制在显示器工作区内。
 fn place_chat_bubble(app: &AppHandle) {
-    let Some(persona) = app.get_webview_window("persona") else { return };
-    let Some(chat) = app.get_webview_window("chat") else { return };
-    let Ok(p_pos) = persona.outer_position() else { return };
-    let Ok(p_size) = persona.outer_size() else { return };
-    let Ok(c_size) = chat.outer_size() else { return };
+    let Some(persona) = app.get_webview_window("persona") else {
+        return;
+    };
+    let Some(chat) = app.get_webview_window("chat") else {
+        return;
+    };
+    let Ok(p_pos) = persona.outer_position() else {
+        return;
+    };
+    let Ok(p_size) = persona.outer_size() else {
+        return;
+    };
+    let Ok(c_size) = chat.outer_size() else {
+        return;
+    };
     let gap: i32 = 6;
     // 角色精灵头顶的屏幕纵坐标（底距 24 + 精灵高 display_h）
     let display_h = app.state::<engine::StateEngine>().display_size().1 as i32;
@@ -247,14 +290,14 @@ fn reposition_chat(app: AppHandle) {
 /// 使角色在缩放时看起来只是原地变大/变小，而不会水平漂移。窗口随尺寸增大上下、左右对称扩展。
 /// 坐标/尺寸统一用 Physical 像素，避免与 Logical 混用导致位置偏移。
 pub(crate) fn resize_persona_window(app: &AppHandle) {
-    let Some(persona) = app.get_webview_window("persona") else { return };
+    let Some(persona) = app.get_webview_window("persona") else {
+        return;
+    };
     let (display_w, display_h) = app.state::<engine::StateEngine>().display_size();
     let scale = persona.scale_factor().unwrap_or(1.0);
     // 展示与气泡都在 CSS（逻辑）像素里；先算逻辑窗口尺寸，再乘 scale 转物理尺寸交给 set_size。
-    let win_w_log =
-        ((display_w as i32 + 2 * H_MARGIN).max(MIN_WINDOW_W)) as f64;
-    let win_h_log =
-        ((display_h as i32 + SPRITE_BOTTOM + TOP_MARGIN).max(MIN_WINDOW_H)) as f64;
+    let win_w_log = ((display_w as i32 + 2 * H_MARGIN).max(MIN_WINDOW_W)) as f64;
+    let win_h_log = ((display_h as i32 + SPRITE_BOTTOM + TOP_MARGIN).max(MIN_WINDOW_H)) as f64;
     let new_w = (win_w_log * scale).round() as i32;
     let new_h = (win_h_log * scale).round() as i32;
     if let (Ok(old_pos), Ok(old_size)) = (persona.outer_position(), persona.outer_size()) {
@@ -414,11 +457,7 @@ fn get_passthrough(state: tauri::State<'_, AppState>) -> bool {
 }
 
 #[tauri::command]
-fn set_passthrough(
-    app: AppHandle,
-    enabled: bool,
-    state: tauri::State<'_, AppState>,
-) {
+fn set_passthrough(app: AppHandle, enabled: bool, state: tauri::State<'_, AppState>) {
     *crate::util::lock(&state.passthrough) = enabled;
     if let Some(win) = app.get_webview_window("persona") {
         let _ = win.set_ignore_cursor_events(enabled);
@@ -547,11 +586,9 @@ async fn chat_send(
 /// 抓屏含同步 sleep 与编码，放到阻塞线程池执行，避免卡住 async 运行时。
 #[tauri::command]
 async fn capture_screen(app: AppHandle) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        screen::capture_current_monitor_data_url(&app)
-    })
-    .await
-    .map_err(|e| format!("截图任务执行失败：{e}"))?
+    tauri::async_runtime::spawn_blocking(move || screen::capture_current_monitor_data_url(&app))
+        .await
+        .map_err(|e| format!("截图任务执行失败：{e}"))?
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -577,10 +614,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let persona_menu = Submenu::with_items(app, "更换角色", true, &persona_refs)?;
     crate::util::lock(&state.persona_submenu).replace(persona_menu.clone());
 
-    let menu = Menu::with_items(
-        app,
-        &[&settings, &toggle_persona, &persona_menu, &quit],
-    )?;
+    let menu = Menu::with_items(app, &[&settings, &toggle_persona, &persona_menu, &quit])?;
     crate::util::lock(&state.persona_menu_item).replace(toggle_persona.clone());
 
     TrayIconBuilder::with_id("deskzen-tray")
@@ -670,7 +704,11 @@ fn update_persona_menu_label(app: &AppHandle) {
         .get_webview_window("persona")
         .map(|w| w.is_visible().unwrap_or(false))
         .unwrap_or(false);
-    let label = if visible { "隐藏角色" } else { "显示角色" };
+    let label = if visible {
+        "隐藏角色"
+    } else {
+        "显示角色"
+    };
     let state = app.state::<AppState>();
     let guard = crate::util::lock(&state.persona_menu_item);
     if let Some(item) = guard.as_ref() {
@@ -687,17 +725,17 @@ fn update_persona_menu_labels(app: &AppHandle) {
     let guard = crate::util::lock(&state.persona_items);
     for (id, item) in guard.iter() {
         let name = names.get(id).cloned().unwrap_or_default();
-        let label = if *id == active { format!("✓ {name}") } else { name };
+        let label = if *id == active {
+            format!("✓ {name}")
+        } else {
+            name
+        };
         let _ = item.set_text(label);
     }
 }
 
 /// 导入新角色后，往托盘“更换角色”子菜单追加菜单项并刷新 ✓ 标记
-pub(crate) fn add_persona_menu_item(
-    app: &AppHandle,
-    id: &str,
-    name: &str,
-) -> Result<(), String> {
+pub(crate) fn add_persona_menu_item(app: &AppHandle, id: &str, name: &str) -> Result<(), String> {
     let item = MenuItem::with_id(app, format!("persona_{id}"), name, true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let state = app.state::<AppState>();
@@ -724,10 +762,8 @@ pub(crate) fn remove_persona_menu_item(app: &AppHandle, id: &str) {
         let mut guard = crate::util::lock(&state.persona_items);
         guard.remove(id)
     };
-    if let (Some(item), Some(submenu)) = (
-        item,
-        crate::util::lock(&state.persona_submenu).as_ref(),
-    ) {
+    if let (Some(item), Some(submenu)) = (item, crate::util::lock(&state.persona_submenu).as_ref())
+    {
         let _ = submenu.remove(&item);
     }
     update_persona_menu_labels(app);

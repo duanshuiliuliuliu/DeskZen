@@ -34,8 +34,8 @@ pub async fn import_local_character(
         .await
         .map_err(|e| format!("导入任务执行失败: {e}"))??;
 
-    let mut persona: PersonaConfig =
-        serde_json::from_slice(&pack.persona_json).map_err(|e| format!("persona.json 格式错误: {e}"))?;
+    let mut persona: PersonaConfig = serde_json::from_slice(&pack.persona_json)
+        .map_err(|e| format!("persona.json 格式错误: {e}"))?;
     validate_persona(&persona, &pack.files)?;
 
     let id = format!("local-{}", sanitize_slug(&persona.id, &persona.name));
@@ -48,10 +48,15 @@ pub async fn import_local_character(
     let saved_persona = install_character_pack(&destination, &mut persona, &pack.files)?;
     engine.register_persona(saved_persona.clone());
     if let Err(error) = engine.switch_persona(&app, &id) {
-        let _ = fs::remove_dir_all(&destination);
+        // 回滚必须同时清掉磁盘目录与内存注册表，否则本次会话里会残留一个切不过去的角色。
+        // remove_persona 两者都做（并顺带清理可能的历史文件）。
+        let _ = engine.remove_persona(&id);
         return Err(error);
     }
-    crate::add_persona_menu_item(&app, &id, &saved_persona.name)?;
+    // 角色已安装并切换成功，托盘菜单项添加失败不应让前端以为导入失败；记录后照常返回。
+    if let Err(error) = crate::add_persona_menu_item(&app, &id, &saved_persona.name) {
+        eprintln!("为角色 {id} 添加托盘菜单失败：{error}");
+    }
 
     Ok(ImportedCharacter {
         id,
@@ -100,7 +105,10 @@ fn read_directory_pack(root: &Path) -> Result<CharacterPack, String> {
     let mut files = HashMap::new();
     // 只读 clips/ 下的 WebP：角色包里可能还放着源视频、草稿图等，没必要读进内存
     collect_clip_files(root, &clips_root, &mut files)?;
-    Ok(CharacterPack { persona_json, files })
+    Ok(CharacterPack {
+        persona_json,
+        files,
+    })
 }
 
 fn collect_clip_files(
@@ -169,7 +177,10 @@ fn read_zip_pack(path: &Path) -> Result<CharacterPack, String> {
     })
 }
 
-fn validate_persona(persona: &PersonaConfig, files: &HashMap<PathBuf, Vec<u8>>) -> Result<(), String> {
+fn validate_persona(
+    persona: &PersonaConfig,
+    files: &HashMap<PathBuf, Vec<u8>>,
+) -> Result<(), String> {
     // 结构判据与启动加载共用（engine::validate_persona_structure），避免两边口径不一致
     crate::engine::validate_persona_structure(persona)?;
     for (clip_id, clip) in &persona.clips {
@@ -223,8 +234,8 @@ fn install_character_pack(
             // 若这里写入 staging 路径，重命名后配置就会指向不存在的目录。
             clip.spritesheet = destination.join(&relative).to_string_lossy().into_owned();
         }
-        let text = serde_json::to_string_pretty(persona)
-            .map_err(|e| format!("生成角色配置失败: {e}"))?;
+        let text =
+            serde_json::to_string_pretty(persona).map_err(|e| format!("生成角色配置失败: {e}"))?;
         fs::write(staging.join("persona.json"), text)
             .map_err(|e| format!("写入 persona.json 失败: {e}"))?;
         let _ = fs::remove_dir_all(destination);
@@ -361,6 +372,15 @@ mod tests {
         );
         let error = validate_persona(&persona, &demo_files()).unwrap_err();
         assert!(error.contains("extra"), "{error}");
+    }
+
+    #[test]
+    fn validate_persona_rejects_schedule_with_unknown_state() {
+        // 导入侧与启动扫描共用同一套日程判据：坏引用必须在安装前就被拒绝
+        let mut persona: PersonaConfig = serde_json::from_str(minimal_persona_json()).unwrap();
+        persona.schedule.r#loop[0].state = "ghost".into();
+        let error = validate_persona(&persona, &demo_files()).unwrap_err();
+        assert!(error.contains("ghost"), "{error}");
     }
 
     #[test]

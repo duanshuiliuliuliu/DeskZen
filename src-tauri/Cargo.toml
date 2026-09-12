@@ -21,6 +21,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 xcap = "0.9"
 base64 = "0.22"
 tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
 image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg"] }
 
 [profile.release]

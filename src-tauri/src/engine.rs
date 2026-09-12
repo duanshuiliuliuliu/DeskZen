@@ -9,10 +9,10 @@ use std::{
     time::Duration,
 };
 
+use crate::llm::LlmMessage;
 use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use crate::llm::LlmMessage;
 
 /// 一个角色的完整配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -272,9 +272,10 @@ pub struct PersonaView {
 }
 
 /// 内置角色：id -> 配置文件（编译期内嵌，运行时切换）
-const EMBEDDED_PERSONAS: &[(&str, &str)] = &[
-    ("link", include_str!("../../resources/characters/link/persona.json")),
-];
+const EMBEDDED_PERSONAS: &[(&str, &str)] = &[(
+    "link",
+    include_str!("../../resources/characters/link/persona.json"),
+)];
 
 /// 生活状态引擎：根据本地时间与当前 persona 作息表计算状态，
 /// 变化时向所有窗口广播事件。只依赖 Rust 进程，不依赖 WebView 存活。
@@ -309,8 +310,7 @@ impl StateEngine {
     pub fn new(app: AppHandle) -> Self {
         let mut personas = HashMap::new();
         for (id, json) in EMBEDDED_PERSONAS {
-            let cfg: PersonaConfig =
-                serde_json::from_str(json).expect("persona 配置解析失败");
+            let cfg: PersonaConfig = serde_json::from_str(json).expect("persona 配置解析失败");
             personas.insert((*id).to_string(), Arc::new(cfg));
         }
         // 加载用户导入的角色（持久化在用户数据目录；clips/scenes 格式由导入时校验）
@@ -328,10 +328,9 @@ impl StateEngine {
                             Ok(()) => {
                                 personas.insert(cfg.id.clone(), Arc::new(cfg));
                             }
-                            Err(reason) => eprintln!(
-                                "跳过角色目录 {}：{reason}",
-                                entry.path().display()
-                            ),
+                            Err(reason) => {
+                                eprintln!("跳过角色目录 {}：{reason}", entry.path().display())
+                            }
                         },
                         Err(error) => eprintln!(
                             "跳过角色目录 {}：persona.json 解析失败（{error}）",
@@ -341,10 +340,7 @@ impl StateEngine {
                 }
             }
         }
-        let persona = personas
-            .get("link")
-            .cloned()
-            .expect("缺少默认角色 link");
+        let persona = personas.get("link").cloned().expect("缺少默认角色 link");
         let prefs = crate::prefs::load_prefs(&app);
         let gen_cache = crate::genbubble::load(&app, "link");
         let mut display = effective_display_size_zoomed(&persona, prefs.zoom);
@@ -446,7 +442,11 @@ impl StateEngine {
             g.cache.date = crate::genbubble::today_str();
             g.cache.by_clip.insert(clip_id.to_string(), texts.to_vec());
             g.cache.history.extend(texts.iter().cloned());
-            let keep = g.cache.history.len().saturating_sub(crate::genbubble::HISTORY_KEEP);
+            let keep = g
+                .cache
+                .history
+                .len()
+                .saturating_sub(crate::genbubble::HISTORY_KEEP);
             if keep > 0 {
                 g.cache.history.drain(..keep);
             }
@@ -604,20 +604,15 @@ impl StateEngine {
     fn next_ambient_text(&self) -> Option<String> {
         let persona = self.persona();
         let clip_id = self.current_clip();
-        let ai_clip =
-            clip_id
-                .as_deref()
-                .and_then(|id| crate::genbubble::today_pool(&self.gen_bubbles, id));
+        let ai_clip = clip_id
+            .as_deref()
+            .and_then(|id| crate::genbubble::today_pool(&self.gen_bubbles, id));
         let (key, pool) = resolve_bubble_pool(&persona, clip_id.as_deref(), ai_clip)?;
         self.draw_from_bag(&key, || pool)
     }
 
     /// 从指定池键的洗牌袋取一条；袋空时用 `build_pool` 重装（避免无谓地反复取大池）
-    fn draw_from_bag(
-        &self,
-        key: &str,
-        build_pool: impl FnOnce() -> Vec<String>,
-    ) -> Option<String> {
+    fn draw_from_bag(&self, key: &str, build_pool: impl FnOnce() -> Vec<String>) -> Option<String> {
         {
             let mut ambient = crate::util::lock(&self.ambient);
             if let Some(bag) = ambient.bags.get_mut(key) {
@@ -641,7 +636,9 @@ impl StateEngine {
 
     /// 气泡到期处理：被抑制或触发护栏则直接重排（推迟而非丢弃）；否则取文案弹出并记录。
     fn fire_ambient_bubble_if_due(&self, now: chrono::DateTime<chrono::Local>) {
-        let due = crate::util::lock(&self.ambient).next_at.is_some_and(|t| now >= t);
+        let due = crate::util::lock(&self.ambient)
+            .next_at
+            .is_some_and(|t| now >= t);
         if !due {
             return;
         }
@@ -653,9 +650,7 @@ impl StateEngine {
         // 避免"话说到一半画面就换了"造成内容与画面错位。
         if let Some(remaining) = crate::util::lock(&self.playback).remaining_ms(now) {
             if remaining < BUBBLE_CLIP_MIN_REMAINING_MS {
-                let wait = chrono::Duration::milliseconds(
-                    remaining.max(0) + BUBBLE_CLIP_SLACK_MS,
-                );
+                let wait = chrono::Duration::milliseconds(remaining.max(0) + BUBBLE_CLIP_SLACK_MS);
                 crate::util::lock(&self.ambient).next_at = Some(now + wait);
                 return;
             }
@@ -751,10 +746,7 @@ impl StateEngine {
         if !id.starts_with("local-") {
             return Err("内置角色不可删除".into());
         }
-        if !id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
-        {
+        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             return Err("角色 id 不合法".into());
         }
         let dir = self.characters_dir()?.join(id);
@@ -914,9 +906,7 @@ impl StateEngine {
                 // 播放是否是最早的那个唤醒时刻：是的话要踩点，不能按状态切换那样多睡 1 秒
                 (earliest, play_at.is_some_and(|t| t == earliest))
             };
-            let mut sleep_dur = (wake_at - now)
-                .to_std()
-                .unwrap_or(Duration::from_secs(0));
+            let mut sleep_dur = (wake_at - now).to_std().unwrap_or(Duration::from_secs(0));
             // 状态切换按分钟对齐，多睡 1 秒可避开边界竞态；动作播放是毫秒级接力，
             // 多睡 1 秒会让画面在切换前"定格一下"，所以只留 60ms 余量。
             sleep_dur += if playback_leads {
@@ -949,7 +939,12 @@ impl StateEngine {
             let mut state_changed = false;
             if last.as_deref() != Some(state.as_str()) {
                 *last = Some(state.clone());
-                let _ = app.emit("state-changed", StateChanged { state: state.clone() });
+                let _ = app.emit(
+                    "state-changed",
+                    StateChanged {
+                        state: state.clone(),
+                    },
+                );
                 state_changed = true;
             }
             drop(last);
@@ -994,7 +989,12 @@ impl StateEngine {
         *crate::util::lock(&self.last_state) = Some(next.clone());
         // 新的手动覆盖带到期时间 → 唤醒线程，使该到期时刻尽早接管。
         self.notify_wake();
-        let _ = self.app.emit("state-changed", StateChanged { state: next.clone() });
+        let _ = self.app.emit(
+            "state-changed",
+            StateChanged {
+                state: next.clone(),
+            },
+        );
         // 手动切换状态同样要换一整套场景，否则画面会停在上一个状态的动作上
         self.reset_playback(&next, chrono::Local::now());
         // 手动覆盖改写了“下一次切换时刻”（last_state 已预先登记，节拍线程不会再触发
@@ -1067,13 +1067,21 @@ pub fn load_chat_history(app: AppHandle, persona_id: String) -> Vec<LlmMessage> 
     if !is_valid_history_id(&persona_id) {
         return Vec::new();
     }
-    let Ok(path) = history_file_path(&app, &persona_id) else { return Vec::new() };
-    let Ok(meta) = std::fs::metadata(&path) else { return Vec::new() };
+    let Ok(path) = history_file_path(&app, &persona_id) else {
+        return Vec::new();
+    };
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return Vec::new();
+    };
     if meta.len() > HISTORY_MAX_BYTES {
         return Vec::new();
     }
-    let Ok(content) = std::fs::read_to_string(&path) else { return Vec::new() };
-    let Ok(record) = serde_json::from_str::<HistoryRecord>(&content) else { return Vec::new() };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(record) = serde_json::from_str::<HistoryRecord>(&content) else {
+        return Vec::new();
+    };
     record
         .messages
         .into_iter()
@@ -1251,6 +1259,27 @@ pub(crate) fn validate_persona_structure(persona: &PersonaConfig) -> Result<(), 
             return Err(format!("状态 {state} 缺少 scenes 场景定义"));
         }
     }
+    // 日程引用校验：loop/time 指向不存在或写错的状态时，运行时该状态会被静默跳过
+    // （前端停在上一个画面），必须在导入与启动扫描时用同一套判据拦下。
+    for entry in persona.schedule.loop_entries() {
+        if !persona.states.contains_key(&entry.state) {
+            return Err(format!("循环引用了未定义状态 {}", entry.state));
+        }
+        if entry.duration == 0 {
+            return Err(format!("循环状态 {} 的 duration 必须大于 0", entry.state));
+        }
+    }
+    for slot in persona.schedule.time() {
+        if !persona.states.contains_key(&slot.state) {
+            return Err(format!("time 时段引用了未定义状态 {}", slot.state));
+        }
+        if parse_mins(&slot.start).is_none() || parse_mins(&slot.end).is_none() {
+            return Err(format!(
+                "time 时段 {}-{} 的时间格式非法（应为 HH:MM）",
+                slot.start, slot.end
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1379,9 +1408,8 @@ fn work_area_content_limit(app: &AppHandle) -> Option<(u32, u32)> {
     let wa = monitor.work_area();
     // 物理工作区 ÷ scale 得逻辑像素，再减去水平两侧与底距/顶部余量
     let max_w = (wa.size.width as f64 / scale - (2 * crate::H_MARGIN) as f64).max(1.0) as u32;
-    let max_h =
-        (wa.size.height as f64 / scale - (crate::SPRITE_BOTTOM + crate::TOP_MARGIN) as f64)
-            .max(1.0) as u32;
+    let max_h = (wa.size.height as f64 / scale - (crate::SPRITE_BOTTOM + crate::TOP_MARGIN) as f64)
+        .max(1.0) as u32;
     Some((max_w, max_h))
 }
 
@@ -1523,8 +1551,19 @@ pub fn build_system_prompt(persona: &PersonaConfig, state: &str) -> String {
 
 fn parse_mins(value: &str) -> Option<u32> {
     let (h, m) = value.split_once(':')?;
+    // 严格 HH:MM：两位数字、00:00~24:00（24:00 仅作为“当日终点”合法）
+    if h.len() != 2
+        || m.len() != 2
+        || !h.bytes().all(|b| b.is_ascii_digit())
+        || !m.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
     let h: u32 = h.parse().ok()?;
     let m: u32 = m.parse().ok()?;
+    if h > 24 || m > 59 || (h == 24 && m != 0) {
+        return None;
+    }
     Some(h * 60 + m)
 }
 
@@ -1588,10 +1627,8 @@ mod tests {
     use super::*;
 
     fn link() -> PersonaConfig {
-        serde_json::from_str(include_str!(
-            "../../resources/characters/link/persona.json"
-        ))
-        .expect("内置 persona.json 解析失败")
+        serde_json::from_str(include_str!("../../resources/characters/link/persona.json"))
+            .expect("内置 persona.json 解析失败")
     }
 
     #[test]
@@ -1611,6 +1648,51 @@ mod tests {
                 slot.state
             );
         }
+    }
+
+    #[test]
+    fn schedule_validation_rejects_bad_references_and_durations() {
+        let base = link();
+        assert!(validate_persona_structure(&base).is_ok());
+
+        // loop 指向未定义状态：运行时该状态会被静默跳过
+        let mut p = base.clone();
+        p.schedule.r#loop[0].state = "ghost".into();
+        let error = validate_persona_structure(&p).unwrap_err();
+        assert!(error.contains("ghost"), "{error}");
+
+        // loop 时长为 0：该条目永远不会被排到
+        let mut p = base.clone();
+        p.schedule.r#loop[0].duration = 0;
+        let error = validate_persona_structure(&p).unwrap_err();
+        assert!(error.contains("duration"), "{error}");
+
+        // time 指向未定义状态
+        let mut p = base.clone();
+        p.schedule.time[0].state = "ghost".into();
+        let error = validate_persona_structure(&p).unwrap_err();
+        assert!(error.contains("ghost"), "{error}");
+
+        // time 时间格式非法
+        let mut p = base.clone();
+        p.schedule.time[0].start = "25:99".into();
+        let error = validate_persona_structure(&p).unwrap_err();
+        assert!(error.contains("时间格式"), "{error}");
+    }
+
+    #[test]
+    fn parse_mins_is_strict_about_format_and_range() {
+        assert_eq!(parse_mins("00:00"), Some(0));
+        assert_eq!(parse_mins("08:05"), Some(8 * 60 + 5));
+        assert_eq!(parse_mins("23:59"), Some(23 * 60 + 59));
+        // 24:00 作为“当日终点”合法，其余越界/非两位格式一律拒绝
+        assert_eq!(parse_mins("24:00"), Some(1440));
+        assert_eq!(parse_mins("24:01"), None);
+        assert_eq!(parse_mins("8:05"), None);
+        assert_eq!(parse_mins("08:5"), None);
+        assert_eq!(parse_mins("23:60"), None);
+        assert_eq!(parse_mins("ab:cd"), None);
+        assert_eq!(parse_mins(""), None);
     }
 
     #[test]
@@ -1663,7 +1745,13 @@ mod tests {
         // 现在应回退为 30 分钟兜底，而不是 None。
         let mut p = link();
         p.schedule.time.clear();
-        let state = p.schedule.r#loop.first().expect("link 应有循环").state.clone();
+        let state = p
+            .schedule
+            .r#loop
+            .first()
+            .expect("link 应有循环")
+            .state
+            .clone();
         p.schedule.r#loop = vec![LoopEntry {
             state: state.clone(),
             duration: 0,
@@ -1679,7 +1767,10 @@ mod tests {
         let p = link();
         let entries = p.schedule.loop_entries();
         // 第 0 分钟 → 第一个状态；第 duration 分钟 → 第二个；首个总时长处 → 回到第一个
-        assert_eq!(loop_state_at(&p.schedule, 0), Some(entries[0].state.clone()));
+        assert_eq!(
+            loop_state_at(&p.schedule, 0),
+            Some(entries[0].state.clone())
+        );
         assert_eq!(
             loop_state_at(&p.schedule, entries[0].duration),
             Some(entries[1].state.clone())
@@ -1695,7 +1786,10 @@ mod tests {
     fn effective_display_uses_config() {
         let p = link();
         // 显式配置了 display_w/display_h 时应直接返回配置值（而非从精灵图计算）
-        assert!(p.display_w > 0 && p.display_h > 0, "link 应显式配置显示尺寸");
+        assert!(
+            p.display_w > 0 && p.display_h > 0,
+            "link 应显式配置显示尺寸"
+        );
         assert_eq!(effective_display_size(&p), (p.display_w, p.display_h));
     }
 
@@ -1707,8 +1801,7 @@ mod tests {
         // 用仓库内真实动作帧条（文件系统可读）：observe 11520×208、60 帧 → 每帧 192×208
         let strip = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../resources/characters/link/clips/observe.webp");
-        p.clips.get_mut("observe").unwrap().spritesheet =
-            strip.to_string_lossy().into_owned();
+        p.clips.get_mut("observe").unwrap().spritesheet = strip.to_string_lossy().into_owned();
         assert_eq!(effective_display_size(&p), (192, 208));
     }
 
@@ -1746,10 +1839,7 @@ mod tests {
             (p.display_w * 2, p.display_h * 2)
         );
         // 0.5 减半（125 * 0.5 = 62.5，四舍五入为 63）
-        assert_eq!(
-            effective_display_size_zoomed(&p, 0.5),
-            (58, 63)
-        );
+        assert_eq!(effective_display_size_zoomed(&p, 0.5), (58, 63));
         // zoom=0 时也至少保留 1px，避免缩成 0 导致不可见
         let mut tiny = link();
         tiny.display_w = 1;
@@ -1766,7 +1856,10 @@ mod tests {
         // 高超限：按高等比缩，宽随之变小（保持 1:2）
         assert_eq!(fit_display_size_proportional(50, 200, 500, 100), (25, 100));
         // 双超限：方形入方形，等比缩到内切
-        assert_eq!(fit_display_size_proportional(400, 400, 200, 200), (200, 200));
+        assert_eq!(
+            fit_display_size_proportional(400, 400, 200, 200),
+            (200, 200)
+        );
         // 上限为 0：不除零，按 max(1) 兜底
         assert_eq!(fit_display_size_proportional(1, 1, 0, 0), (1, 1));
         // 极小值下限：等比缩后高度约 0.3px，须钳制到 1px，避免缩成 0
@@ -1838,7 +1931,10 @@ mod tests {
     /// 在日程里找一个「位于 time 时段内、且 loop 边界早于时段结束」的时刻
     fn find_slot_with_earlier_loop_boundary(
         persona: &PersonaConfig,
-    ) -> (chrono::DateTime<chrono::Local>, chrono::DateTime<chrono::Local>) {
+    ) -> (
+        chrono::DateTime<chrono::Local>,
+        chrono::DateTime<chrono::Local>,
+    ) {
         for mins in 0..24 * 60 {
             let Some(slot) = find_active_slot(&persona.schedule, mins) else {
                 continue;
@@ -1972,7 +2068,10 @@ mod tests {
 
         // 未知状态退回 normal 语气，不 panic
         let unknown = build_system_prompt(&p, "不存在的状态");
-        assert!(unknown.contains(Talkativeness::Normal.chat_tone()), "{unknown}");
+        assert!(
+            unknown.contains(Talkativeness::Normal.chat_tone()),
+            "{unknown}"
+        );
     }
 
     #[test]
@@ -1980,12 +2079,22 @@ mod tests {
         for (id, json) in EMBEDDED_PERSONAS {
             let persona: PersonaConfig = serde_json::from_str(json).unwrap();
             for state in persona.states.keys() {
-                assert!(persona.scenes.contains_key(state), "{id}: 状态 {state} 缺少场景");
+                assert!(
+                    persona.scenes.contains_key(state),
+                    "{id}: 状态 {state} 缺少场景"
+                );
             }
             for (state, scenes) in &persona.scenes {
-                assert!(persona.states.contains_key(state), "{id}: 场景引用未知状态 {state}");
+                assert!(
+                    persona.states.contains_key(state),
+                    "{id}: 场景引用未知状态 {state}"
+                );
                 for scene in scenes {
-                    assert!(!scene.steps.is_empty(), "{id}: 场景 {} 没有动作步骤", scene.id);
+                    assert!(
+                        !scene.steps.is_empty(),
+                        "{id}: 场景 {} 没有动作步骤",
+                        scene.id
+                    );
                     for step in &scene.steps {
                         assert!(
                             persona.clips.contains_key(&step.clip),
