@@ -80,7 +80,10 @@ mod tests {
 
     #[test]
     fn zoom_round_trips() {
-        let p = Prefs { zoom: 1.5, ai_bubbles: true };
+        let p = Prefs {
+            zoom: 1.5,
+            ai_bubbles: true,
+        };
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<Prefs>(&json).unwrap().zoom, 1.5);
     }

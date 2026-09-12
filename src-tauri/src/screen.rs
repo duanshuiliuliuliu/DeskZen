@@ -192,22 +192,14 @@ mod tests {
     #[test]
     fn encode_preview_downscales_to_1280() {
         let image = image::RgbaImage::from_fn(2560, 1440, |x, y| {
-            image::Rgba([
-                (x % 256) as u8,
-                (y % 256) as u8,
-                ((x + y) % 256) as u8,
-                255,
-            ])
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8, 255])
         });
         let data_url = encode_preview_data_url(&image).expect("编码失败");
         assert!(
             data_url.starts_with("data:image/jpeg;base64,"),
             "data URL 格式错误: {data_url}"
         );
-        let b64 = data_url
-            .split(',')
-            .nth(1)
-            .expect("缺少 base64 部分");
+        let b64 = data_url.split(',').nth(1).expect("缺少 base64 部分");
         let jpg = STANDARD.decode(b64).expect("base64 解码失败");
         let decoded = image::load_from_memory(&jpg).expect("JPEG 解码失败");
         assert_eq!(

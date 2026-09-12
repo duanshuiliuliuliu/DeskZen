@@ -81,7 +81,11 @@ impl Playback {
     }
 
     /// 到点就推进：先走同场景的下一步，走完再按权重抽下一个场景
-    pub fn advance(&mut self, persona: &PersonaConfig, now: DateTime<Local>) -> Option<PlaybackEvent> {
+    pub fn advance(
+        &mut self,
+        persona: &PersonaConfig,
+        now: DateTime<Local>,
+    ) -> Option<PlaybackEvent> {
         let current = self.current.clone()?;
         if now < current.next_at {
             return None;
@@ -256,7 +260,7 @@ fn valid_scenes<'a>(persona: &'a PersonaConfig, state: &str) -> Vec<&'a SceneCon
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{ScheduleConfig, SceneStepConfig, StateConfig, SystemPromptConfig};
+    use crate::engine::{SceneStepConfig, ScheduleConfig, StateConfig, SystemPromptConfig};
     use chrono::TimeZone;
     use std::collections::HashMap;
 
@@ -348,8 +352,14 @@ mod tests {
         let now = at(10, 0, 0);
         let event = playback.reset(&p, "idle", now).unwrap();
         assert!(event.clip == "one" || event.clip == "two");
-        assert_eq!(event.duration_ms, event.frames as u64 * event.frame_ms * event.loops as u64);
-        assert_eq!(playback.next_at(), Some(now + chrono::Duration::milliseconds(event.duration_ms as i64)));
+        assert_eq!(
+            event.duration_ms,
+            event.frames as u64 * event.frame_ms * event.loops as u64
+        );
+        assert_eq!(
+            playback.next_at(),
+            Some(now + chrono::Duration::milliseconds(event.duration_ms as i64))
+        );
         assert_eq!(playback.current_clip(), Some(event.clip.as_str()));
     }
 
@@ -365,7 +375,9 @@ mod tests {
         assert_eq!(first.clip, "two");
         assert_eq!(first.step_index, 0);
         // 未到点不推进
-        assert!(playback.advance(&p, now + chrono::Duration::milliseconds(100)).is_none());
+        assert!(playback
+            .advance(&p, now + chrono::Duration::milliseconds(100))
+            .is_none());
         // 到点推进到第二步，且 loops=2 让时长翻倍
         let second = playback
             .advance(&p, now + chrono::Duration::milliseconds(300))

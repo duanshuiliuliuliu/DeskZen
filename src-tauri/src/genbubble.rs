@@ -149,7 +149,11 @@ fn clip_scene(clip_id: &str, clip: &AnimationClipConfig) -> String {
 ///
 /// 刻意不带状态的 `tone` / `talkativeness` 语气：那是"聊天时怎么说话"的约束，
 /// 台词生成必须锚定在具体动作上，否则会生成"状态说得通、但画面里没这回事"的台词。
-fn build_system_prompt(persona: &PersonaConfig, clip_id: &str, clip: &AnimationClipConfig) -> String {
+fn build_system_prompt(
+    persona: &PersonaConfig,
+    clip_id: &str,
+    clip: &AnimationClipConfig,
+) -> String {
     format!(
         "你是桌面宠物角色「{}」的台词作者。\n角色设定：{}\n表达风格：{}\n{}{}\n只能写这一刻（这个动作进行中）说得通的话：不要提别的动作、别的时间或画面里没有的东西。",
         persona.name,
@@ -214,7 +218,11 @@ pub fn load(app: &AppHandle, persona_id: &str) -> GenBubbleCache {
 }
 
 /// 保存缓存（原子写，见 util::atomic_write）
-pub(crate) fn save(app: &AppHandle, persona_id: &str, cache: &GenBubbleCache) -> Result<(), String> {
+pub(crate) fn save(
+    app: &AppHandle,
+    persona_id: &str,
+    cache: &GenBubbleCache,
+) -> Result<(), String> {
     let path = cache_file_path(app, persona_id)?;
     let json = serde_json::to_string_pretty(cache).map_err(|e| e.to_string())?;
     crate::util::atomic_write(&path, &json)
@@ -368,7 +376,11 @@ pub fn today_pool(gs: &Mutex<GenState>, clip_id: &str) -> Option<Vec<String>> {
     if gs.cache.date != today_str() {
         return None;
     }
-    gs.cache.by_clip.get(clip_id).filter(|v| !v.is_empty()).cloned()
+    gs.cache
+        .by_clip
+        .get(clip_id)
+        .filter(|v| !v.is_empty())
+        .cloned()
 }
 
 #[cfg(test)]
@@ -376,10 +388,7 @@ mod tests {
     use super::*;
 
     fn link_persona() -> PersonaConfig {
-        serde_json::from_str(include_str!(
-            "../../resources/characters/link/persona.json"
-        ))
-        .unwrap()
+        serde_json::from_str(include_str!("../../resources/characters/link/persona.json")).unwrap()
     }
 
     #[test]
@@ -400,7 +409,10 @@ mod tests {
         }
         let user = build_user_prompt("walk", clip, &[]);
         assert!(user.contains(&clip.description), "{user}");
-        assert!(user.contains(&clip.bubbles[0]), "查重列表应含动作自带文案：{user}");
+        assert!(
+            user.contains(&clip.bubbles[0]),
+            "查重列表应含动作自带文案：{user}"
+        );
     }
 
     #[test]

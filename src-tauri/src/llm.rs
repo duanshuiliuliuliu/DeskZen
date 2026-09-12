@@ -207,16 +207,15 @@ pub async fn chat_completion_stream(
             .text()
             .await
             .map_err(|e| format!("读取响应失败：{e}"))?;
-        return Err(format!("LLM 接口返回错误（{status}）：{}", truncate(&text, 300)));
+        return Err(format!(
+            "LLM 接口返回错误（{status}）：{}",
+            truncate(&text, 300)
+        ));
     }
 
     let mut full = String::new();
     let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("读取流失败：{e}"))?
-    {
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("读取流失败：{e}"))? {
         buf.extend_from_slice(&chunk);
         // 按行出队：SSE 用 \n 分隔，一行即一条 `data: {...}`；能保证跨 chunk 的 UTF-8 不被截断。
         while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
@@ -269,7 +268,9 @@ pub fn attach_image_to_last_user(messages: &mut Vec<LlmMessage>, image_data_url:
         msg.content = Content::Parts(vec![
             ContentPart::Text { text },
             ContentPart::ImageUrl {
-                image_url: ImageUrl { url: image_data_url },
+                image_url: ImageUrl {
+                    url: image_data_url,
+                },
             },
         ]);
         return;
@@ -281,7 +282,9 @@ pub fn attach_image_to_last_user(messages: &mut Vec<LlmMessage>, image_data_url:
                 text: "请看看当前屏幕截图。".into(),
             },
             ContentPart::ImageUrl {
-                image_url: ImageUrl { url: image_data_url },
+                image_url: ImageUrl {
+                    url: image_data_url,
+                },
             },
         ]),
     });
@@ -325,7 +328,10 @@ mod tests {
         let json = serde_json::to_vec(&body).unwrap();
         let s = String::from_utf8(json).unwrap();
         assert!(s.contains("\"type\":\"text\""), "缺少 text 片段: {s}");
-        assert!(s.contains("\"type\":\"image_url\""), "缺少 image_url 片段: {s}");
+        assert!(
+            s.contains("\"type\":\"image_url\""),
+            "缺少 image_url 片段: {s}"
+        );
         assert!(
             s.contains("\"url\":\"data:image/png;base64,xyz\""),
             "缺少 base64 图片: {s}"
@@ -351,7 +357,8 @@ mod tests {
             Some("你好")
         );
         assert_eq!(
-            parse_sse_delta("data:{\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n").as_deref(),
+            parse_sse_delta("data:{\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n")
+                .as_deref(),
             Some(" world")
         );
         assert_eq!(parse_sse_delta("data: [DONE]"), None);
