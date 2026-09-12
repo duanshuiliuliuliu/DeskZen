@@ -1,30 +1,31 @@
-//! 场景播放调度：由 Rust 决定「接下来播哪个场景的哪个动作」，前端只按事件播放。
+//! 播放调度：由 Rust 决定「状态内走哪条链、当前播哪一段的哪个动作实例」，前端只按事件播放。
 //!
-//! 这样「画面」「气泡文案」「播放时长」共用同一个事实来源——后端始终知道当前在播
-//! 哪个动作，就能保证气泡说的是眼里正在发生的事。
+//! 层级：状态（固定 6 个）→ 链（链内有序、链间可选）→ 段（有起止的 UI 表现）→ 动作实例（clip）。
+//! 台词挂在动作上、且只在动作实例内出现，保证"说的"和"演的"严格一致。
 
 use std::collections::{HashMap, VecDeque};
 
 use chrono::{DateTime, Local};
 use serde::Serialize;
 
-use crate::engine::{refill_bag, AnimationClipConfig, PersonaConfig, SceneConfig};
+use crate::engine::{refill_bag, AnimationClipConfig, ChainConfig, PersonaConfig, SceneConfig};
 
-/// 单个动作的循环次数上限：防止手改配置把角色卡在同一个动作上
+/// 单个动作实例的时长上限（毫秒）：防止手改配置把角色卡在同一个动作上
+pub const MAX_ACTION_MS: i64 = 5 * 60 * 1000;
+/// 旧格式 loops 的上限（避免旧配置异常放大）
 pub const MAX_STEP_LOOPS: u32 = 20;
-/// 一个场景至少持续多久（毫秒）：太短会让角色像"坐不住"，每隔几秒就换一件事做。
-/// 场景走完一遍后，若整体还不到这个时长就再走一遍（同一动作自然循环，不会看起来被打断）。
-const MIN_SCENE_HOLD_MS: i64 = 12_000;
 
 /// 发给前端的播放指令（前端只负责按它渲染，不再自己挑场景）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlaybackEvent {
-    /// 语义状态 id
     pub state: String,
-    /// 场景 id / 中文说明（标题用）
+    /// 链 id / 中文说明（调试与后续 UI 用）
+    pub chain_id: String,
+    pub chain_label: String,
+    /// 段 id / 中文说明；沿用 `scene_*` 字段名，前端无需改动
     pub scene_id: String,
     pub scene_label: String,
-    /// 场景内的第几步（0 起）
+    /// 段内的第几步（0 起）
     pub step_index: u32,
     /// 动作 id：前端 dataset 与气泡池都用它
     pub clip: String,
@@ -33,31 +34,32 @@ pub struct PlaybackEvent {
     pub frames: u32,
     pub frame_ms: u64,
     pub loops: u32,
-    /// 本步总时长 = frames × frame_ms × loops
+    /// 动作实例时长 = 目标秒数（取整到整数个循环）或 loops × 原生时长
     pub duration_ms: u64,
 }
 
-/// 当前正在播放的一步
+/// 当前正在播放的动作实例
 #[derive(Debug, Clone)]
 pub(crate) struct Current {
     pub(crate) state: String,
+    pub(crate) chain_id: String,
     pub(crate) scene_id: String,
     pub(crate) scene_label: String,
-    /// 本场景第一次开播的时刻（用于「同一场景至少播 N 秒」）
-    pub(crate) scene_started_at: DateTime<Local>,
     pub(crate) step_index: usize,
     pub(crate) clip: String,
+    pub(crate) started_at: DateTime<Local>,
     pub(crate) next_at: DateTime<Local>,
+    pub(crate) duration_ms: u64,
 }
 
-/// 场景调度状态（与状态引擎同生命周期，不持久化）
+/// 播放调度状态（与状态引擎同生命周期，不持久化）
 #[derive(Debug, Default)]
 pub struct Playback {
     current: Option<Current>,
-    /// state -> 场景 id 的加权洗牌袋：一轮内每个场景按权重出现，不会一直抽不到某个场景
+    /// state -> 链 id 的加权洗牌袋：一轮内每条链按权重出现；链内顺序不受影响
     bags: HashMap<String, VecDeque<String>>,
-    /// state -> 上一轮最后播放的场景（跨轮防连续重复）
-    last_scene: HashMap<String, String>,
+    /// state -> 上一轮最后播放的链（跨轮防连续重复）
+    last_chain: HashMap<String, String>,
 }
 
 impl Playback {
@@ -65,10 +67,10 @@ impl Playback {
     pub fn clear(&mut self) {
         self.current = None;
         self.bags.clear();
-        self.last_scene.clear();
+        self.last_chain.clear();
     }
 
-    /// 为指定状态重新开一个场景（状态切换 / 启动 / 切角色后调用），返回要播的第一步
+    /// 为指定状态选一条链，并从第一段第一个动作开始（状态切换 / 启动 / 切角色后调用）
     pub fn reset(
         &mut self,
         persona: &PersonaConfig,
@@ -76,12 +78,11 @@ impl Playback {
         now: DateTime<Local>,
     ) -> Option<PlaybackEvent> {
         self.current = None;
-        let scenes = valid_scenes(persona, state);
-        let scene = self.pick_scene(state, &scenes)?;
-        self.start_step(persona, state, scene, 0, now)
+        let chain = self.pick_chain(persona, state)?;
+        self.start_chain(persona, state, chain, now)
     }
 
-    /// 到点就推进：先走同场景的下一步，走完再按权重抽下一个场景
+    /// 到点就推进：同段下一步 → 同链下一段 → 换一条链
     pub fn advance(
         &mut self,
         persona: &PersonaConfig,
@@ -91,39 +92,40 @@ impl Playback {
         if now < current.next_at {
             return None;
         }
-        let scenes = valid_scenes(persona, &current.state);
-        if let Some(scene) = scenes.iter().find(|scene| scene.id == current.scene_id) {
-            // 同场景还有下一步 → 继续走（沿用场景起始时刻，别把"这段已播多久"重置掉）
-            if scene.steps.len() > current.step_index + 1 {
-                return self.start_step_with_start(
-                    persona,
-                    &current.state,
-                    scene,
-                    current.step_index + 1,
-                    now,
-                    current.scene_started_at,
-                );
-            }
-            // 已走完一遍：如果整段还太短，就从头再走一遍同一个场景。
-            // 判据用「已播时长 + 本遍时长的一半」，让最终时长贴近 MIN_SCENE_HOLD_MS 而不是明显超出。
-            let played_ms = (now - current.scene_started_at).num_milliseconds();
-            let pass_ms = now
-                .signed_duration_since(current.next_at)
-                .num_milliseconds()
-                .max(0);
-            if played_ms + pass_ms / 2 < MIN_SCENE_HOLD_MS {
-                return self.start_step_with_start(
-                    persona,
-                    &current.state,
-                    scene,
-                    0,
-                    now,
-                    current.scene_started_at,
-                );
+        // 1) 同一段还有下一步
+        if let Some(chain) = find_chain(persona, &current.state, &current.chain_id) {
+            if let Some(segment) = find_segment(persona, &current.state, &current.scene_id) {
+                if current.step_index + 1 < segment.steps.len() {
+                    if let Some(event) = self.start_step(
+                        persona,
+                        &current.state,
+                        chain,
+                        segment,
+                        current.step_index + 1,
+                        now,
+                    ) {
+                        return Some(event);
+                    }
+                }
             }
         }
-        let scene = self.pick_scene(&current.state, &scenes)?;
-        self.start_step(persona, &current.state, scene, 0, now)
+        // 2) 同一条链还有下一段（跳过没有有效动作的段）
+        if let Some(chain) = find_chain(persona, &current.state, &current.chain_id) {
+            if let Some(pos) = chain.segments.iter().position(|id| id == &current.scene_id) {
+                for segment_id in chain.segments.iter().skip(pos + 1) {
+                    if let Some(segment) = find_segment(persona, &current.state, segment_id) {
+                        if let Some(event) =
+                            self.start_step(persona, &current.state, chain, segment, 0, now)
+                        {
+                            return Some(event);
+                        }
+                    }
+                }
+            }
+        }
+        // 3) 链走完 → 按权重换一条链
+        let chain = self.pick_chain(persona, &current.state)?;
+        self.start_chain(persona, &current.state, chain, now)
     }
 
     /// 下一次需要推进的时刻（并入引擎节拍线程的唤醒计算）
@@ -131,8 +133,7 @@ impl Playback {
         self.current.as_ref().map(|current| current.next_at)
     }
 
-    /// 是否到了推进时刻。引擎先用它判断，没到点就直接返回，
-    /// 避免每次节拍唤醒都去克隆整份 persona 配置。
+    /// 是否到了推进时刻。引擎先用它判断，没到点就直接返回。
     pub fn is_due(&self, now: DateTime<Local>) -> bool {
         self.current
             .as_ref()
@@ -144,94 +145,121 @@ impl Playback {
         self.current.as_ref().map(|current| current.clip.as_str())
     }
 
-    /// 当前正在播放的完整快照（对话 system prompt 需要动作说明，而不仅是 id）
+    /// 当前动作实例的完整快照（对话 system prompt 需要动作说明）
     pub(crate) fn current(&self) -> Option<&Current> {
         self.current.as_ref()
     }
 
-    /// 当前动作还剩多少毫秒（气泡避开"动作马上要切"的时刻）
+    /// 当前动作实例还剩多少毫秒
     pub fn remaining_ms(&self, now: DateTime<Local>) -> Option<i64> {
         self.current
             .as_ref()
             .map(|current| (current.next_at - now).num_milliseconds())
     }
 
-    /// 装配场景池：只保留至少有一个有效动作的场景（手改配置时的兜底）
-    fn pick_scene<'a>(
+    /// 从状态内的链里按权重抽一条（洗牌袋；一轮内不重复，跨轮不连续重复）。
+    /// 链内段的顺序由作者定，绝不打乱——因果链靠这个保证。
+    fn pick_chain<'a>(
         &mut self,
+        persona: &'a PersonaConfig,
         state: &str,
-        scenes: &[&'a SceneConfig],
-    ) -> Option<&'a SceneConfig> {
-        if scenes.is_empty() {
+    ) -> Option<&'a ChainConfig> {
+        let chains = valid_chains(persona, state);
+        if chains.is_empty() {
             return None;
         }
-        // 袋空：按权重装填（权重 k 就放 k 份），洗牌后逐条弹出
         if self.bags.get(state).is_none_or(|bag| bag.is_empty()) {
             let mut pool: Vec<String> = Vec::new();
-            for scene in scenes {
-                for _ in 0..scene.weight.max(1) {
-                    pool.push(scene.id.clone());
+            for chain in &chains {
+                for _ in 0..chain.weight.max(1) {
+                    pool.push(chain.id.clone());
                 }
             }
-            let last = self.last_scene.get(state).cloned();
+            let last = self.last_chain.get(state).cloned();
             self.bags
                 .insert(state.to_string(), refill_bag(pool, last.as_deref()));
         }
-        // 取一个「和上一次不同」的场景：同一动作连续播两次会看起来像被自己打断
-        let last = self.last_scene.get(state).cloned();
+        let last = self.last_chain.get(state).cloned();
         let bag = self.bags.get_mut(state)?;
         let index = bag
             .iter()
             .position(|id| Some(id) != last.as_ref())
             .unwrap_or(0);
         let id = bag.remove(index)?;
-        // 袋里残留的失效场景 id（手改配置/切角色）直接丢弃后重挑
-        let picked = match scenes.iter().find(|scene| scene.id == id) {
-            Some(scene) => *scene,
-            None => return self.pick_scene(state, scenes),
+        // 袋里残留的失效链 id 直接丢弃后重挑
+        let picked = match chains.iter().find(|chain| chain.id == id) {
+            Some(chain) => *chain,
+            None => return self.pick_chain(persona, state),
         };
-        self.last_scene.insert(state.to_string(), id);
+        self.last_chain.insert(state.to_string(), id);
         Some(picked)
     }
 
+    /// 从一条链的第一段开始播（跳过没有有效动作的段）
+    fn start_chain(
+        &mut self,
+        persona: &PersonaConfig,
+        state: &str,
+        chain: &ChainConfig,
+        now: DateTime<Local>,
+    ) -> Option<PlaybackEvent> {
+        for segment_id in &chain.segments {
+            let Some(segment) = find_segment(persona, state, segment_id) else {
+                continue;
+            };
+            if let Some(event) = self.start_step(persona, state, chain, segment, 0, now) {
+                return Some(event);
+            }
+        }
+        None
+    }
+
+    /// 开播某一步（一个动作实例），时长按 `seconds` 目标取整到整数个循环
     fn start_step(
         &mut self,
         persona: &PersonaConfig,
         state: &str,
+        chain: &ChainConfig,
         scene: &SceneConfig,
         index: usize,
         now: DateTime<Local>,
-    ) -> Option<PlaybackEvent> {
-        self.start_step_with_start(persona, state, scene, index, now, now)
-    }
-
-    /// 开播某一步；`scene_started_at` 用来保留场景的起始时刻（同场景循环时不被重置）
-    fn start_step_with_start(
-        &mut self,
-        persona: &PersonaConfig,
-        state: &str,
-        scene: &SceneConfig,
-        index: usize,
-        now: DateTime<Local>,
-        scene_started_at: DateTime<Local>,
     ) -> Option<PlaybackEvent> {
         let step = scene.steps.get(index)?;
         let clip: &AnimationClipConfig = persona.clips.get(&step.clip)?;
-        let loops = step.loops.clamp(1, MAX_STEP_LOOPS);
         let frames = clip.frames.max(1);
         let frame_ms = clip.frame_ms.max(1);
-        let duration_ms = frames as u64 * frame_ms * loops as u64;
+        let native_ms = (frames as i64 * frame_ms as i64).max(1);
+        let max_loops = ((MAX_ACTION_MS / native_ms).max(1)) as u32;
+        let (loops, duration_ms) = match step.seconds {
+            // 新格式：目标秒数 → 向上取整到整数个循环，保证动作实例至少播这么久
+            Some(seconds) => {
+                let target_ms = (seconds.max(1) as i64) * 1000;
+                let loops =
+                    ((target_ms + native_ms - 1) / native_ms).clamp(1, max_loops as i64) as u32;
+                (loops, loops as i64 * native_ms)
+            }
+            // 旧格式：按 loops 播放
+            None => {
+                let loops = step.loops.clamp(1, MAX_STEP_LOOPS).min(max_loops);
+                (loops, loops as i64 * native_ms)
+            }
+        };
+        let duration_ms = duration_ms.max(1) as u64;
         self.current = Some(Current {
             state: state.to_string(),
+            chain_id: chain.id.clone(),
             scene_id: scene.id.clone(),
             scene_label: scene.label.clone(),
-            scene_started_at,
             step_index: index,
             clip: step.clip.clone(),
+            started_at: now,
             next_at: now + chrono::Duration::milliseconds(duration_ms as i64),
+            duration_ms,
         });
         Some(PlaybackEvent {
             state: state.to_string(),
+            chain_id: chain.id.clone(),
+            chain_label: chain.label.clone(),
             scene_id: scene.id.clone(),
             scene_label: scene.label.clone(),
             step_index: index as u32,
@@ -245,19 +273,47 @@ impl Playback {
     }
 }
 
-/// 某状态下可播放的场景：至少有一个步骤引用了已定义的动作
-fn valid_scenes<'a>(persona: &'a PersonaConfig, state: &str) -> Vec<&'a SceneConfig> {
+fn find_segment<'a>(
+    persona: &'a PersonaConfig,
+    state: &str,
+    segment_id: &str,
+) -> Option<&'a SceneConfig> {
     persona
         .scenes
+        .get(state)?
+        .iter()
+        .find(|scene| scene.id == segment_id)
+}
+
+fn find_chain<'a>(
+    persona: &'a PersonaConfig,
+    state: &str,
+    chain_id: &str,
+) -> Option<&'a ChainConfig> {
+    persona
+        .chains
+        .get(state)?
+        .iter()
+        .find(|chain| chain.id == chain_id)
+}
+
+/// 某状态下可用的链：至少有一个段包含已定义动作
+fn valid_chains<'a>(persona: &'a PersonaConfig, state: &str) -> Vec<&'a ChainConfig> {
+    persona
+        .chains
         .get(state)
-        .map(|scenes| {
-            scenes
+        .map(|chains| {
+            chains
                 .iter()
-                .filter(|scene| {
-                    scene
-                        .steps
-                        .iter()
-                        .any(|step| persona.clips.contains_key(&step.clip))
+                .filter(|chain| {
+                    chain.segments.iter().any(|segment_id| {
+                        find_segment(persona, state, segment_id).is_some_and(|scene| {
+                            scene
+                                .steps
+                                .iter()
+                                .any(|step| persona.clips.contains_key(&step.clip))
+                        })
+                    })
                 })
                 .collect()
         })
@@ -290,15 +346,17 @@ mod tests {
         }
     }
 
-    /// 一个状态两个场景：a（单步 2 帧×100ms）、b（两步：先 3 帧、再 2 帧）
+    /// 一个状态两条链：
+    /// - chain_ab（a → b）：a 单步（200ms 原生，目标 1 秒）；b 两步（先 loops=2，再目标 1 秒）
+    /// - chain_b：只有 b
     fn persona() -> PersonaConfig {
         let mut clips = HashMap::new();
-        clips.insert("one".to_string(), clip(2, 100));
-        clips.insert("two".to_string(), clip(3, 100));
-        clips.insert("three".to_string(), clip(2, 100));
+        clips.insert("one".to_string(), clip(2, 100)); // 原生 200ms
+        clips.insert("two".to_string(), clip(3, 100)); // 原生 300ms
+        clips.insert("three".to_string(), clip(2, 100)); // 原生 200ms
         let mut scenes = HashMap::new();
         scenes.insert(
-            "idle".to_string(),
+            "routine".to_string(),
             vec![
                 SceneConfig {
                     id: "a".into(),
@@ -306,6 +364,7 @@ mod tests {
                     weight: 1,
                     steps: vec![SceneStepConfig {
                         clip: "one".into(),
+                        seconds: Some(1),
                         loops: 1,
                     }],
                 },
@@ -316,13 +375,33 @@ mod tests {
                     steps: vec![
                         SceneStepConfig {
                             clip: "two".into(),
-                            loops: 1,
+                            seconds: None,
+                            loops: 2,
                         },
                         SceneStepConfig {
                             clip: "three".into(),
-                            loops: 2,
+                            seconds: Some(1),
+                            loops: 1,
                         },
                     ],
+                },
+            ],
+        );
+        let mut chains = HashMap::new();
+        chains.insert(
+            "routine".to_string(),
+            vec![
+                ChainConfig {
+                    id: "chain_ab".into(),
+                    label: "甲→乙".into(),
+                    weight: 1,
+                    segments: vec!["a".into(), "b".into()],
+                },
+                ChainConfig {
+                    id: "chain_b".into(),
+                    label: "乙".into(),
+                    weight: 1,
+                    segments: vec!["b".into()],
                 },
             ],
         );
@@ -336,15 +415,17 @@ mod tests {
                 reply_style: "r".into(),
             },
             states: HashMap::from([(
-                "idle".to_string(),
+                "routine".to_string(),
                 StateConfig {
-                    label: "待机".into(),
+                    label: "日常".into(),
                     talkativeness: String::new(),
                     tone: String::new(),
+                    bubble_gap_min: None,
                 },
             )]),
             clips,
             scenes,
+            chains,
             schedule: ScheduleConfig {
                 r#loop: vec![],
                 time: vec![],
@@ -352,110 +433,100 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reset_starts_first_step_and_reports_duration() {
-        let p = persona();
-        let mut playback = Playback::default();
-        let now = at(10, 0, 0);
-        let event = playback.reset(&p, "idle", now).unwrap();
-        assert!(event.clip == "one" || event.clip == "two");
-        assert_eq!(
-            event.duration_ms,
-            event.frames as u64 * event.frame_ms * event.loops as u64
-        );
-        assert_eq!(
-            playback.next_at(),
-            Some(now + chrono::Duration::milliseconds(event.duration_ms as i64))
-        );
-        assert_eq!(playback.current_clip(), Some(event.clip.as_str()));
+    /// 单链版本，用于确定性地验证链内顺序
+    fn single_chain_persona() -> PersonaConfig {
+        let mut p = persona();
+        p.chains
+            .insert("routine".to_string(), vec![p.chains["routine"][0].clone()]);
+        p
     }
 
     #[test]
-    fn multi_step_scene_advances_step_by_step() {
-        let p = persona();
+    fn seconds_round_up_to_whole_loops() {
+        let p = single_chain_persona();
         let mut playback = Playback::default();
-        // 固定从两步场景 b 开始，验证步骤推进
         let now = at(10, 0, 0);
-        let scenes = valid_scenes(&p, "idle");
-        let scene_b = *scenes.iter().find(|s| s.id == "b").unwrap();
-        let first = playback.start_step(&p, "idle", scene_b, 0, now).unwrap();
-        assert_eq!(first.clip, "two");
-        assert_eq!(first.step_index, 0);
-        // 未到点不推进
-        assert!(playback
-            .advance(&p, now + chrono::Duration::milliseconds(100))
-            .is_none());
-        // 到点推进到第二步，且 loops=2 让时长翻倍
+        let event = playback.reset(&p, "routine", now).unwrap();
+        assert_eq!(event.scene_id, "a");
+        assert_eq!(event.clip, "one");
+        // 目标 1 秒、原生 200ms → 5 个循环
+        assert_eq!(event.loops, 5);
+        assert_eq!(event.duration_ms, 1000);
+        assert_eq!(playback.next_at(), Some(now + chrono::Duration::seconds(1)));
+    }
+
+    #[test]
+    fn advance_follows_chain_and_segment_steps() {
+        let p = single_chain_persona();
+        let mut playback = Playback::default();
+        let start = at(10, 0, 0);
+        let first = playback.reset(&p, "routine", start).unwrap();
+        assert_eq!(first.scene_id, "a");
+        assert_eq!(first.chain_id, "chain_ab");
+
+        // a 播完（1s）→ 同链下一段 b 的第一步（旧格式 loops=2 → 600ms）
         let second = playback
-            .advance(&p, now + chrono::Duration::milliseconds(300))
+            .advance(&p, start + chrono::Duration::seconds(1))
             .unwrap();
-        assert_eq!(second.clip, "three");
-        assert_eq!(second.step_index, 1);
-        assert_eq!(second.duration_ms, 2 * 100 * 2);
+        assert_eq!(second.scene_id, "b");
+        assert_eq!(second.step_index, 0);
+        assert_eq!(second.clip, "two");
+        assert_eq!(second.duration_ms, 600);
+
+        // b 的第一步播完 → 同段第二步（目标 1s）
+        let third = playback
+            .advance(&p, start + chrono::Duration::milliseconds(1600))
+            .unwrap();
+        assert_eq!(third.scene_id, "b");
+        assert_eq!(third.step_index, 1);
+        assert_eq!(third.clip, "three");
+        assert_eq!(third.duration_ms, 1000);
+
+        // b 播完 → 链走完 → 重新开始（单链只能回到 a）
+        let fourth = playback
+            .advance(&p, start + chrono::Duration::milliseconds(2600))
+            .unwrap();
+        assert_eq!(fourth.scene_id, "a");
     }
 
     #[test]
-    fn every_scene_appears_within_one_bag_round() {
+    fn legacy_loops_still_work() {
         let p = persona();
         let mut playback = Playback::default();
-        let mut seen: Vec<String> = Vec::new();
-        // 洗牌袋保证一轮内每个场景都出现，不会一直只抽到同一个
-        for minute in 0..20 {
-            let event = playback.reset(&p, "idle", at(10, minute, 0)).unwrap();
-            if !seen.contains(&event.scene_id) {
-                seen.push(event.scene_id.clone());
-            }
-        }
-        seen.sort();
-        assert_eq!(seen, vec!["a".to_string(), "b".to_string()]);
+        let now = at(10, 0, 0);
+        let mut p2 = p.clone();
+        p2.chains.insert(
+            "routine".to_string(),
+            vec![ChainConfig {
+                id: "only_b".into(),
+                label: "乙".into(),
+                weight: 1,
+                segments: vec!["b".into()],
+            }],
+        );
+        let event = playback.reset(&p2, "routine", now).unwrap();
+        assert_eq!(event.clip, "two");
+        assert_eq!(event.loops, 2);
+        assert_eq!(event.duration_ms, 600);
     }
 
     #[test]
-    fn scene_pick_never_repeats_back_to_back() {
+    fn chain_selection_never_repeats_back_to_back() {
         let p = persona();
         let mut playback = Playback::default();
         let mut previous = String::new();
-        // 连续重开 10 次：同一个动作连着播两次会看起来像"被自己打断"
         for minute in 0..10 {
-            let event = playback.reset(&p, "idle", at(10, minute, 0)).unwrap();
-            assert_ne!(event.scene_id, previous, "连续两次抽到同一个场景");
-            previous = event.scene_id;
+            let event = playback.reset(&p, "routine", at(10, minute, 0)).unwrap();
+            assert_ne!(event.chain_id, previous, "连续两次抽到同一条链");
+            previous = event.chain_id;
         }
-    }
-
-    #[test]
-    fn scene_holds_for_min_duration_before_switching() {
-        let p = persona();
-        let mut playback = Playback::default();
-        let start = at(10, 0, 0);
-        let first = playback.reset(&p, "idle", start).unwrap();
-        let mut now = start + chrono::Duration::milliseconds(first.duration_ms as i64);
-        let mut switched_at = None;
-        for _ in 0..1000 {
-            match playback.advance(&p, now) {
-                Some(event) => {
-                    if event.scene_id != first.scene_id {
-                        switched_at = Some(now);
-                        break;
-                    }
-                    now += chrono::Duration::milliseconds(event.duration_ms as i64);
-                }
-                None => break,
-            }
-        }
-        let switched_at = switched_at.expect("场景最终应切换");
-        let held_ms = (switched_at - start).num_milliseconds();
-        assert!(
-            (MIN_SCENE_HOLD_MS - 500..=MIN_SCENE_HOLD_MS + 1500).contains(&held_ms),
-            "场景保持时长应接近 {MIN_SCENE_HOLD_MS}ms，实际 {held_ms}ms"
-        );
     }
 
     #[test]
     fn clear_drops_current_and_bags() {
         let p = persona();
         let mut playback = Playback::default();
-        playback.reset(&p, "idle", at(10, 0, 0));
+        playback.reset(&p, "routine", at(10, 0, 0));
         playback.clear();
         assert!(playback.current_clip().is_none());
         assert!(playback.next_at().is_none());

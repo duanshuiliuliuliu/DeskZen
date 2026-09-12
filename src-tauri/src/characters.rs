@@ -36,6 +36,8 @@ pub async fn import_local_character(
 
     let mut persona: PersonaConfig = serde_json::from_slice(&pack.persona_json)
         .map_err(|e| format!("persona.json 格式错误: {e}"))?;
+    // 旧格式（没有 chains）在这里补齐单段链，校验与播放都按统一的链模型走
+    persona.normalize();
     validate_persona(&persona, &pack.files)?;
 
     let id = format!("local-{}", sanitize_slug(&persona.id, &persona.name));
@@ -322,15 +324,15 @@ mod tests {
                 "reply_style": "简短回复"
             },
             "states": {
-                "idle": { "label": "待机" }
+                "routine": { "label": "日常" }
             },
             "clips": {
                 "wave": { "spritesheet": "clips/wave.webp", "frames": 2, "frame_ms": 83 }
             },
             "scenes": {
-                "idle": [ { "id": "wave_once", "steps": [ { "clip": "wave" } ] } ]
+                "routine": [ { "id": "wave_once", "steps": [ { "clip": "wave", "seconds": 45 } ] } ]
             },
-            "schedule": { "loop": [ { "state": "idle", "duration": 10 } ], "time": [] }
+            "schedule": { "loop": [ { "state": "routine", "duration": 10 } ], "time": [] }
         }"#
     }
 
@@ -359,6 +361,7 @@ mod tests {
     #[test]
     fn validate_persona_requires_clips_scenes_and_per_state_scenes() {
         let mut persona: PersonaConfig = serde_json::from_str(minimal_persona_json()).unwrap();
+        persona.normalize();
         assert!(validate_persona(&persona, &demo_files()).is_ok());
 
         persona.scenes.clear();
@@ -366,6 +369,7 @@ mod tests {
         assert!(error.contains("scenes"), "{error}");
 
         persona = serde_json::from_str(minimal_persona_json()).unwrap();
+        persona.normalize();
         persona.states.insert(
             "extra".into(),
             serde_json::from_str(r#"{ "label": "额外" }"#).unwrap(),
@@ -378,6 +382,7 @@ mod tests {
     fn validate_persona_rejects_schedule_with_unknown_state() {
         // 导入侧与启动扫描共用同一套日程判据：坏引用必须在安装前就被拒绝
         let mut persona: PersonaConfig = serde_json::from_str(minimal_persona_json()).unwrap();
+        persona.normalize();
         persona.schedule.r#loop[0].state = "ghost".into();
         let error = validate_persona(&persona, &demo_files()).unwrap_err();
         assert!(error.contains("ghost"), "{error}");
@@ -385,7 +390,8 @@ mod tests {
 
     #[test]
     fn validate_persona_rejects_missing_or_invalid_clip_assets() {
-        let persona: PersonaConfig = serde_json::from_str(minimal_persona_json()).unwrap();
+        let mut persona: PersonaConfig = serde_json::from_str(minimal_persona_json()).unwrap();
+        persona.normalize();
         let error = validate_persona(&persona, &HashMap::new()).unwrap_err();
         assert!(error.contains("wave"), "{error}");
 

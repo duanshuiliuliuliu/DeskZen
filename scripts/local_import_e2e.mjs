@@ -24,7 +24,7 @@ const PACK_PERSONA = {
     reply_style: "简短回复",
   },
   states: {
-    idle: { label: "待机" },
+    routine: { label: "日常" },
   },
   clips: {
     observe: {
@@ -37,9 +37,15 @@ const PACK_PERSONA = {
     },
   },
   scenes: {
-    idle: [{ id: "look_around", label: "观察周围", steps: [{ clip: "observe" }] }],
+    routine: [
+      {
+        id: "look_around",
+        label: "观察周围",
+        steps: [{ clip: "observe", seconds: 45 }],
+      },
+    ],
   },
-  schedule: { loop: [{ state: "idle", duration: 10 }], time: [] },
+  schedule: { loop: [{ state: "routine", duration: 10 }], time: [] },
 };
 
 const personaTarget = await getTargets(personaTargetFilter);

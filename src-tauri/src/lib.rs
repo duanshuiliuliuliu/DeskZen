@@ -649,7 +649,13 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 let persona_id = id.trim_start_matches("persona_").to_string();
                 let engine = app.state::<engine::StateEngine>();
                 if let Err(e) = engine.switch_persona(app, &persona_id) {
-                    let _ = app.emit("bubble", engine::BubbleEvent { text: e });
+                    let _ = app.emit(
+                        "bubble",
+                        engine::BubbleEvent {
+                            text: e,
+                            show_ms: 6000,
+                        },
+                    );
                 }
                 update_persona_menu_labels(app);
             }

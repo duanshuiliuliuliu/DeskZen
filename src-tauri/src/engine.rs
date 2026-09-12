@@ -14,6 +14,13 @@ use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
+/// 固定大状态集合（跨角色通用契约）：角色只能使用这 6 个状态 id。
+/// 其中只有 `routine` 必配；其余状态未配置时，运行时完全按 routine 处理。
+pub(crate) const CANONICAL_STATES: &[&str] =
+    &["routine", "focus", "active", "relax", "eat", "sleep"];
+/// 必配的兜底状态 id（日常）
+pub(crate) const FALLBACK_STATE: &str = "routine";
+
 /// 一个角色的完整配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PersonaConfig {
@@ -32,7 +39,37 @@ pub struct PersonaConfig {
     /// 语义状态对应的微场景池；场景只影响视觉表现，不参与状态机计算。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub scenes: HashMap<String, Vec<SceneConfig>>,
+    /// 状态 -> 有序链：链内段按顺序播放（表达因果），链之间按权重选择。
+    /// 旧格式没有 chains 时，[`PersonaConfig::normalize`] 会为每个段合成一条单段链。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub chains: HashMap<String, Vec<ChainConfig>>,
     pub schedule: ScheduleConfig,
+}
+
+impl PersonaConfig {
+    /// 兼容旧格式：没有 chains 的状态，用它的段合成"一段一链"（权重取段权重），
+    /// 让播放层可以统一按 chains 工作。
+    pub(crate) fn normalize(&mut self) {
+        for (state, scenes) in &self.scenes {
+            if self
+                .chains
+                .get(state)
+                .is_some_and(|chains| !chains.is_empty())
+            {
+                continue;
+            }
+            let chains: Vec<ChainConfig> = scenes
+                .iter()
+                .map(|scene| ChainConfig {
+                    id: format!("auto-{}", scene.id),
+                    label: scene.label.clone(),
+                    weight: scene.weight.max(1),
+                    segments: vec![scene.id.clone()],
+                })
+                .collect();
+            self.chains.insert(state.clone(), chains);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -87,6 +124,9 @@ pub struct StateConfig {
     /// 缺省由 `talkativeness` 推导（见 `Talkativeness::chat_tone`）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tone: String,
+    /// 期望说话间隔（分钟，可选）：不写则按 `talkativeness` 取默认值
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_gap_min: Option<f64>,
 }
 
 impl StateConfig {
@@ -129,9 +169,11 @@ pub struct AnimationClipConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SceneConfig {
+    /// 段 id（语义：一段有名字、有起止的 UI 表现）
     pub id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
+    /// 旧格式权重：没有 chains 时用来合成单段链
     #[serde(default = "default_unit")]
     pub weight: u32,
     #[serde(default)]
@@ -141,8 +183,24 @@ pub struct SceneConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SceneStepConfig {
     pub clip: String,
+    /// 动作实例目标时长（秒）：写了就用它（按动作原生时长取整循环填满），
+    /// 没写则回退旧的 `loops` 语义。30 秒以下视为过渡动作，不参与说话。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u32>,
     #[serde(default = "default_unit")]
     pub loops: u32,
+}
+
+/// 一条有序链：链内段按配置顺序播放（表达因果，不洗牌），链之间按权重选择。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChainConfig {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    #[serde(default = "default_unit")]
+    pub weight: u32,
+    #[serde(default)]
+    pub segments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -198,17 +256,19 @@ pub struct StateChanged {
 #[derive(Debug, Clone, Serialize)]
 pub struct BubbleEvent {
     pub text: String,
+    /// 气泡展示时长（毫秒）：由后端按当前动作剩余时间给出，保证不会跨到下一个动作
+    pub show_ms: u64,
 }
 
 /// 环境气泡调度状态（与状态引擎同生命周期，不持久化）
 #[derive(Debug, Default)]
 struct AmbientBubbles {
-    /// 下一条气泡的预定时刻；None 表示当前状态不弹（mute）
-    next_at: Option<chrono::DateTime<chrono::Local>>,
-    /// 上一条气泡实际弹出时刻（硬性最小间隔用）
+    /// 最早可再次说话的时刻（由期望间隔推导）
+    earliest_at: Option<chrono::DateTime<chrono::Local>>,
+    /// 当前动作实例内已排定的说话时刻；None 表示这个实例不说
+    speak_at: Option<chrono::DateTime<chrono::Local>>,
+    /// 上一条气泡实际弹出时刻（静默上限用）
     last_shown_at: Option<chrono::DateTime<chrono::Local>>,
-    /// 最近 1 小时内的弹出时刻（小时上限，滑动窗口）
-    recent: VecDeque<chrono::DateTime<chrono::Local>>,
     /// 最近一次用户发消息时刻（聊天后抑制窗口用）
     last_chat_at: Option<chrono::DateTime<chrono::Local>>,
     /// 洗牌袋：池键 -> 本轮剩余未弹文案（取完一轮后重洗）。池键为 `clip:<动作id>`，
@@ -218,37 +278,85 @@ struct AmbientBubbles {
     last_text: HashMap<String, String>,
 }
 
-/// 期望间隔 E（分钟）的钳制范围：E = clamp(D/2 × 话痨倍率, MIN, MAX)
-const BUBBLE_E_CLAMP_MIN: f64 = 5.0;
-const BUBBLE_E_CLAMP_MAX: f64 = 60.0;
-/// 单次间隔下限（分钟）：任何情况下 min_gap 不低于此值
-const BUBBLE_GAP_FLOOR_MIN: i64 = 4;
-/// 两条气泡间的硬性最小间隔（分钟）
-const BUBBLE_HARD_MIN_MIN: i64 = 5;
-/// 每小时气泡上限（滑动窗口）
-const BUBBLE_HOURLY_CAP: usize = 4;
+/// 气泡默认展示时长（毫秒）；实际下发时还会被当前动作剩余时间截短
+const BUBBLE_DEFAULT_SHOW_MS: i64 = 6000;
+/// 一个动作实例至少持续多久才有资格说话（毫秒）：更短的是过渡动作，不配台词
+pub(crate) const SPEAK_MIN_ACTION_MS: i64 = 30_000;
+/// 说话时刻落在动作实例的 [20%, 70%] 区间内
+const SPEAK_WINDOW_START: f64 = 0.2;
+const SPEAK_WINDOW_END: f64 = 0.7;
+/// 启动 / 切换角色后的第一句话延迟范围（秒）
+const FIRST_SPEAK_MIN_S: i64 = 30;
+const FIRST_SPEAK_MAX_S: i64 = 90;
 /// 聊天后的气泡抑制窗口（分钟）
 const CHAT_SUPPRESS_MIN: i64 = 3;
-/// 剩余时长不可得时用于推导间隔的兜底 D（分钟）
-const BUBBLE_FALLBACK_REMAINING_MIN: i64 = 30;
-/// 当前动作剩余时长低于此值时不再发话：把气泡挪到动作切换之后
-const BUBBLE_CLIP_MIN_REMAINING_MS: i64 = 1500;
-/// 挪到动作切换之后再多留一点，确保画面已经换好
-const BUBBLE_CLIP_SLACK_MS: i64 = 400;
 
-/// 由「距下一次状态切换的剩余时长 D（分钟）」与话痨程度推导单次间隔范围 (min, max)（分钟）。
-/// mute 返回 None（该状态不弹气泡）。normal 状态下 E = D/2，即平均每个状态周期弹约两条。
-fn bubble_gap_range(remaining_min: i64, t: Talkativeness) -> Option<(i64, i64)> {
-    let m = match t {
-        Talkativeness::Mute => return None,
-        Talkativeness::Chatty => 0.5,
-        Talkativeness::Normal => 1.0,
-        Talkativeness::Quiet => 2.0,
+/// 默认期望说话间隔（分钟）：按话痨档位；mute 返回 None（不说话）。
+/// 状态可用 `bubble_gap_min` 覆盖。
+fn default_gap_min(t: Talkativeness) -> Option<f64> {
+    match t {
+        Talkativeness::Chatty => Some(3.0),
+        Talkativeness::Normal => Some(6.0),
+        Talkativeness::Quiet => Some(15.0),
+        Talkativeness::Mute => None,
+    }
+}
+
+/// 静默上限（分钟）：2×E，且不超过 15 分钟。
+fn max_silence_min(e: f64) -> f64 {
+    (2.0 * e).min(15.0)
+}
+
+/// 一次间隔采样：落在 [0.6E, 1.4E] 内
+fn sample_gap_min(e: f64) -> f64 {
+    let min = (e * 0.6 * 60.0).round() as i64;
+    let max = (e * 1.4 * 60.0).round() as i64;
+    rng_range_i64(min, max) as f64 / 60.0
+}
+
+/// 计算一个动作实例内允许说话的窗口 `[from, to]`；None 表示这个实例不说。
+///
+/// - 动作实例 < 30 秒 → 过渡动作，不说话；
+/// - 说话时刻落在实例的 20%~70% 区间，且这句话必须能在实例结束前说完；
+/// - 不早于 `earliest_at`（间隔护栏）；静默超过上限时忽略间隔，直接取窗口左端。
+fn speech_window(
+    now: chrono::DateTime<chrono::Local>,
+    started_at: chrono::DateTime<chrono::Local>,
+    duration_ms: u64,
+    earliest_at: Option<chrono::DateTime<chrono::Local>>,
+    last_shown_at: Option<chrono::DateTime<chrono::Local>>,
+    e_min: f64,
+) -> Option<(
+    chrono::DateTime<chrono::Local>,
+    chrono::DateTime<chrono::Local>,
+)> {
+    if (duration_ms as i64) < SPEAK_MIN_ACTION_MS {
+        return None;
+    }
+    let ends_at = started_at + chrono::Duration::milliseconds(duration_ms as i64);
+    let line_ms = BUBBLE_DEFAULT_SHOW_MS.min(duration_ms as i64);
+    let window_start = started_at
+        + chrono::Duration::milliseconds((duration_ms as f64 * SPEAK_WINDOW_START) as i64);
+    let window_end =
+        started_at + chrono::Duration::milliseconds((duration_ms as f64 * SPEAK_WINDOW_END) as i64);
+    let latest = window_end.min(ends_at - chrono::Duration::milliseconds(line_ms));
+    // 从未说过话（启动 / 切角色后）：不受 20%~70% 偏好窗口限制，
+    // grace 一到、只要当前实例能说完就开口（最坏也是下一个动作一开始说）。
+    if last_shown_at.is_none() {
+        let from = earliest_at.unwrap_or(window_start).max(started_at);
+        let to = ends_at - chrono::Duration::milliseconds(line_ms);
+        return (from <= to).then_some((from, to));
+    }
+    // 说过话之后：静默超过上限 → 忽略间隔、取偏好窗口左端；否则不早于 earliest_at。
+    let silence_too_long = last_shown_at
+        .map(|t| (now - t).num_seconds() as f64 / 60.0 >= max_silence_min(e_min))
+        .unwrap_or(false);
+    let from = if silence_too_long {
+        window_start
+    } else {
+        earliest_at.unwrap_or(window_start).max(window_start)
     };
-    let e = ((remaining_min.max(1) as f64) / 2.0 * m).clamp(BUBBLE_E_CLAMP_MIN, BUBBLE_E_CLAMP_MAX);
-    let min = ((e * 0.6).round() as i64).max(BUBBLE_GAP_FLOOR_MIN);
-    let max = ((e * 1.4).round() as i64).max(min);
-    Some((min, max))
+    (from <= latest).then_some((from, latest))
 }
 
 /// 缩放变化后广播给前端的角色显示尺寸（已乘 zoom 的最终 pixel 尺寸）
@@ -306,7 +414,7 @@ pub struct StateEngine {
     prefs: Arc<Mutex<crate::prefs::Prefs>>,
     /// 每日 AI 气泡缓存（当前角色的）：气泡广播时优先取当日生成文案，取不到回退原配置。
     gen_bubbles: Arc<Mutex<crate::genbubble::GenState>>,
-    /// 环境气泡调度状态：随机自言自语的排期、限频与洗牌袋（见 schedule_ambient_bubble）
+    /// 环境气泡调度状态：按动作实例排一句话、期望间隔与洗牌袋（见 reschedule_speech）
     ambient: Arc<Mutex<AmbientBubbles>>,
     /// 场景播放调度：由后端决定"当前播哪个场景的哪个动作"，前端按事件渲染
     playback: Arc<Mutex<crate::playback::Playback>>,
@@ -322,7 +430,8 @@ impl StateEngine {
     pub fn new(app: AppHandle) -> Self {
         let mut personas = HashMap::new();
         for (id, json) in EMBEDDED_PERSONAS {
-            let cfg: PersonaConfig = serde_json::from_str(json).expect("persona 配置解析失败");
+            let mut cfg: PersonaConfig = serde_json::from_str(json).expect("persona 配置解析失败");
+            cfg.normalize();
             personas.insert((*id).to_string(), Arc::new(cfg));
         }
         // 加载用户导入的角色（持久化在用户数据目录；clips/scenes 格式由导入时校验）
@@ -336,14 +445,17 @@ impl StateEngine {
                     // 只加载结构完整的角色（与导入用同一套判据）；坏包跳过并说明原因，
                     // 避免注册进去后某些状态静默不播
                     match serde_json::from_str::<PersonaConfig>(&json) {
-                        Ok(cfg) => match validate_persona_structure(&cfg) {
-                            Ok(()) => {
-                                personas.insert(cfg.id.clone(), Arc::new(cfg));
+                        Ok(mut cfg) => {
+                            cfg.normalize();
+                            match validate_persona_structure(&cfg) {
+                                Ok(()) => {
+                                    personas.insert(cfg.id.clone(), Arc::new(cfg));
+                                }
+                                Err(reason) => {
+                                    eprintln!("跳过角色目录 {}：{reason}", entry.path().display())
+                                }
                             }
-                            Err(reason) => {
-                                eprintln!("跳过角色目录 {}：{reason}", entry.path().display())
-                            }
-                        },
+                        }
                         Err(error) => eprintln!(
                             "跳过角色目录 {}：persona.json 解析失败（{error}）",
                             entry.path().display()
@@ -400,7 +512,7 @@ impl StateEngine {
                 }
             }
         }
-        effective_state(&guard, persona, &now)
+        runtime_state(persona, &effective_state(&guard, persona, &now))
     }
 
     /// 当前角色配置（克隆）
@@ -515,29 +627,70 @@ impl StateEngine {
         crate::util::lock(&self.ambient).last_chat_at = Some(chrono::Local::now());
     }
 
-    /// 按「当前状态的话痨程度 + 距下一次状态切换的剩余时长」重排下一条气泡时刻。
-    /// 启动、状态切换、右键“下个状态”、切换角色、每次弹出/抑制后都会调用。
-    /// mute 状态排为 None（不弹）；其余状态在 [min_gap, max_gap] 内均匀取一个时刻。
-    fn schedule_ambient_bubble(&self, now: chrono::DateTime<chrono::Local>) {
-        let persona = self.persona();
-        let state = self.resolve_state(&persona, now);
-        let manual = crate::util::lock(&self.manual_state).clone();
-        let remaining = (next_transition_at(&persona, &manual, &now) - now).num_minutes();
-        // 剩余时长不可得（如完全无日程配置时 next_transition_at 的兜底只有 30s）时，
-        // 按 30 分钟的周期长度推导间隔，避免短周期把气泡排得过密。
-        let remaining = if remaining <= 0 {
-            BUBBLE_FALLBACK_REMAINING_MIN
-        } else {
-            remaining
+    /// 当前状态的期望说话间隔 E（分钟）；mute / 未配置返回 None。
+    /// 优先用状态里显式配置的 `bubble_gap_min`，否则按话痨档位取默认值。
+    fn state_gap_min(&self, persona: &PersonaConfig, state: &str) -> Option<f64> {
+        let cfg = persona.states.get(state);
+        let configured = cfg
+            .and_then(|c| c.bubble_gap_min)
+            .filter(|e| e.is_finite() && *e > 0.0);
+        configured
+            .or_else(|| default_gap_min(cfg.map(StateConfig::talkativeness).unwrap_or_default()))
+    }
+
+    /// 启动 / 切换角色后的第一句话：30~90 秒内，让角色先"活"过来。
+    fn arm_first_speech(&self, now: chrono::DateTime<chrono::Local>) {
+        let at =
+            now + chrono::Duration::seconds(rng_range_i64(FIRST_SPEAK_MIN_S, FIRST_SPEAK_MAX_S));
+        crate::util::lock(&self.ambient).earliest_at = Some(at);
+    }
+
+    /// 为当前动作实例排定一句话（动作实例开始/推进时调用）。
+    ///
+    /// 规则：动作实例 ≥30 秒、有可用文案、状态非 mute；说话时刻落在实例的 20%~70% 区间，
+    /// 不早于「最早可说话时刻」（静默超过上限时允许提前）；这句话必须能在实例结束前说完。
+    /// 台词挂在动作上、且只在动作实例内出现，所以永远不会出现"演 A 说 B"。
+    fn reschedule_speech(&self, now: chrono::DateTime<chrono::Local>) {
+        let instance = {
+            let playback = crate::util::lock(&self.playback);
+            playback
+                .current()
+                .map(|c| (c.clip.clone(), c.started_at, c.duration_ms))
         };
-        let talkativeness = persona
-            .states
-            .get(&state)
-            .map(|s| s.talkativeness())
-            .unwrap_or_default();
-        let next = bubble_gap_range(remaining, talkativeness)
-            .map(|(min, max)| now + chrono::Duration::minutes(rng_range_i64(min, max)));
-        crate::util::lock(&self.ambient).next_at = next;
+        let Some((clip_id, started_at, duration_ms)) = instance else {
+            crate::util::lock(&self.ambient).speak_at = None;
+            return;
+        };
+        let persona = self.persona();
+        let state = self.current_state();
+        let Some(e) = self.state_gap_min(&persona, &state) else {
+            crate::util::lock(&self.ambient).speak_at = None;
+            return; // mute：当前状态不说话
+        };
+        if (duration_ms as i64) < SPEAK_MIN_ACTION_MS {
+            crate::util::lock(&self.ambient).speak_at = None;
+            return; // 过渡动作：不配台词
+        }
+        let ai_clip = crate::genbubble::today_pool(&self.gen_bubbles, &clip_id);
+        if resolve_bubble_pool(&persona, Some(&clip_id), ai_clip).is_none() {
+            crate::util::lock(&self.ambient).speak_at = None;
+            return; // 这个动作没有可用文案
+        }
+        let mut ambient = crate::util::lock(&self.ambient);
+        ambient.speak_at = None;
+        let Some((from, to)) = speech_window(
+            now,
+            started_at,
+            duration_ms,
+            ambient.earliest_at,
+            ambient.last_shown_at,
+            e,
+        ) else {
+            return;
+        };
+        let span = (to - from).num_seconds().max(0);
+        let offset = if span > 0 { rng_range_i64(0, span) } else { 0 };
+        ambient.speak_at = Some(from + chrono::Duration::seconds(offset));
     }
 
     /// 为某状态重开场景播放，并把第一步广播给前端。
@@ -548,6 +701,8 @@ impl StateEngine {
         if let Some(event) = event {
             let _ = self.app.emit("playback", event);
         }
+        // 新动作实例 → 重新安排这个实例内要不要说话、什么时候说。
+        self.reschedule_speech(now);
         // 播放排期变了 → 让节拍线程按新的 next_at 重算睡眠时长。
         // 否则线程可能已经睡到「下一次状态切换」（最长 15 分钟），动作就不会继续往下走。
         self.notify_wake();
@@ -564,6 +719,7 @@ impl StateEngine {
         if let Some(event) = event {
             let _ = self.app.emit("playback", event);
         }
+        self.reschedule_speech(now);
     }
 
     /// 当前正在播放的动作 id（气泡文案按它取池）
@@ -619,24 +775,6 @@ impl StateEngine {
         false
     }
 
-    /// 频率护栏：硬性最小间隔 + 每小时上限（滑动窗口）
-    fn bubble_rate_limited(&self, now: &chrono::DateTime<chrono::Local>) -> bool {
-        let mut ambient = crate::util::lock(&self.ambient);
-        let cutoff = *now - chrono::Duration::hours(1);
-        while ambient.recent.front().is_some_and(|t| *t < cutoff) {
-            ambient.recent.pop_front();
-        }
-        if ambient.recent.len() >= BUBBLE_HOURLY_CAP {
-            return true;
-        }
-        if let Some(t) = ambient.last_shown_at {
-            if *now - t < chrono::Duration::minutes(BUBBLE_HARD_MIN_MIN) {
-                return true;
-            }
-        }
-        false
-    }
-
     /// 取当前动作的下一条气泡文案（池来源与优先级见 [`resolve_bubble_pool`]）。
     fn next_ambient_text(&self) -> Option<String> {
         let persona = self.persona();
@@ -671,37 +809,40 @@ impl StateEngine {
         Some(text)
     }
 
-    /// 气泡到期处理：被抑制或触发护栏则直接重排（推迟而非丢弃）；否则取文案弹出并记录。
+    /// 到点则说一句：处于抑制窗口就放弃这个动作实例（等下一个），
+    /// 否则取当前动作的文案，并附带"能在实例结束前说完"的展示时长。
     fn fire_ambient_bubble_if_due(&self, now: chrono::DateTime<chrono::Local>) {
         let due = crate::util::lock(&self.ambient)
-            .next_at
+            .speak_at
             .is_some_and(|t| now >= t);
         if !due {
             return;
         }
-        if self.bubble_suppressed(&now) || self.bubble_rate_limited(&now) {
-            self.schedule_ambient_bubble(now);
+        crate::util::lock(&self.ambient).speak_at = None;
+        if self.bubble_suppressed(&now) {
             return;
         }
-        // 动作马上要切换时不发话：把气泡挪到下一个动作开始之后，
-        // 避免"话说到一半画面就换了"造成内容与画面错位。
-        if let Some(remaining) = crate::util::lock(&self.playback).remaining_ms(now) {
-            if remaining < BUBBLE_CLIP_MIN_REMAINING_MS {
-                let wait = chrono::Duration::milliseconds(remaining.max(0) + BUBBLE_CLIP_SLACK_MS);
-                crate::util::lock(&self.ambient).next_at = Some(now + wait);
-                return;
-            }
+        let remaining_ms = crate::util::lock(&self.playback)
+            .remaining_ms(now)
+            .unwrap_or(BUBBLE_DEFAULT_SHOW_MS);
+        let show_ms = BUBBLE_DEFAULT_SHOW_MS.min(remaining_ms.max(0)) as u64;
+        if show_ms == 0 {
+            return;
         }
-        let text = self.next_ambient_text();
-        if let Some(text) = text {
-            {
-                let mut ambient = crate::util::lock(&self.ambient);
-                ambient.last_shown_at = Some(now);
-                ambient.recent.push_back(now);
-            }
-            let _ = self.app.emit("bubble", BubbleEvent { text });
+        let Some(text) = self.next_ambient_text() else {
+            return;
+        };
+        let persona = self.persona();
+        let state = self.current_state();
+        let next_earliest = self
+            .state_gap_min(&persona, &state)
+            .map(|e| now + chrono::Duration::seconds((sample_gap_min(e) * 60.0) as i64));
+        {
+            let mut ambient = crate::util::lock(&self.ambient);
+            ambient.last_shown_at = Some(now);
+            ambient.earliest_at = next_earliest;
         }
-        self.schedule_ambient_bubble(now);
+        let _ = self.app.emit("bubble", BubbleEvent { text, show_ms });
     }
 
     /// 应用全局缩放：clamp 校验（非 finite → 1.0，越界 → [0.5, 2.0]），更新内存 prefs 并刷新
@@ -759,7 +900,7 @@ impl StateEngine {
         self.wake_cond.notify_one();
     }
 
-    /// 用户导入角色的持久化目录（%APPDATA%\com.deskzen.app\characters\）
+    /// 用户导入角色的持久化目录（%APPDATA%\com.deskzen.desktop\characters\）
     pub fn characters_dir(&self) -> Result<PathBuf, String> {
         Self::characters_dir_for(&self.app)
     }
@@ -856,17 +997,19 @@ impl StateEngine {
                 cache,
             };
         }
-        // 洗牌袋与“上一条文案”属于旧角色，整体清空；限频窗口（recent/last_shown_at/
-        // last_chat_at）保留——防止借连续切角色绕过小时上限。
+        // 洗牌袋与“上一条文案”属于旧角色，整体清空；last_shown_at / last_chat_at 保留——
+        // 避免借连续切角色重置静默上限与聊天抑制窗口。
         {
             let mut ambient = crate::util::lock(&self.ambient);
             ambient.bags.clear();
             ambient.last_text.clear();
+            ambient.speak_at = None;
         }
         // 场景洗牌袋与"当前播放"都属于旧角色，整体清空后按新角色重开
         crate::util::lock(&self.playback).clear();
-        // 按新角色的当前状态重排环境气泡
-        self.schedule_ambient_bubble(chrono::Local::now());
+        // 切换角色后 30~90 秒内先说一句，别让人以为坏了（reset_playback 会据此排期）
+        let now = chrono::Local::now();
+        self.arm_first_speech(now);
         crate::genbubble::maybe_spawn_for_state(app);
         // 修改完成后唤醒节拍线程，使新日程表立即生效（否则线程仍睡在旧 next_transition_at）。
         self.notify_wake();
@@ -878,7 +1021,7 @@ impl StateEngine {
                 state: state.clone(),
             },
         );
-        self.reset_playback(&state, chrono::Local::now());
+        self.reset_playback(&state, now);
         // 新角色缩放后尺寸可能不同：同步重设窗口并保持地板不动。
         crate::resize_persona_window(&self.app);
         Ok(())
@@ -900,10 +1043,10 @@ impl StateEngine {
                 state: state.clone(),
             },
         );
+        // 启动后的第一句话排在 30~90 秒后（不立即弹，给角色一段安静期）
+        self.arm_first_speech(now);
         // 前端拿到角色配置后再给播放指令，顺序保证前端能解析到动作资源
         self.reset_playback(&state, now);
-        // 排出启动后的第一条环境气泡（不立即弹出，给角色一段安静期）
-        self.schedule_ambient_bubble(now);
     }
 
     /// 后台节拍线程：睡到「下一个状态切换时刻」与「下一条环境气泡时刻」中较早者，
@@ -929,9 +1072,9 @@ impl StateEngine {
                 let m = crate::util::lock(&manual_state);
                 next_transition_at(&p, &m, &now)
             };
-            // 环境气泡的预定时刻若早于状态切换，则按气泡时刻唤醒
+            // 当前动作实例排定的说话时刻若早于状态切换，则按说话时刻唤醒
             let (wake_at, playback_leads) = {
-                let bubble_at = crate::util::lock(&ambient).next_at;
+                let bubble_at = crate::util::lock(&ambient).speak_at;
                 let play_at = crate::util::lock(&playback).next_at();
                 let mut earliest = next;
                 if let Some(t) = bubble_at {
@@ -970,7 +1113,7 @@ impl StateEngine {
                         }
                     }
                 }
-                effective_state(&m, &p, &now)
+                runtime_state(&p, &effective_state(&m, &p, &now))
             };
             let mut last = crate::util::lock(&last_state);
             let mut state_changed = false;
@@ -987,9 +1130,8 @@ impl StateEngine {
             drop(last);
             let engine = app.state::<StateEngine>();
             if state_changed {
-                // 新状态的剩余时长/话痨程度不同，气泡按新状态重排（状态切换本身不弹气泡）。
-                engine.schedule_ambient_bubble(now);
-                // 新状态换一套场景：重开播放并把第一步广播给前端
+                // 新状态换一套编排：重开播放并把第一步广播给前端；
+                // 说话排期随新的动作实例重排（状态切换本身不弹气泡）。
                 engine.reset_playback(&state, now);
                 // 跨天/换状态时才需要补齐当日 AI 气泡：放在这里避免每个动作（几秒一次）
                 // 都去锁 persona + 缓存做一遍无谓检查
@@ -1034,9 +1176,6 @@ impl StateEngine {
         );
         // 手动切换状态同样要换一整套场景，否则画面会停在上一个状态的动作上
         self.reset_playback(&next, chrono::Local::now());
-        // 手动覆盖改写了“下一次切换时刻”（last_state 已预先登记，节拍线程不会再触发
-        // 状态变化分支），气泡需按新状态的剩余时长/话痨程度就地重排。
-        self.schedule_ambient_bubble(chrono::Local::now());
         next
     }
 }
@@ -1079,7 +1218,7 @@ fn sanitize_history(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
     kept
 }
 
-/// 历史文件路径：%APPDATA%\com.deskzen.app\history\{persona_id}.json
+/// 历史文件路径：%APPDATA%\com.deskzen.desktop\history\{persona_id}.json
 fn history_file_path(app: &AppHandle, persona_id: &str) -> Result<PathBuf, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     Ok(dir.join("history").join(format!("{persona_id}.json")))
@@ -1262,11 +1401,21 @@ pub(crate) fn validate_persona_structure(persona: &PersonaConfig) -> Result<(), 
     if persona.states.is_empty() {
         return Err("缺少 states 状态定义".into());
     }
+    if !persona.states.contains_key(FALLBACK_STATE) {
+        return Err(format!("缺少必配状态 {FALLBACK_STATE}（日常）"));
+    }
+    for state in persona.states.keys() {
+        if !CANONICAL_STATES.contains(&state.as_str()) {
+            return Err(format!(
+                "状态 {state} 不在固定状态集合（routine/focus/active/relax/eat/sleep）内"
+            ));
+        }
+    }
     if persona.clips.is_empty() {
         return Err("缺少 clips 动作定义".into());
     }
     if persona.scenes.is_empty() {
-        return Err("缺少 scenes 场景定义".into());
+        return Err("缺少 scenes 段定义".into());
     }
     for (clip_id, clip) in &persona.clips {
         if clip.frames == 0 || clip.frame_ms == 0 {
@@ -1275,40 +1424,74 @@ pub(crate) fn validate_persona_structure(persona: &PersonaConfig) -> Result<(), 
     }
     for (state, scenes) in &persona.scenes {
         if !persona.states.contains_key(state) {
-            return Err(format!("场景引用了未定义状态 {state}"));
+            return Err(format!("段引用了未定义状态 {state}"));
         }
         if scenes.is_empty() {
-            return Err(format!("状态 {state} 没有可播放场景"));
+            return Err(format!("状态 {state} 没有可播放的段"));
         }
         for scene in scenes {
             if scene.steps.is_empty() {
-                return Err(format!("场景 {} 没有动作步骤", scene.id));
+                return Err(format!("段 {} 没有动作步骤", scene.id));
             }
             for step in &scene.steps {
                 if !persona.clips.contains_key(&step.clip) {
-                    return Err(format!("场景 {} 引用了未知动作 {}", scene.id, step.clip));
+                    return Err(format!("段 {} 引用了未知动作 {}", scene.id, step.clip));
+                }
+                if step.seconds == Some(0) {
+                    return Err(format!(
+                        "段 {} 的动作 {} seconds 必须大于 0",
+                        scene.id, step.clip
+                    ));
                 }
             }
         }
     }
     for state in persona.states.keys() {
         if !persona.scenes.contains_key(state) {
-            return Err(format!("状态 {state} 缺少 scenes 场景定义"));
+            return Err(format!("状态 {state} 缺少 scenes 段定义"));
         }
     }
-    // 日程引用校验：loop/time 指向不存在或写错的状态时，运行时该状态会被静默跳过
-    // （前端停在上一个画面），必须在导入与启动扫描时用同一套判据拦下。
+    // 链校验：链内段按顺序播放（表达因果），链之间按权重选择。
+    // normalize() 已为旧格式补齐单段链，所以这里可以要求"每个段都必须在某条链里"，
+    // 否则那段素材永远不会被播到。
+    for state in persona.chains.keys() {
+        if !persona.states.contains_key(state) {
+            return Err(format!("链引用了未定义状态 {state}"));
+        }
+    }
+    // 按段所在的状态检查链覆盖：缺 chains 的状态同样要拦下（调用方应先 normalize）
+    for (state, scenes) in &persona.scenes {
+        let no_chains: Vec<ChainConfig> = Vec::new();
+        let chains = persona.chains.get(state).unwrap_or(&no_chains);
+        for chain in chains {
+            if chain.segments.is_empty() {
+                return Err(format!("链 {} 没有段", chain.id));
+            }
+            for segment in &chain.segments {
+                if !scenes.iter().any(|s| s.id == *segment) {
+                    return Err(format!("链 {} 引用了不存在的段 {}", chain.id, segment));
+                }
+            }
+        }
+        for scene in scenes {
+            if !chains.iter().any(|c| c.segments.contains(&scene.id)) {
+                return Err(format!("段 {} 不属于任何链，永远不会播放", scene.id));
+            }
+        }
+    }
+    // 日程引用校验：状态必须来自固定集合。引用"未配置素材"的状态是允许的——
+    // 运行时该状态完全按 routine 处理（见 runtime_state），不算错误。
     for entry in persona.schedule.loop_entries() {
-        if !persona.states.contains_key(&entry.state) {
-            return Err(format!("循环引用了未定义状态 {}", entry.state));
+        if !CANONICAL_STATES.contains(&entry.state.as_str()) {
+            return Err(format!("循环引用了未知状态 {}", entry.state));
         }
         if entry.duration == 0 {
             return Err(format!("循环状态 {} 的 duration 必须大于 0", entry.state));
         }
     }
     for slot in persona.schedule.time() {
-        if !persona.states.contains_key(&slot.state) {
-            return Err(format!("time 时段引用了未定义状态 {}", slot.state));
+        if !CANONICAL_STATES.contains(&slot.state.as_str()) {
+            return Err(format!("time 时段引用了未知状态 {}", slot.state));
         }
         if parse_mins(&slot.start).is_none() || parse_mins(&slot.end).is_none() {
             return Err(format!(
@@ -1320,16 +1503,52 @@ pub(crate) fn validate_persona_structure(persona: &PersonaConfig) -> Result<(), 
     Ok(())
 }
 
-/// 某状态会用到哪些动作（按场景出现顺序去重）——AI 每日文案按动作粒度生成，
+/// 状态是否有可播放素材（配置了非空段）。
+pub(crate) fn state_has_material(persona: &PersonaConfig, state: &str) -> bool {
+    persona
+        .scenes
+        .get(state)
+        .is_some_and(|scenes| !scenes.is_empty())
+}
+
+/// 运行时有效状态：角色没配置该状态（无素材）时，完全按 routine 处理
+/// （画面、语气、气泡频率、免打扰都不做特殊处理）。
+pub(crate) fn runtime_state(persona: &PersonaConfig, state: &str) -> String {
+    if state == FALLBACK_STATE || state_has_material(persona, state) {
+        state.to_string()
+    } else {
+        FALLBACK_STATE.to_string()
+    }
+}
+
+/// 某状态会用到哪些动作（按链/段顺序去重）——AI 每日文案按动作粒度生成，
 /// 只需要生成当前状态可能播到的动作，控制每日调用量。
 pub(crate) fn state_clip_ids(persona: &PersonaConfig, state: &str) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
-    if let Some(scenes) = persona.scenes.get(state) {
-        for scene in scenes {
-            for step in &scene.steps {
-                if persona.clips.contains_key(&step.clip) && !ids.contains(&step.clip) {
-                    ids.push(step.clip.clone());
+    let Some(scenes) = persona.scenes.get(state) else {
+        return ids;
+    };
+    let mut ordered: Vec<&SceneConfig> = Vec::new();
+    if let Some(chains) = persona.chains.get(state) {
+        for chain in chains {
+            for segment in &chain.segments {
+                if let Some(scene) = scenes.iter().find(|s| s.id == *segment) {
+                    if !ordered.iter().any(|s| s.id == scene.id) {
+                        ordered.push(scene);
+                    }
                 }
+            }
+        }
+    }
+    for scene in scenes {
+        if !ordered.iter().any(|s| s.id == scene.id) {
+            ordered.push(scene);
+        }
+    }
+    for scene in ordered {
+        for step in &scene.steps {
+            if persona.clips.contains_key(&step.clip) && !ids.contains(&step.clip) {
+                ids.push(step.clip.clone());
             }
         }
     }
@@ -1756,6 +1975,146 @@ mod tests {
         assert_eq!(parse_mins("23:60"), None);
         assert_eq!(parse_mins("ab:cd"), None);
         assert_eq!(parse_mins(""), None);
+    }
+
+    #[test]
+    fn persona_validation_enforces_fixed_states_and_routine() {
+        let base = link();
+        assert!(validate_persona_structure(&base).is_ok());
+
+        // 去掉 routine（唯一必配状态）→ 拒绝
+        let mut p = base.clone();
+        p.states.remove("routine");
+        let error = validate_persona_structure(&p).unwrap_err();
+        assert!(error.contains("routine"), "{error}");
+
+        // 自定义状态（不在固定集合内）→ 拒绝
+        let mut p = base.clone();
+        p.states.insert(
+            "custom".into(),
+            StateConfig {
+                label: "自定义".into(),
+                talkativeness: String::new(),
+                tone: String::new(),
+                bubble_gap_min: None,
+            },
+        );
+        let error = validate_persona_structure(&p).unwrap_err();
+        assert!(error.contains("custom"), "{error}");
+    }
+
+    #[test]
+    fn schedule_may_reference_unconfigured_canonical_state() {
+        // 角色没配 sleep 素材：日程里仍可写 sleep，运行时完全按 routine 处理
+        let mut p = link();
+        p.states.remove("sleep");
+        p.scenes.remove("sleep");
+        p.chains.remove("sleep");
+        assert!(validate_persona_structure(&p).is_ok());
+        assert_eq!(runtime_state(&p, "sleep"), "routine");
+        assert_eq!(runtime_state(&p, "routine"), "routine");
+
+        let full = link();
+        assert_eq!(runtime_state(&full, "sleep"), "sleep");
+    }
+
+    #[test]
+    fn chain_validation_rejects_unknown_and_orphan_segments() {
+        let base = link();
+
+        // 链引用不存在的段
+        let mut p = base.clone();
+        p.chains
+            .get_mut("routine")
+            .unwrap()
+            .first_mut()
+            .unwrap()
+            .segments
+            .push("ghost".into());
+        let error = validate_persona_structure(&p).unwrap_err();
+        assert!(error.contains("不存在的段"), "{error}");
+
+        // 段不属于任何链 → 永远不会播放
+        let mut p = base.clone();
+        p.chains.remove("routine");
+        let error = validate_persona_structure(&p).unwrap_err();
+        assert!(error.contains("不属于任何链"), "{error}");
+    }
+
+    #[test]
+    fn normalize_fills_single_segment_chains_for_legacy_personas() {
+        let mut p = link();
+        p.chains.clear();
+        p.normalize();
+        for (state, scenes) in &p.scenes {
+            let chains = p.chains.get(state).expect("normalize 后每个状态都应有链");
+            assert_eq!(chains.len(), scenes.len());
+            for scene in scenes {
+                assert!(
+                    chains.iter().any(|c| c.segments == vec![scene.id.clone()]),
+                    "段 {} 应合成单段链",
+                    scene.id
+                );
+            }
+        }
+        assert!(validate_persona_structure(&p).is_ok());
+    }
+
+    #[test]
+    fn speech_window_respects_min_action_and_bounds() {
+        let start = chrono::Local::now();
+        // 过渡动作（<30 秒）不说
+        assert!(speech_window(start, start, 20_000, None, None, 6.0).is_none());
+
+        // 首次说话不受 20%~70% 偏好限制：30 秒动作 → [6s, 24s]（结束前 6 秒说完）
+        let (from, to) = speech_window(start, start, 30_000, None, None, 6.0).unwrap();
+        assert_eq!((from - start).num_seconds(), 6);
+        assert_eq!((to - start).num_seconds(), 24);
+
+        // 60 秒动作：首次说话 → [12s, 54s]
+        let (from, to) = speech_window(start, start, 60_000, None, None, 6.0).unwrap();
+        assert_eq!((from - start).num_seconds(), 12);
+        assert_eq!((to - start).num_seconds(), 54);
+
+        // 距上次说话不足静默上限（E=6 → 12 分钟）：不早于 earliest_at
+        let just_spoke = start - chrono::Duration::minutes(1);
+        let earliest = start + chrono::Duration::seconds(10);
+        let (from, _) =
+            speech_window(start, start, 60_000, Some(earliest), Some(just_spoke), 6.0).unwrap();
+        assert_eq!((from - start).num_seconds(), 12); // max(窗口左端 12s, 10s)
+
+        let earliest = start + chrono::Duration::seconds(30);
+        let (from, _) =
+            speech_window(start, start, 60_000, Some(earliest), Some(just_spoke), 6.0).unwrap();
+        assert_eq!((from - start).num_seconds(), 30);
+
+        // 从未说过话（启动 grace）：尊重 earliest_at，右端放宽到"说完为止"
+        let earliest = start + chrono::Duration::seconds(30);
+        let (from, to) = speech_window(start, start, 60_000, Some(earliest), None, 6.0).unwrap();
+        assert_eq!((from - start).num_seconds(), 30);
+        assert_eq!((to - start).num_seconds(), 54);
+
+        // 首次说话落在动作尾部（45 秒动作、grace 38 秒）→ 仍在实例内能说完
+        let earliest = start + chrono::Duration::seconds(38);
+        let (from, to) = speech_window(start, start, 45_000, Some(earliest), None, 6.0).unwrap();
+        assert_eq!((from - start).num_seconds(), 38);
+        assert_eq!((to - start).num_seconds(), 39); // 45 - 6
+
+        // 连放宽后都放不下（grace 40 秒 > 39 秒）→ 这个实例不说，等下一个动作
+        let earliest = start + chrono::Duration::seconds(40);
+        assert!(speech_window(start, start, 45_000, Some(earliest), None, 6.0).is_none());
+
+        // earliest 超过窗口右端 → 这个实例不说
+        let earliest = start + chrono::Duration::seconds(50);
+        assert!(
+            speech_window(start, start, 60_000, Some(earliest), Some(just_spoke), 6.0).is_none()
+        );
+
+        // 静默超过上限 → 忽略间隔，直接取窗口左端
+        let long_ago = start - chrono::Duration::minutes(30);
+        let (from, _) =
+            speech_window(start, start, 60_000, Some(earliest), Some(long_ago), 6.0).unwrap();
+        assert_eq!((from - start).num_seconds(), 12);
     }
 
     #[test]
@@ -2270,19 +2629,31 @@ mod tests {
     }
 
     #[test]
-    fn bubble_gap_range_derives_from_remaining_and_talkativeness() {
-        // mute 不弹
-        assert_eq!(bubble_gap_range(30, Talkativeness::Mute), None);
-        // D=20 normal：E = 20/2 × 1.0 = 10 → min 6、max 14
-        assert_eq!(bubble_gap_range(20, Talkativeness::Normal), Some((6, 14)));
-        // D=20 chatty：E = 5 → min 触地板 4、max 7
-        assert_eq!(bubble_gap_range(20, Talkativeness::Chatty), Some((4, 7)));
-        // D=20 quiet：E = 20 → min 12、max 28
-        assert_eq!(bubble_gap_range(20, Talkativeness::Quiet), Some((12, 28)));
-        // 超长 D：E 钳到 60 → 36~84
-        assert_eq!(bubble_gap_range(480, Talkativeness::Normal), Some((36, 84)));
-        // 极短 D：E 钳到 5 → 4~7
-        assert_eq!(bubble_gap_range(1, Talkativeness::Normal), Some((4, 7)));
+    fn default_gap_follows_talkativeness_and_mute_is_none() {
+        assert_eq!(default_gap_min(Talkativeness::Chatty), Some(3.0));
+        assert_eq!(default_gap_min(Talkativeness::Normal), Some(6.0));
+        assert_eq!(default_gap_min(Talkativeness::Quiet), Some(15.0));
+        assert_eq!(default_gap_min(Talkativeness::Mute), None);
+        // 静默上限 = 2×E，且不超过 15 分钟
+        assert_eq!(max_silence_min(3.0), 6.0);
+        assert_eq!(max_silence_min(6.0), 12.0);
+        assert_eq!(max_silence_min(15.0), 15.0);
+    }
+
+    #[test]
+    fn sampled_gap_stays_within_expected_band() {
+        // sample_gap_min 是随机采样，但必须落在 [0.6E, 1.4E]（分钟换算后按秒四舍五入）
+        for e in [3.0_f64, 6.0, 15.0] {
+            let low = (e * 0.6 * 60.0).round() as i64;
+            let high = (e * 1.4 * 60.0).round() as i64;
+            for _ in 0..50 {
+                let seconds = (sample_gap_min(e) * 60.0).round() as i64;
+                assert!(
+                    (low..=high).contains(&seconds),
+                    "E={e} 采样 {seconds} 秒超出 [{low}, {high}]"
+                );
+            }
+        }
     }
 
     #[test]

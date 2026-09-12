@@ -183,7 +183,7 @@ pub async fn chat_completion_stream(
     mut on_delta: impl FnMut(&str),
 ) -> Result<String, String> {
     if cfg.api_key.is_empty() {
-        return Err("尚未配置 API Key。请在 AppData/com.deskzen.app/llm.json 或环境变量 DESKZEN_API_KEY 中配置。".into());
+        return Err("尚未配置 API Key。请在 AppData/com.deskzen.desktop/llm.json 或环境变量 DESKZEN_API_KEY 中配置。".into());
     }
     let client = http_client();
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
@@ -393,7 +393,7 @@ mod tests {
     #[tokio::test]
     async fn chat_completion_stream_works() {
         let appdata = std::env::var("APPDATA").expect("APPDATA 未设置");
-        let path = std::path::Path::new(&appdata).join("com.deskzen.app\\llm.json");
+        let path = std::path::Path::new(&appdata).join("com.deskzen.desktop\\llm.json");
         let content = std::fs::read_to_string(path).expect("llm.json 不存在，请先配置 API Key");
         let cfg: LlmConfig = serde_json::from_str(&content).expect("llm.json 解析失败");
         assert!(!cfg.api_key.is_empty(), "llm.json 中缺少 api_key");

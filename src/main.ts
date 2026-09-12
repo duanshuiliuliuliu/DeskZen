@@ -22,6 +22,8 @@ interface StateChangedPayload {
 
 interface BubblePayload {
   text: string;
+  /** 展示时长（毫秒）：后端按当前动作剩余时间给出，保证气泡不跨动作 */
+  show_ms: number;
 }
 
 /** 后端下发的播放指令：前端只负责渲染，不再自己挑场景 */
@@ -153,7 +155,7 @@ function applyState(state: string, cfg: StateConfig | undefined): void {
   }
 }
 
-function showBubble(text: string): void {
+function showBubble(text: string, showMs = 6000): void {
   bubble.textContent = text;
   bubble.classList.remove("hidden");
   requestAnimationFrame(() => bubble.classList.add("show"));
@@ -161,7 +163,7 @@ function showBubble(text: string): void {
   bubbleTimer = setTimeout(() => {
     bubble.classList.remove("show");
     bubble.classList.add("hidden");
-  }, 6000);
+  }, Math.max(500, showMs));
 }
 
 /** 收起当前气泡：动作已经切换，这条文案不再对应当前画面 */
@@ -233,7 +235,7 @@ async function init(): Promise<void> {
   });
 
   await listen<BubblePayload>("bubble", (e) => {
-    showBubble(e.payload.text);
+    showBubble(e.payload.text, e.payload.show_ms);
   });
 
   await listen<{ w: number; h: number }>("zoom-changed", (e) => {

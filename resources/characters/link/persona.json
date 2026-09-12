@@ -153,28 +153,47 @@
   },
   "scenes": {
     "routine": [
-      {"id": "notice_the_viewer", "label": "打招呼", "weight": 3, "steps": [{"clip": "greet_wave"}]},
-      {"id": "listen_and_observe", "label": "观察周围", "weight": 5, "steps": [{"clip": "observe"}]},
-      {"id": "patrol_a_round", "label": "巡视一圈", "weight": 5, "steps": [{"clip": "walk"}]},
-      {"id": "korok_hint", "label": "发现奇怪叶子", "weight": 2, "steps": [{"clip": "korok_leaf"}]}
+      {"id": "notice_the_viewer", "label": "打招呼", "steps": [{"clip": "greet_wave", "seconds": 30}]},
+      {"id": "listen_and_observe", "label": "观察周围", "steps": [{"clip": "observe", "seconds": 45}]},
+      {"id": "patrol_a_round", "label": "巡视一圈", "steps": [{"clip": "walk", "seconds": 45}]},
+      {"id": "korok_hint", "label": "发现奇怪叶子", "steps": [{"clip": "korok_leaf", "seconds": 45}]}
     ],
     "focus": [
-      {"id": "check_the_route", "label": "查看希卡之石", "weight": 3, "steps": [{"clip": "sheikah_slate"}]},
-      {"id": "maintain_the_shield", "label": "保养盾牌", "weight": 5, "steps": [{"clip": "polish_shield"}]},
-      {"id": "focus_complete", "label": "完成一轮专注", "weight": 1, "steps": [{"clip": "task_cheer"}]}
+      {"id": "check_the_route", "label": "查看希卡之石", "steps": [{"clip": "sheikah_slate", "seconds": 45}]},
+      {"id": "maintain_the_shield", "label": "保养盾牌", "steps": [{"clip": "polish_shield", "seconds": 45}]},
+      {"id": "focus_complete", "label": "完成一轮专注", "steps": [{"clip": "task_cheer", "seconds": 30}]}
     ],
     "active": [
-      {"id": "zonai_power", "label": "感受左纳乌力量", "weight": 4, "steps": [{"clip": "zonai_hand"}]},
-      {"id": "adventure_progress", "label": "冒险有所进展", "weight": 2, "steps": [{"clip": "task_cheer"}]},
-      {"id": "ride_out", "label": "骑车出门探索", "weight": 5, "steps": [{"clip": "ride_motorcycle"}]},
-      {"id": "ambush_battle", "label": "遭遇战斗", "weight": 2, "steps": [{"clip": "fight"}]}
+      {"id": "zonai_power", "label": "感受左纳乌力量", "steps": [{"clip": "zonai_hand", "seconds": 45}]},
+      {"id": "adventure_progress", "label": "冒险有所进展", "steps": [{"clip": "task_cheer", "seconds": 30}]},
+      {"id": "ride_out", "label": "骑车出门探索", "steps": [{"clip": "ride_motorcycle", "seconds": 45}]},
+      {"id": "ambush_battle", "label": "遭遇战斗", "steps": [{"clip": "fight", "seconds": 45}]}
     ],
     "relax": [
-      {"id": "long_stretch", "label": "伸个懒腰", "weight": 3, "steps": [{"clip": "stretch"}]},
-      {"id": "brief_doze", "label": "站着打盹", "weight": 4, "steps": [{"clip": "standing_doze"}]},
-      {"id": "daydream_sit", "label": "坐着发呆", "weight": 5, "steps": [{"clip": "sit_idle"}]}
+      {"id": "long_stretch", "label": "伸个懒腰", "steps": [{"clip": "stretch", "seconds": 40}]},
+      {"id": "brief_doze", "label": "站着打盹", "steps": [{"clip": "standing_doze", "seconds": 45}]},
+      {"id": "daydream_sit", "label": "坐着发呆", "steps": [{"clip": "sit_idle", "seconds": 45}]}
     ],
-    "eat": [{"id": "hyrule_apple", "label": "吃海拉鲁苹果", "steps": [{"clip": "eat_apple"}]}],
-    "sleep": [{"id": "lie_down_sleep", "label": "躺下睡一会儿", "steps": [{"clip": "lie_sleep"}]}]
+    "eat": [{"id": "hyrule_apple", "label": "吃海拉鲁苹果", "steps": [{"clip": "eat_apple", "seconds": 45}]}],
+    "sleep": [{"id": "lie_down_sleep", "label": "躺下睡一会儿", "steps": [{"clip": "lie_sleep", "seconds": 60}]}]
+  },
+  "chains": {
+    "routine": [
+      {"id": "patrol_round", "label": "巡视一圈", "weight": 5, "segments": ["listen_and_observe", "patrol_a_round", "korok_hint"]},
+      {"id": "notice_viewer", "label": "留意到你", "weight": 2, "segments": ["notice_the_viewer"]}
+    ],
+    "focus": [
+      {"id": "gear_maintenance", "label": "装备保养线", "weight": 5, "segments": ["maintain_the_shield", "check_the_route"]},
+      {"id": "wrap_up", "label": "收个尾", "weight": 1, "segments": ["focus_complete"]}
+    ],
+    "active": [
+      {"id": "explore_out", "label": "出门探索", "weight": 5, "segments": ["ride_out", "zonai_power"]},
+      {"id": "battle_aftermath", "label": "战斗之后", "weight": 2, "segments": ["ambush_battle", "adventure_progress"]}
+    ],
+    "relax": [
+      {"id": "slow_down", "label": "慢下来", "weight": 5, "segments": ["long_stretch", "brief_doze", "daydream_sit"]}
+    ],
+    "eat": [{"id": "meal", "label": "吃点东西", "weight": 1, "segments": ["hyrule_apple"]}],
+    "sleep": [{"id": "sleep", "label": "睡觉", "weight": 1, "segments": ["lie_down_sleep"]}]
   }
 }
