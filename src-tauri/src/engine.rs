@@ -271,6 +271,18 @@ pub struct PersonaView {
     pub states: HashMap<String, StateConfig>,
 }
 
+/// 当前播放快照：对话时注入 system prompt，让模型的回答锚定在“画面里正在演的动作”上。
+/// 没有它时模型会自行编造动作（例如问“在干什么”回答“磨剑”，而动作集里根本没有磨剑）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ActivityView {
+    pub state: String,
+    pub scene_id: String,
+    pub scene_label: String,
+    pub clip: String,
+    pub clip_label: String,
+    pub clip_description: String,
+}
+
 /// 内置角色：id -> 配置文件（编译期内嵌，运行时切换）
 const EMBEDDED_PERSONAS: &[(&str, &str)] = &[(
     "link",
@@ -559,6 +571,31 @@ impl StateEngine {
         crate::util::lock(&self.playback)
             .current_clip()
             .map(str::to_string)
+    }
+
+    /// 当前播放快照（动作 id + 中文名 + 画面描述），供对话 system prompt 使用。
+    /// 没有正在播放的动作（如前端尚未就绪 / 该状态无有效场景）时返回 None。
+    pub fn current_activity(&self) -> Option<ActivityView> {
+        let persona = self.persona();
+        let (state, scene_id, scene_label, clip_id) = {
+            let playback = crate::util::lock(&self.playback);
+            let current = playback.current()?;
+            (
+                current.state.clone(),
+                current.scene_id.clone(),
+                current.scene_label.clone(),
+                current.clip.clone(),
+            )
+        };
+        let clip = persona.clips.get(&clip_id);
+        Some(ActivityView {
+            state,
+            scene_id,
+            scene_label,
+            clip: clip_id,
+            clip_label: clip.map(|c| c.label.clone()).unwrap_or_default(),
+            clip_description: clip.map(|c| c.description.clone()).unwrap_or_default(),
+        })
     }
 
     /// 抑制判断：角色隐藏 / 对话窗打开 / 刚聊过天——命中时气泡推迟而非取消。
@@ -1534,18 +1571,44 @@ fn next_transition_at(
         .unwrap_or_else(|| *now + chrono::Duration::seconds(30))
 }
 
-/// 根据 persona 定义与当前状态组装对话用的 LLM system prompt。
+/// 根据 persona 定义、当前状态与**当前正在播放的动作**组装对话用的 LLM system prompt。
 /// 语气优先取状态的 `tone`，没写就按 `talkativeness` 推导。
-pub fn build_system_prompt(persona: &PersonaConfig, state: &str) -> String {
+///
+/// `activity` 来自后端播放调度（见 [`StateEngine::current_activity`]）。带上它才能保证
+/// “说的”和“演的”一致：没有动作上下文时，模型会自己编造画面里没有的动作/物品，
+/// 例如问“在干什么”回答“磨剑”，而角色的动作集里根本没有磨剑。
+pub fn build_system_prompt(
+    persona: &PersonaConfig,
+    state: &str,
+    activity: Option<&ActivityView>,
+) -> String {
     let sp = &persona.system_prompt;
     let state_cfg = persona.states.get(state);
     let label = state_cfg.map(|s| s.label.as_str()).unwrap_or(state);
     let tone = state_cfg
         .map(StateConfig::chat_tone)
         .unwrap_or_else(|| Talkativeness::Normal.chat_tone());
+    let action = match activity {
+        Some(a) => {
+            let clip_label = if a.clip_label.is_empty() {
+                a.clip.as_str()
+            } else {
+                a.clip_label.as_str()
+            };
+            format!(
+                "【当前动作】\n你此刻正在「{clip_label}」。{description}\n\
+                 用户若问你在做什么，只能依据这个动作回答；不要提及画面里没有的动作、物品或场景。",
+                description = a.clip_description.trim()
+            )
+        }
+        // 没有播放上下文时也必须给约束，否则模型仍会自由编造
+        None => {
+            "【当前动作】\n此刻画面没有在播放具体动作。不要主动描述动作、物品或场景。".to_string()
+        }
+    };
     format!(
-        "【角色定义】\n{}\n\n【回复风格】\n{}\n\n【当前状态】\n角色当前处于“{}”（{}）状态。{}",
-        sp.definition, sp.reply_style, label, state, tone
+        "【角色定义】\n{}\n\n【回复风格】\n{}\n\n【当前状态】\n角色当前处于“{}”（{}）状态。{}\n\n{}",
+        sp.definition, sp.reply_style, label, state, tone, action
     )
 }
 
@@ -2052,13 +2115,13 @@ mod tests {
         let p = link();
 
         // 显式写了 tone 的状态用 tone
-        let relax = build_system_prompt(&p, "relax");
+        let relax = build_system_prompt(&p, "relax", None);
         assert!(relax.contains(&p.states["relax"].tone), "{relax}");
 
         // 没写 tone 的状态按话痨档位推导：eat=chatty、sleep=mute
-        let eat = build_system_prompt(&p, "eat");
+        let eat = build_system_prompt(&p, "eat", None);
         assert!(eat.contains(Talkativeness::Chatty.chat_tone()), "{eat}");
-        let sleep = build_system_prompt(&p, "sleep");
+        let sleep = build_system_prompt(&p, "sleep", None);
         assert!(sleep.contains(Talkativeness::Mute.chat_tone()), "{sleep}");
         assert!(sleep.contains("梦话"), "{sleep}");
 
@@ -2067,11 +2130,34 @@ mod tests {
         assert!(eat.contains(&p.system_prompt.reply_style), "{eat}");
 
         // 未知状态退回 normal 语气，不 panic
-        let unknown = build_system_prompt(&p, "不存在的状态");
+        let unknown = build_system_prompt(&p, "不存在的状态", None);
         assert!(
             unknown.contains(Talkativeness::Normal.chat_tone()),
             "{unknown}"
         );
+    }
+
+    #[test]
+    fn chat_prompt_grounds_reply_in_current_activity() {
+        let p = link();
+        let activity = ActivityView {
+            state: "focus".into(),
+            scene_id: "maintain_the_shield".into(),
+            scene_label: "保养盾牌".into(),
+            clip: "polish_shield".into(),
+            clip_label: p.clips["polish_shield"].label.clone(),
+            clip_description: p.clips["polish_shield"].description.clone(),
+        };
+        let prompt = build_system_prompt(&p, "focus", Some(&activity));
+        // 当前动作的名称与画面描述必须进入提示词
+        assert!(prompt.contains("保养盾牌"), "{prompt}");
+        assert!(prompt.contains(&activity.clip_description), "{prompt}");
+        // 并且明确禁止编造画面里没有的动作/物品
+        assert!(prompt.contains("不要提及画面里没有的动作"), "{prompt}");
+
+        // 没有播放上下文时同样给出“不要描述动作”的约束
+        let idle_prompt = build_system_prompt(&p, "focus", None);
+        assert!(idle_prompt.contains("不要主动描述动作"), "{idle_prompt}");
     }
 
     #[test]

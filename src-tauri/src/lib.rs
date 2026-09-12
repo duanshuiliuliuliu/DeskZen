@@ -536,7 +536,9 @@ async fn chat_send(
     let state = engine.current_state();
     let cfg = llm::load_config(&app);
     let persona = engine.persona();
-    let mut system = engine::build_system_prompt(&persona, &state);
+    // 注入当前正在播放的动作，避免模型回答“在磨剑”这类画面里根本不存在的动作
+    let activity = engine.current_activity();
+    let mut system = engine::build_system_prompt(&persona, &state, activity.as_ref());
 
     let mut llm_messages: Vec<llm::LlmMessage> = messages
         .into_iter()

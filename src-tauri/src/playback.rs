@@ -39,14 +39,15 @@ pub struct PlaybackEvent {
 
 /// 当前正在播放的一步
 #[derive(Debug, Clone)]
-struct Current {
-    state: String,
-    scene_id: String,
+pub(crate) struct Current {
+    pub(crate) state: String,
+    pub(crate) scene_id: String,
+    pub(crate) scene_label: String,
     /// 本场景第一次开播的时刻（用于「同一场景至少播 N 秒」）
-    scene_started_at: DateTime<Local>,
-    step_index: usize,
-    clip: String,
-    next_at: DateTime<Local>,
+    pub(crate) scene_started_at: DateTime<Local>,
+    pub(crate) step_index: usize,
+    pub(crate) clip: String,
+    pub(crate) next_at: DateTime<Local>,
 }
 
 /// 场景调度状态（与状态引擎同生命周期，不持久化）
@@ -143,6 +144,11 @@ impl Playback {
         self.current.as_ref().map(|current| current.clip.as_str())
     }
 
+    /// 当前正在播放的完整快照（对话 system prompt 需要动作说明，而不仅是 id）
+    pub(crate) fn current(&self) -> Option<&Current> {
+        self.current.as_ref()
+    }
+
     /// 当前动作还剩多少毫秒（气泡避开"动作马上要切"的时刻）
     pub fn remaining_ms(&self, now: DateTime<Local>) -> Option<i64> {
         self.current
@@ -218,6 +224,7 @@ impl Playback {
         self.current = Some(Current {
             state: state.to_string(),
             scene_id: scene.id.clone(),
+            scene_label: scene.label.clone(),
             scene_started_at,
             step_index: index,
             clip: step.clip.clone(),
