@@ -675,6 +675,16 @@ body.settings-body {
   gap: 12px;
 }
 
+/* 多行「标签 + 控件」：标签占固定宽度，控件竖直对齐成一列 */
+.settings-group-aligned .settings-row > span {
+  min-width: 6.5em;
+}
+
+/* 铺满一行的次级按钮：与组内其它控件左右对齐 */
+.btn-block {
+  width: 100%;
+}
+
 .settings-check {
   display: flex;
   align-items: center;
