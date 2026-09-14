@@ -45,7 +45,7 @@ pub struct Prefs {
     /// 日志级别：trace / debug / info / warn / error
     #[serde(default = "default_log_level")]
     pub log_level: String,
-    /// 单个日志文件大小上限（MB）：1 / 5 / 10 / 30
+    /// 单个日志文件大小上限（MB）：5 / 10 / 30
     #[serde(default = "default_log_size_mb")]
     pub log_size_mb: u64,
 }

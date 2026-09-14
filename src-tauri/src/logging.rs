@@ -1,7 +1,7 @@
 //! 运行日志：自己写文件，单份大小与级别都能在设置页即时调整。
 //!
 //! - 落点：`<app_log_dir>/deskzen.log`（Windows：`%LOCALAPPDATA%\com.deskzen.desktop\logs`）
-//! - 滚动：单份超过设置的大小（1/5/10/30 MB，默认 10MB）就重命名成 `deskzen_<时间>.log`，
+//! - 滚动：单份超过设置的大小（5/10/30 MB，默认 10MB）就重命名成 `deskzen_<时间>.log`，
 //!   只保留最近 [`KEEP_FILES`] 份历史文件；启动时接着现有文件追加
 //! - 级别：默认 `debug`（记抽链、每拍推进、气泡调度这些细节），设置页可切 trace/debug/info/warn/error
 //! - 记录重点：状态为什么切、链为什么被选中或跳过、气泡为什么没说、AI 生成为什么失败；
@@ -18,11 +18,11 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 /// 历史日志保留份数（不含当前正在写的那份）
-const KEEP_FILES: usize = 7;
+const KEEP_FILES: usize = 3;
 /// 日志文件名（不含滚动后缀）
 const FILE_STEM: &str = "deskzen";
 /// 设置页可选的单文件大小档位（MB）
-pub(crate) const SIZE_OPTIONS_MB: &[u64] = &[1, 5, 10, 30];
+pub(crate) const SIZE_OPTIONS_MB: &[u64] = &[5, 10, 30];
 /// 单文件大小默认值（MB）
 pub(crate) const DEFAULT_SIZE_MB: u64 = 10;
 /// 可选的日志级别（由轻到重）
@@ -353,8 +353,9 @@ mod tests {
     #[test]
     fn size_options_are_the_documented_ones() {
         let _guard = TEST_LOCK.lock().unwrap();
-        assert_eq!(size_options_mb(), vec![1, 5, 10, 30]);
+        assert_eq!(size_options_mb(), vec![5, 10, 30]);
         assert_eq!(normalize_size_mb(30), 30);
+        assert_eq!(normalize_size_mb(1), DEFAULT_SIZE_MB, "1M 已下线，回退默认");
         assert_eq!(normalize_size_mb(7), DEFAULT_SIZE_MB);
         assert_eq!(DEFAULT_SIZE_MB, 10);
         assert_eq!(set_max_size_mb(5), 5);
