@@ -29,6 +29,7 @@ pub async fn import_local_character(
     path: String,
     engine: tauri::State<'_, StateEngine>,
 ) -> Result<ImportedCharacter, String> {
+    let source_label = path.clone();
     let source = PathBuf::from(path);
     let pack = tauri::async_runtime::spawn_blocking(move || read_character_pack(&source))
         .await
@@ -57,9 +58,14 @@ pub async fn import_local_character(
     }
     // 角色已安装并切换成功，托盘菜单项添加失败不应让前端以为导入失败；记录后照常返回。
     if let Err(error) = crate::add_persona_menu_item(&app, &id, &saved_persona.name) {
-        eprintln!("为角色 {id} 添加托盘菜单失败：{error}");
+        log::warn!("为角色 {id} 添加托盘菜单失败：{error}");
     }
 
+    log::info!(
+        "导入角色：{id}（{}，来自 {}）",
+        saved_persona.name,
+        source_label
+    );
     Ok(ImportedCharacter {
         id,
         name: saved_persona.name,
@@ -81,6 +87,7 @@ pub fn delete_persona(
     if was_current {
         engine.switch_persona(&app, "link")?;
     }
+    log::info!("删除角色：{id}");
     Ok(())
 }
 

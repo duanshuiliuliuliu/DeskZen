@@ -15,6 +15,16 @@ pub(crate) fn default_ai_bubbles() -> bool {
     true
 }
 
+/// 日志级别默认值：debug（排查问题时默认就有细节可看）
+pub(crate) fn default_log_level() -> String {
+    crate::logging::DEFAULT_LEVEL.to_string()
+}
+
+/// 单个日志文件大小默认值（MB）
+pub(crate) fn default_log_size_mb() -> u64 {
+    crate::logging::DEFAULT_SIZE_MB
+}
+
 /// 缩放值归一化：非 finite（NaN/Inf）时回退默认，避免扩散进显示尺寸计算。
 fn normalize_zoom(zoom: f64) -> f64 {
     if zoom.is_finite() {
@@ -32,6 +42,12 @@ pub struct Prefs {
     /// 是否启用大模型每日生成气泡台词
     #[serde(default = "default_ai_bubbles")]
     pub ai_bubbles: bool,
+    /// 日志级别：trace / debug / info / warn / error
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+    /// 单个日志文件大小上限（MB）：1 / 5 / 10 / 30
+    #[serde(default = "default_log_size_mb")]
+    pub log_size_mb: u64,
 }
 
 impl Default for Prefs {
@@ -39,6 +55,8 @@ impl Default for Prefs {
         Self {
             zoom: default_zoom(),
             ai_bubbles: default_ai_bubbles(),
+            log_level: default_log_level(),
+            log_size_mb: default_log_size_mb(),
         }
     }
 }
@@ -57,6 +75,9 @@ pub fn load_prefs(app: &AppHandle) -> Prefs {
         return Prefs::default();
     };
     p.zoom = normalize_zoom(p.zoom);
+    // 手改坏的值按默认回退，避免日志/文件大小设置失效
+    p.log_level = crate::logging::normalize_level(&p.log_level).to_string();
+    p.log_size_mb = crate::logging::normalize_size_mb(p.log_size_mb);
     p
 }
 
@@ -76,6 +97,8 @@ mod tests {
         let p: Prefs = serde_json::from_str("{}").unwrap();
         assert_eq!(p.zoom, 1.0);
         assert!(p.ai_bubbles, "缺省应开启 AI 每日气泡");
+        assert_eq!(p.log_level, crate::logging::DEFAULT_LEVEL);
+        assert_eq!(p.log_size_mb, crate::logging::DEFAULT_SIZE_MB);
     }
 
     #[test]
@@ -83,9 +106,20 @@ mod tests {
         let p = Prefs {
             zoom: 1.5,
             ai_bubbles: true,
+            ..Prefs::default()
         };
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<Prefs>(&json).unwrap().zoom, 1.5);
+    }
+
+    #[test]
+    fn broken_log_settings_fall_back_to_defaults() {
+        // 手改坏的值：级别不认识、大小不在档位里 → 都用默认（否则日志可能整段失效）
+        let mut p: Prefs = serde_json::from_str(r#"{"log_level":"loud","log_size_mb":7}"#).unwrap();
+        p.log_level = crate::logging::normalize_level(&p.log_level).to_string();
+        p.log_size_mb = crate::logging::normalize_size_mb(p.log_size_mb);
+        assert_eq!(p.log_level, crate::logging::DEFAULT_LEVEL);
+        assert_eq!(p.log_size_mb, crate::logging::DEFAULT_SIZE_MB);
     }
 
     #[test]

@@ -5,6 +5,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./styles.css";
+import { installLogBridge } from "./logbridge";
+
+installLogBridge();
 
 function $(id: string): HTMLElement {
   const el = document.getElementById(id);
@@ -32,11 +35,16 @@ const importedList = $("imported-list") as HTMLDivElement;
 const importedHint = $("imported-hint") as HTMLElement;
 const importedStatus = $("imported-status") as HTMLElement;
 const appVersion = $("app-version") as HTMLElement;
+const logOpenBtn = $("log-open") as HTMLButtonElement;
+const logLevelSelect = $("log-level") as HTMLSelectElement;
+const logSizeSelect = $("log-size") as HTMLSelectElement;
+const logStatus = $("log-status") as HTMLElement;
 const navItems = document.querySelectorAll<HTMLButtonElement>(".nav-item");
 const settingsContent = document.querySelector(".settings-content") as HTMLElement;
-const panels: Record<"role" | "llm" | "about", HTMLElement> = {
+const panels: Record<"role" | "llm" | "log" | "about", HTMLElement> = {
   role: $("panel-role"),
   llm: $("panel-llm"),
+  log: $("panel-log"),
   about: $("panel-about"),
 };
 
@@ -86,7 +94,7 @@ function setImportedStatus(text: string, error = false): void {
 }
 
 /** 滚动到指定面板并高亮侧边栏 */
-function activatePanel(name: "role" | "llm" | "about", scroll = true): void {
+function activatePanel(name: "role" | "llm" | "log" | "about", scroll = true): void {
   for (const btn of navItems) {
     btn.classList.toggle("active", btn.dataset.panel === name);
   }
@@ -98,16 +106,18 @@ function activatePanel(name: "role" | "llm" | "about", scroll = true): void {
 for (const btn of navItems) {
   btn.addEventListener("click", () => {
     const name = btn.dataset.panel;
-    if (name === "role" || name === "llm" || name === "about") activatePanel(name);
+    if (name === "role" || name === "llm" || name === "log" || name === "about") {
+      activatePanel(name);
+    }
   });
 }
 
 // 滚动时高亮当前面板（内容滚动会吸附到每个设置区块）
 settingsContent.addEventListener("scroll", () => {
   const rectTop = settingsContent.getBoundingClientRect().top;
-  let current: "role" | "llm" | "about" = "role";
+  let current: "role" | "llm" | "log" | "about" = "role";
   let best = -Infinity;
-  for (const name of ["role", "llm", "about"] as const) {
+  for (const name of ["role", "llm", "log", "about"] as const) {
     const d = panels[name].getBoundingClientRect().top - rectTop;
     if (d <= 80 && d > best) {
       best = d;
@@ -330,6 +340,75 @@ void listen("persona-changed", () => {
 
 void refresh();
 void refreshImported();
+
+/** 日志面板：级别与单文件大小即时生效（后端同时写进 prefs.json） */
+interface LogConfig {
+  level: string;
+  size_mb: number;
+  levels: string[];
+  sizes: number[];
+}
+
+let logSaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+function setLogStatus(text: string, error = false): void {
+  logStatus.textContent = text;
+  logStatus.classList.toggle("error", error);
+}
+
+function fillLogOptions(config: LogConfig): void {
+  logLevelSelect.textContent = "";
+  for (const level of config.levels) {
+    const option = document.createElement("option");
+    option.value = level;
+    option.textContent = level;
+    option.selected = level === config.level;
+    logLevelSelect.appendChild(option);
+  }
+  logSizeSelect.textContent = "";
+  for (const size of config.sizes) {
+    const option = document.createElement("option");
+    option.value = String(size);
+    option.textContent = `${size}M`;
+    option.selected = size === config.size_mb;
+    logSizeSelect.appendChild(option);
+  }
+}
+
+async function saveLogConfig(): Promise<void> {
+  try {
+    const applied = await invoke<LogConfig>("set_log_config", {
+      level: logLevelSelect.value,
+      sizeMb: Number(logSizeSelect.value),
+    });
+    fillLogOptions(applied);
+    setLogStatus("已保存");
+  } catch (error) {
+    setLogStatus(`保存失败：${String(error)}`, true);
+  }
+}
+
+/** 连点下拉时不至于每次都写盘 */
+function scheduleSaveLogConfig(): void {
+  setLogStatus("");
+  if (logSaveTimer) clearTimeout(logSaveTimer);
+  logSaveTimer = setTimeout(() => {
+    logSaveTimer = undefined;
+    void saveLogConfig();
+  }, 200);
+}
+
+logLevelSelect.addEventListener("change", scheduleSaveLogConfig);
+logSizeSelect.addEventListener("change", scheduleSaveLogConfig);
+
+logOpenBtn.addEventListener("click", () => {
+  void invoke("open_log_dir").catch((error) => console.warn("打开日志目录失败", error));
+});
+
+void invoke<LogConfig>("get_log_config")
+  .then(fillLogOptions)
+  .catch((error) => setLogStatus(`读取日志设置失败：${String(error)}`, true));
+
 // 关于面板的版本号取运行时版本（与 tauri.conf.json 同一来源，避免手写值漂移）
 void getVersion()
   .then((version) => {

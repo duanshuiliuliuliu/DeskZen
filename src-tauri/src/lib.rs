@@ -2,6 +2,7 @@ mod characters;
 mod engine;
 mod genbubble;
 mod llm;
+mod logging;
 mod needs;
 mod plan;
 mod playback;
@@ -76,7 +77,7 @@ fn migrate_legacy_data_dir(app: &AppHandle) {
         return;
     }
     if let Err(error) = crate::util::copy_dir_recursive(&legacy, &new_dir) {
-        eprintln!(
+        log::warn!(
             "迁移旧数据目录失败（{} -> {}）：{error}",
             legacy.display(),
             new_dir.display()
@@ -105,6 +106,10 @@ pub fn run() {
         .setup(|app| {
             // 必须在读取 prefs / 角色 / 对话历史之前完成旧数据目录迁移
             migrate_legacy_data_dir(app.handle());
+            // 日志尽早装上（按偏好里的级别与大小）：后面的角色加载、引擎启动都往里记
+            let prefs = prefs::load_prefs(app.handle());
+            logging::install(app.handle(), &prefs.log_level, prefs.log_size_mb);
+            log::info!("DeskZen 启动（日志级别 {}，单文件 {}MB）", logging::level_name(), logging::size_mb());
             let engine = engine::StateEngine::new(app.handle().clone());
             app.manage(engine);
             app.state::<engine::StateEngine>().start();
@@ -173,6 +178,10 @@ pub fn run() {
             get_prefs,
             set_zoom,
             set_ai_bubbles,
+            get_log_config,
+            set_log_config,
+            open_log_dir,
+            log_web,
             get_current_persona_id,
             show_persona_menu,
             capture_screen,
@@ -502,11 +511,59 @@ fn set_ai_bubbles(
 ) -> Result<(), String> {
     engine.set_ai_bubbles(enabled);
     prefs::save_prefs(&app, &engine.prefs())?;
+    log::info!("AI 每日内容（气泡/计划）：{}", if enabled { "开启" } else { "关闭" });
     if enabled {
         genbubble::maybe_spawn_for_state(&app);
         plan::maybe_spawn_for_today(&app);
     }
     Ok(())
+}
+
+/// 日志设置（设置页「日志」面板）：当前值 + 可选项
+#[derive(serde::Serialize)]
+struct LogConfigView {
+    level: String,
+    size_mb: u64,
+    levels: Vec<String>,
+    sizes: Vec<u64>,
+}
+
+#[tauri::command]
+fn get_log_config() -> LogConfigView {
+    LogConfigView {
+        level: logging::level_name().to_string(),
+        size_mb: logging::size_mb(),
+        levels: logging::LEVELS.iter().map(|s| s.to_string()).collect(),
+        sizes: logging::size_options_mb(),
+    }
+}
+
+/// 保存日志设置：落 prefs.json，并立刻对后续日志生效（无需重启）
+#[tauri::command]
+fn set_log_config(
+    app: AppHandle,
+    level: String,
+    size_mb: u64,
+    engine: tauri::State<'_, engine::StateEngine>,
+) -> Result<LogConfigView, String> {
+    let applied_level = logging::set_level(&level);
+    let applied_size = logging::set_max_size_mb(size_mb);
+    engine.set_log_prefs(applied_level, applied_size);
+    prefs::save_prefs(&app, &engine.prefs())?;
+    log::info!("日志设置：级别 {applied_level}，单文件 {applied_size}MB");
+    Ok(get_log_config())
+}
+
+/// 在系统文件管理器里打开日志目录
+#[tauri::command]
+fn open_log_dir(app: AppHandle) -> Result<(), String> {
+    logging::open_dir(&app)
+}
+
+/// 前端日志转发：webview 的 console / 未捕获错误也进同一个文件
+#[tauri::command]
+fn log_web(level: String, message: String) {
+    logging::log_from_web(&level, &message);
 }
 
 /// 前端在事件挂载完成后调用：把启动时的角色/状态广播给各窗口，并排出第一条环境气泡。

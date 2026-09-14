@@ -12,6 +12,7 @@
         <nav class="settings-nav">
           <button class="nav-item active" data-panel="role" type="button">角色</button>
           <button class="nav-item" data-panel="llm" type="button">大模型</button>
+          <button class="nav-item" data-panel="log" type="button">日志</button>
           <button class="nav-item" data-panel="about" type="button">关于</button>
         </nav>
       </aside>
@@ -107,6 +108,25 @@
           </section>
         </section>
 
+        <section id="panel-log" class="settings-panel">
+          <header class="settings-header">
+            <h1>日志</h1>
+            <span id="log-status" class="settings-status"></span>
+          </header>
+
+          <section class="settings-group">
+            <label class="settings-field">
+              <span>日志级别</span>
+              <select id="log-level"></select>
+            </label>
+            <label class="settings-field">
+              <span>单个文件大小</span>
+              <select id="log-size"></select>
+            </label>
+            <button id="log-open" class="btn" type="button">打开日志目录</button>
+          </section>
+        </section>
+
         <section id="panel-about" class="settings-panel">
           <header class="settings-header">
             <h1>关于</h1>
@@ -119,6 +139,7 @@
               <p><span>作者</span>duanshuiliuliuliu</p>
             </div>
           </section>
+
         </section>
 
         <footer class="settings-footer">

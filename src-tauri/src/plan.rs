@@ -265,12 +265,18 @@ pub fn needs_generation(state: &Mutex<PlanState>) -> bool {
 pub fn maybe_spawn_for_today(app: &AppHandle) {
     let engine = app.state::<StateEngine>();
     if !engine.plan_needs_today() {
+        log::debug!("每日计划：当天已有计划或已失败过，跳过");
         return;
     }
     if !engine.prefs().ai_bubbles {
+        log::debug!("每日计划：总开关关闭，跳过");
         return;
     }
     if engine.plan_generating.load(Ordering::Relaxed) {
+        return;
+    }
+    if crate::llm::load_config(app).api_key.is_empty() {
+        log::debug!("每日计划：未配置大模型 Key，跳过");
         return;
     }
     if engine
@@ -301,10 +307,20 @@ pub fn maybe_spawn_for_today(app: &AppHandle) {
         match generate(&cfg, &persona, &recent).await {
             // 生成期间换了角色 → 丢弃（这份计划属于旧角色）
             Some(plan) if engine.persona_id() == persona_id => {
+                log::info!(
+                    "每日计划：{persona_id} 主题「{}」，焦点 {:?} / 回避 {:?}，开口说「{}」",
+                    plan.theme,
+                    plan.focus,
+                    plan.avoid,
+                    plan.say
+                );
                 engine.apply_plan(&persona_id, plan)
             }
             Some(_) => {}
-            None => engine.record_plan_failure(&persona_id),
+            None => {
+                log::warn!("每日计划：{persona_id} 生成失败，当天按默认编排");
+                engine.record_plan_failure(&persona_id)
+            }
         }
     });
 }

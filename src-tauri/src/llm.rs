@@ -194,19 +194,34 @@ pub async fn chat_completion_stream(
         max_tokens: cfg.max_tokens,
         stream: true,
     };
+    let started = std::time::Instant::now();
+    // 只记请求规模，不记内容（聊天/台词不进日志）
+    log::debug!(
+        "调用大模型：model={model} 消息 {} 条（{} 字），max_tokens={}",
+        messages.len(),
+        messages
+            .iter()
+            .map(|m| m.content.as_text().chars().count())
+            .sum::<usize>(),
+        cfg.max_tokens
+    );
     let mut resp = client
         .post(&url)
         .bearer_auth(&cfg.api_key)
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("请求 LLM 接口失败：{e}"))?;
+        .map_err(|e| {
+            log::warn!("大模型请求失败（{url}）：{e}");
+            format!("请求 LLM 接口失败：{e}")
+        })?;
     let status = resp.status();
     if !status.is_success() {
         let text = resp
             .text()
             .await
             .map_err(|e| format!("读取响应失败：{e}"))?;
+        log::warn!("大模型返回错误：{status} {}", truncate(&text, 200));
         return Err(format!(
             "LLM 接口返回错误（{status}）：{}",
             truncate(&text, 300)
@@ -235,6 +250,11 @@ pub async fn chat_completion_stream(
             full.push_str(&delta);
         }
     }
+    log::debug!(
+        "大模型返回：{} 字，耗时 {}ms",
+        full.chars().count(),
+        started.elapsed().as_millis()
+    );
     Ok(full)
 }
 

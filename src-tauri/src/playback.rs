@@ -398,6 +398,15 @@ impl Playback {
             .copied()
             .filter(|chain| self.chain_allowed(chain, now))
             .collect();
+        // 被 when 约束挡下的链单独记一笔：排查"某条链一直不出现"时一眼能看出来
+        if eligible.len() != chains.len() {
+            let blocked: Vec<&str> = chains
+                .iter()
+                .filter(|chain| !eligible.iter().any(|c| c.id == chain.id))
+                .map(|chain| chain.id.as_str())
+                .collect();
+            log::debug!("抽链 {state}：{} 条链被 when 约束挡下（{}）", blocked.len(), blocked.join("、"));
+        }
         let chains = if eligible.is_empty() { chains } else { eligible };
         if self.bags.get(state).is_none_or(|bag| bag.is_empty()) {
             let mut pool: Vec<String> = Vec::new();
@@ -411,6 +420,13 @@ impl Playback {
                 let count = (chain.weight.max(1) as f64 * factor)
                     .round()
                     .clamp(1.0, 100.0) as u32;
+                if (factor - 1.0).abs() > f64::EPSILON {
+                    log::debug!(
+                        "抽链 {state}：{} 权重 {} × 偏置 {factor:.2} → {count} 份",
+                        chain.id,
+                        chain.weight
+                    );
+                }
                 for _ in 0..count {
                     pool.push(chain.id.clone());
                 }
@@ -427,11 +443,13 @@ impl Playback {
             .position(|id| Some(id) != last.as_ref())
             .unwrap_or(0);
         let id = bag.remove(index)?;
+        let remaining = bag.len();
         // 袋里残留的失效链 id 直接丢弃后重挑
         let picked = match chains.iter().find(|chain| chain.id == id) {
             Some(chain) => *chain,
             None => return self.pick_chain(persona, state, now),
         };
+        log::debug!("抽链 {state}：选中 {}（袋里还剩 {remaining} 条）", picked.id);
         self.last_chain.insert(state.to_string(), id);
         Some(picked)
     }
@@ -498,6 +516,15 @@ impl Playback {
         let frames = clip.frames.max(1);
         let frame_ms = clip.frame_ms.max(1);
         let duration_ms = beat.duration_ms;
+        log::debug!(
+            "播放 {state} {} 第 {} 拍：{} ×{}（{:.1}s，速度 {:.2}）",
+            run.scene_id,
+            index,
+            beat.clip,
+            beat.loops,
+            duration_ms as f64 / 1000.0,
+            beat.speed
+        );
         self.current = Some(Current {
             state: state.to_string(),
             run: run.clone(),

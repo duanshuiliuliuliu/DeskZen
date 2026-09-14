@@ -40,7 +40,7 @@ const init = await evaluate(
 );
 console.log("初始:", JSON.stringify(init));
 if (
-  init.nav.join(",") !== "角色,大模型,关于" ||
+  init.nav.join(",") !== "角色,大模型,日志,关于" ||
   init.active !== "role" ||
   !init.hasSidebar ||
   init.panels !== 3

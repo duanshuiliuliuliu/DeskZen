@@ -323,8 +323,18 @@ pub async fn generate_for_current_state(app: &AppHandle) {
         };
         let history = engine.gen_history();
         match generate_lines(&llm_cfg, &persona, &clip_id, &clip, &history).await {
-            Some(texts) => engine.record_gen_bubble(&persona_id, &clip_id, &texts),
-            None => engine.record_gen_failure(&persona_id, &clip_id),
+            Some(texts) => {
+                log::info!(
+                    "每日气泡：{persona_id}/{clip_id} 生成 {} 条（示例：{}）",
+                    texts.len(),
+                    texts.first().map(String::as_str).unwrap_or("-")
+                );
+                engine.record_gen_bubble(&persona_id, &clip_id, &texts)
+            }
+            None => {
+                log::warn!("每日气泡：{persona_id}/{clip_id} 生成失败，当天回退动作自带文案");
+                engine.record_gen_failure(&persona_id, &clip_id)
+            }
         }
     }
 }
@@ -337,14 +347,17 @@ pub fn maybe_spawn_for_state(app: &AppHandle) {
         return;
     }
     if !engine.prefs().ai_bubbles {
+        log::debug!("每日气泡：总开关关闭，跳过");
         return;
     }
     let state = engine.current_state();
     if !engine.gen_needs_refresh(&state) {
+        log::debug!("每日气泡：状态 {state} 当日文案已齐，跳过");
         return;
     }
     // API Key 判断放最后：load_config 要读一次磁盘
     if crate::llm::load_config(app).api_key.is_empty() {
+        log::debug!("每日气泡：未配置大模型 Key，跳过");
         return;
     }
     if engine

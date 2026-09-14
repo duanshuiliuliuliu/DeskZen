@@ -2,6 +2,10 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./styles.css";
+import { installLogBridge } from "./logbridge";
+
+// 前端日志并进后端日志文件（越早越好，启动期的问题也要能查）
+installLogBridge();
 
 interface StateConfig {
   label: string;

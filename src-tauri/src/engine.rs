@@ -680,11 +680,14 @@ impl StateEngine {
                                     personas.insert(cfg.id.clone(), Arc::new(cfg));
                                 }
                                 Err(reason) => {
-                                    eprintln!("跳过角色目录 {}：{reason}", entry.path().display())
+                                    log::warn!(
+                                        "跳过角色目录 {}：{reason}",
+                                        entry.path().display()
+                                    )
                                 }
                             }
                         }
-                        Err(error) => eprintln!(
+                        Err(error) => log::warn!(
                             "跳过角色目录 {}：persona.json 解析失败（{error}）",
                             entry.path().display()
                         ),
@@ -702,6 +705,13 @@ impl StateEngine {
         if let Some((mw, mh)) = work_area_content_limit(&app) {
             display = fit_display_size_proportional(display.0, display.1, mw, mh);
         }
+        log::info!(
+            "角色加载完成：共 {} 个（默认 {}），显示尺寸 {}×{}",
+            personas.len(),
+            persona.id,
+            display.0,
+            display.1
+        );
         Self {
             app,
             personas: Arc::new(Mutex::new(personas)),
@@ -851,6 +861,13 @@ impl StateEngine {
         crate::util::lock(&self.prefs).ai_bubbles = enabled;
     }
 
+    /// 设置页日志设置：写内存 prefs（落盘由调用方 save_prefs 完成，生效由 logging 那边负责）
+    pub(crate) fn set_log_prefs(&self, level: &str, size_mb: u64) {
+        let mut prefs = crate::util::lock(&self.prefs);
+        prefs.log_level = level.to_string();
+        prefs.log_size_mb = size_mb;
+    }
+
     // ---- 环境气泡：随机自言自语（与状态切换解耦，机制见 README「主动交互与防打扰机制」）----
 
     /// 记录一次用户聊天互动（chat_send 入口调用）：随后数分钟内抑制环境气泡
@@ -869,6 +886,7 @@ impl StateEngine {
             .steps_for(&state, kind)
             .map(<[SceneStepConfig]>::to_vec)
         else {
+            log::debug!("被注意到（{kind}）：状态 {state} 没配反应，忽略");
             return;
         };
         // 被人搭理：社交欲与无聊一起下降（需求层）
@@ -881,6 +899,7 @@ impl StateEngine {
                     .last_any
                     .is_some_and(|t| (now - t).num_seconds() < persona.acknowledge.global_cooldown_s)
             {
+                log::debug!("被注意到（{kind}）：被全局冷却挡下（状态 {state}）");
                 return;
             }
             if seen
@@ -888,6 +907,7 @@ impl StateEngine {
                 .get(kind)
                 .is_some_and(|t| (now - *t).num_seconds() < persona.acknowledge.cooldown_secs(kind))
             {
+                log::debug!("被注意到（{kind}）：被同类冷却挡下（状态 {state}）");
                 return;
             }
             seen.last_any = Some(now);
@@ -895,6 +915,11 @@ impl StateEngine {
         }
         let event = crate::util::lock(&self.playback).acknowledge(&persona, &state, &steps, now);
         if let Some(event) = event {
+            log::info!(
+                "被注意到（{kind}）：状态 {state} → 反应 {}×{}",
+                event.clip,
+                event.loops
+            );
             let _ = self.app.emit("playback", event);
             // 反应实例太短不配台词；回到原活动时会重新排说话
             self.reschedule_speech(now);
@@ -1103,6 +1128,7 @@ impl StateEngine {
         if last.as_deref() != Some(chain_id) {
             *last = Some(chain_id.to_string());
             crate::util::lock(&self.needs).on_new_chain();
+            log::debug!("换链：{chain_id}");
         }
     }
 
@@ -1208,6 +1234,7 @@ impl StateEngine {
         }
         crate::util::lock(&self.ambient).speak_at = None;
         if self.bubble_suppressed(&now) {
+            log::debug!("气泡：到点了但在抑制窗口内（窗口不可见/刚聊过），这轮不说");
             return;
         }
         let remaining_ms = crate::util::lock(&self.playback)
@@ -1215,9 +1242,11 @@ impl StateEngine {
             .unwrap_or(BUBBLE_DEFAULT_SHOW_MS);
         let show_ms = BUBBLE_DEFAULT_SHOW_MS.min(remaining_ms.max(0)) as u64;
         if show_ms == 0 {
+            log::debug!("气泡：当前动作没剩时间了，这轮不说");
             return;
         }
         let Some(text) = self.next_ambient_text() else {
+            log::debug!("气泡：当前动作没有可用文案，这轮不说");
             return;
         };
         let persona = self.persona();
@@ -1230,6 +1259,7 @@ impl StateEngine {
             ambient.last_shown_at = Some(now);
             ambient.earliest_at = next_earliest;
         }
+        log::info!("气泡：{text}（展示 {show_ms}ms）");
         let _ = self.app.emit("bubble", BubbleEvent { text, show_ms });
     }
 
@@ -1378,6 +1408,7 @@ impl StateEngine {
             *crate::util::lock(&self.last_state) = Some(state.clone());
             *crate::util::lock(&self.display_size) = display;
         }
+        log::info!("切换角色：{previous_id} → {id}（当前状态 {state}）");
         // 需求/情绪按角色独立：先把旧角色的存档写回，再载入新角色（各自有各自的体力）
         {
             let snapshot = crate::util::lock(&self.needs).clone();
@@ -1442,6 +1473,7 @@ impl StateEngine {
         // 记录“该状态已广播过”，否则节拍线程醒来读到 last_state=None 会误判为状态变化，
         // 再次 emit state-changed，导致开局重复广播。
         *crate::util::lock(&self.last_state) = Some(state.clone());
+        log::info!("启动状态：{state}（角色 {}）", persona.id);
         // 带 zoomed display 给前端，前端 applyPersona 不因广播而回到基准尺寸。
         let _ = self.app.emit("persona-changed", self.persona_view());
         let _ = self.app.emit(
@@ -1532,9 +1564,10 @@ impl StateEngine {
                 n.updated_unix = now.timestamp();
                 n.clone()
             };
-            let state = {
+            let (state, state_reason) = {
                 let p = crate::util::lock(&persona);
-                runtime_state(&p, &automatic_state(&p, now_minutes(&now), &needs_now))
+                let (auto, why) = automatic_state_with_reason(&p, now_minutes(&now), &needs_now);
+                (runtime_state(&p, &auto), why)
             };
             // 需求状态每 5 分钟落一次盘（保证重启后有连续感，又不至于频繁写盘）
             if now.timestamp() - needs_saved_at >= 300 {
@@ -1546,7 +1579,9 @@ impl StateEngine {
             let mut last = crate::util::lock(&last_state);
             let mut state_changed = false;
             if last.as_deref() != Some(state.as_str()) {
+                let previous = last.clone().unwrap_or_else(|| "-".to_string());
                 *last = Some(state.clone());
+                log::info!("状态切换：{previous} → {state}（{state_reason}）");
                 let _ = app.emit(
                     "state-changed",
                     StateChanged {
@@ -2092,26 +2127,38 @@ pub(crate) fn resolve_bubble_pool(
 
 /// 自动状态：time 时段优先，否则循环，最后兜底
 fn automatic_state(persona: &PersonaConfig, mins: u32, needs: &crate::needs::NeedsState) -> String {
+    automatic_state_with_reason(persona, mins, needs).0
+}
+
+/// 自动状态 + **为什么**（进日志用，排查"凭什么是这个状态"）
+fn automatic_state_with_reason(
+    persona: &PersonaConfig,
+    mins: u32,
+    needs: &crate::needs::NeedsState,
+) -> (String, &'static str) {
     // 1) 硬时段最高优先（作者写死的作息，比如夜间必须睡觉）
     if let Some(slot) = find_active_slot(&persona.schedule, mins) {
-        return slot.state.clone();
+        return (slot.state.clone(), "固定时段");
     }
     // 2) 需求拉取：饿了去吃饭、累了去休息/睡觉（拉去的状态必须真有素材，否则忽略）
     if let Some(pulled) = persona.needs.pull_state(needs) {
         if state_has_material(persona, &pulled) {
-            return pulled.to_string();
+            return (pulled.to_string(), "需求拉取");
         }
     }
     // 3) 按日程循环
     if let Some(s) = loop_state_at(&persona.schedule, mins) {
-        return s;
+        return (s, "日程循环");
     }
     // 兜底：按日程顺序取第一个状态；
     // 仅当角色完全没有定义状态时才使用硬编码值。
-    ordered_state_keys(persona)
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "Awake".into())
+    (
+        ordered_state_keys(persona)
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "Awake".into()),
+        "兜底",
+    )
 }
 
 /// 计算角色的有效显示尺寸：优先用配置文件；为 0（未配置）时按第一个可读动作帧条的
