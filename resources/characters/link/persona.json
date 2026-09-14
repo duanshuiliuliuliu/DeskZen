@@ -3,7 +3,9 @@
   "name": "林克",
   "display_w": 116,
   "display_h": 125,
-  "system_prompt": {"definition": "你是塞尔达传说荒野之息中的林克，住在用户的桌面上", "reply_style": "回复简短，符合塞尔达传说荒野之息中的风格；不要长篇大论，不要使用列表和 Markdown；永远不要提及自己是 AI 或程序"},
+  "system_prompt": {
+    "definition": "你是塞尔达传说荒野之息中的林克，住在用户的桌面上",
+    "reply_style": "回复简短，符合塞尔达传说荒野之息中的风格；不要长篇大论，不要使用列表和 Markdown；永远不要提及自己是 AI 或程序"},
   "states": {
     "routine": {
       "label": "日常",
@@ -16,16 +18,29 @@
             {"steps": [{"clip": "observe", "seconds": [30, 50]}]},
             {
               "label": "巡视一圈",
-              "steps": [{"clip": "walk", "seconds": [18, 30]}, {"clip": "observe", "chance": 0.7}, {"clip": "walk", "seconds": [10, 18]}]
+              "steps": [
+                {"clip": "walk", "seconds": [18, 30]},
+                {"clip": "observe", "chance": 0.7},
+                {"clip": "walk", "seconds": [10, 18]}
+              ]
             },
             {
               "label": "发现奇怪叶子",
-              "steps": [{"clip": "korok_leaf", "seconds": [20, 32]}, {"clip": "observe", "chance": 0.5}, {"clip": "korok_leaf", "seconds": [10, 16]}]
+              "steps": [
+                {"clip": "korok_leaf", "seconds": [20, 32]},
+                {"clip": "observe", "chance": 0.5},
+                {"clip": "korok_leaf", "seconds": [10, 16]}
+              ]
             }
           ],
           "tags": ["explore"]
         },
-        {"id": "notice_viewer", "weight": 2, "label": "打招呼", "steps": [{"clip": "greet_wave", "seconds": 30}], "tags": ["social"]}
+        {
+          "id": "notice_viewer",
+          "weight": 2,
+          "label": "打招呼",
+          "steps": [{"clip": "greet_wave", "seconds": 30}],
+          "tags": ["social"]}
       ]
     },
     "focus": {
@@ -43,12 +58,20 @@
                 {"clip": "polish_shield", "seconds": [12, 20]}
               ]
             },
-            {"steps": [{"clip": "sheikah_slate", "seconds": 45}]}
+            {
+              "steps": [{"clip": "sheikah_slate", "seconds": 45}]
+            }
           ],
           "tags": ["calm"],
           "when": {"cooldown_min": 45}
         },
-        {"id": "wrap_up", "weight": 1, "label": "完成一轮专注", "steps": [{"clip": "task_cheer", "seconds": 30}], "tags": ["social"]}
+        {
+          "id": "wrap_up",
+          "weight": 1,
+          "label": "完成一轮专注",
+          "steps": [{"clip": "task_cheer", "seconds": 30}],
+          "tags": ["social"]
+        }
       ]
     },
     "active": {
@@ -64,7 +87,13 @@
           ],
           "tags": ["explore"]
         },
-        {"id": "ambush", "weight": 3, "label": "遭遇战斗", "steps": [{"clip": "fight", "seconds": 45}], "tags": ["explore"]},
+        {
+          "id": "ambush",
+          "weight": 3,
+          "label": "遭遇战斗",
+          "steps": [{"clip": "fight", "seconds": 45}],
+          "tags": ["explore"]
+        },
         {
           "id": "battle_aftermath",
           "weight": 3,
@@ -95,12 +124,28 @@
     "eat": {
       "label": "吃苹果",
       "talkativeness": "chatty",
-      "chains": [{"id": "meal", "weight": 1, "label": "吃海拉鲁苹果", "steps": [{"clip": "eat_apple", "seconds": 45}], "tags": ["rest"]}]
+      "chains": [
+        {
+          "id": "meal",
+          "weight": 1,
+          "label": "吃海拉鲁苹果",
+          "steps": [{"clip": "eat_apple", "seconds": 45}],
+          "tags": ["rest"]
+        }
+      ]
     },
     "sleep": {
       "label": "睡觉",
       "talkativeness": "mute",
-      "chains": [{"id": "sleep", "weight": 1, "label": "躺下睡一会儿", "steps": [{"clip": "lie_sleep", "seconds": 60}], "tags": ["rest"]}]
+      "chains": [
+        {
+          "id": "sleep",
+          "weight": 1,
+          "label": "躺下睡一会儿",
+          "steps": [{"clip": "lie_sleep", "seconds": 60}],
+          "tags": ["rest"]
+        }
+      ]
     }
   },
   "schedule": {
@@ -121,7 +166,13 @@
       "frame_ms": 83,
       "bubbles": ["周围很安静。", "有什么动静吗？", "先看看情况。"]
     },
-    "stretch": {"label": "伸懒腰", "description": "你正抬起手臂伸懒腰，肩膀有点酸，刚放松下来", "frames": 60, "frame_ms": 83, "bubbles": ["伸个懒腰。", "肩膀有点酸。", "活动一下。"]},
+    "stretch": {
+      "label": "伸懒腰",
+      "description": "你正抬起手臂伸懒腰，肩膀有点酸，刚放松下来",
+      "frames": 60,
+      "frame_ms": 83,
+      "bubbles": ["伸个懒腰。", "肩膀有点酸。", "活动一下。"]
+    },
     "sheikah_slate": {
       "label": "查看希卡之石",
       "description": "你正低头查看希卡之石上的地图，专注地确认路线",
@@ -129,9 +180,27 @@
       "frame_ms": 83,
       "bubbles": ["看看地图。", "希卡之石有反应。", "路线记下了。"]
     },
-    "eat_apple": {"label": "吃苹果", "description": "你正咬着手里的海拉鲁苹果，吃得很香", "frames": 68, "frame_ms": 83, "bubbles": ["这个苹果很甜。", "补充点体力。", "再来一口。"]},
-    "standing_doze": {"label": "站着打盹", "description": "你站着打起了瞌睡，眼睛半闭，说话含糊", "frames": 58, "frame_ms": 83, "bubbles": ["有点困……", "就眯一会儿。", "差点睡着了。"]},
-    "polish_shield": {"label": "保养盾牌", "description": "你正用布擦拭盾牌，认真做装备保养", "frames": 73, "frame_ms": 83, "bubbles": ["盾牌得擦干净。", "装备要保养。", "再检查一遍。"]},
+    "eat_apple": {
+      "label": "吃苹果",
+      "description": "你正咬着手里的海拉鲁苹果，吃得很香",
+      "frames": 68,
+      "frame_ms": 83,
+      "bubbles": ["这个苹果很甜。", "补充点体力。", "再来一口。"]
+    },
+    "standing_doze": {
+      "label": "站着打盹",
+      "description": "你站着打起了瞌睡，眼睛半闭，说话含糊",
+      "frames": 58,
+      "frame_ms": 83,
+      "bubbles": ["有点困……", "就眯一会儿。", "差点睡着了。"]
+    },
+    "polish_shield": {
+      "label": "保养盾牌",
+      "description": "你正用布擦拭盾牌，认真做装备保养",
+      "frames": 73,
+      "frame_ms": 83,
+      "bubbles": ["盾牌得擦干净。", "装备要保养。", "再检查一遍。"]
+    },
     "korok_leaf": {
       "label": "寻找克洛格",
       "description": "你正盯着一片轻轻晃动的叶子，怀疑附近藏着克洛格",
@@ -139,18 +208,74 @@
       "frame_ms": 83,
       "bubbles": ["那片叶子在动。", "附近有克洛格？", "雅哈哈？"]
     },
-    "zonai_hand": {"label": "左纳乌之力", "description": "你正抬起左纳乌手臂，感受掌心流动的力量", "frames": 69, "frame_ms": 83, "bubbles": ["这股力量很特别。", "手臂在发光。", "再试一次。"]},
-    "task_cheer": {"label": "庆祝一下", "description": "你刚完成一件事，握起拳头小小地庆祝了一下", "frames": 60, "frame_ms": 83, "bubbles": ["有进展了。", "这样就行。", "搞定。"]},
-    "greet_wave": {"label": "挥手问候", "description": "你正对着屏幕前的人挥手打招呼，态度友好", "frames": 61, "frame_ms": 83, "bubbles": ["你好。", "在忙吗？", "我在这儿。"]},
-    "walk": {"label": "走动", "description": "你正在桌面上来回走动，脚步轻快，偶尔停下来看看", "frames": 16, "frame_ms": 150, "bubbles": ["走走看。", "巡逻一圈。", "去那边看看。"]},
-    "ride_motorcycle": {"label": "骑摩托", "description": "你正骑着摩托车出发兜风，风很大，心情不错", "frames": 18, "frame_ms": 150, "bubbles": ["出发！", "兜一圈。", "风不错。"]},
-    "sit_idle": {"label": "坐着发呆", "description": "你正坐着发呆，什么也不想，安安静静", "frames": 18, "frame_ms": 150, "bubbles": ["坐一会儿。", "什么也不想。", "安静一下。"]},
-    "lie_sleep": {"label": "躺下睡觉", "description": "你正躺着睡觉，只会嘟囔几句梦话", "frames": 15, "frame_ms": 150, "bubbles": ["Zzz...", "睡一会儿……", "别吵……"]},
-    "fight": {"label": "挥剑战斗", "description": "你正挥剑迎战，动作果断，注意力高度集中", "frames": 17, "frame_ms": 150, "bubbles": ["来吧！", "别过来。", "喝！"]}
+    "zonai_hand": {
+      "label": "左纳乌之力",
+      "description": "你正抬起左纳乌手臂，感受掌心流动的力量",
+      "frames": 69,
+      "frame_ms": 83,
+      "bubbles": ["这股力量很特别。", "手臂在发光。", "再试一次。"]
+    },
+    "task_cheer": {
+      "label": "庆祝一下",
+      "description": "你刚完成一件事，握起拳头小小地庆祝了一下",
+      "frames": 60,
+      "frame_ms": 83,
+      "bubbles": ["有进展了。", "这样就行。", "搞定。"]
+    },
+    "greet_wave": {
+      "label": "挥手问候",
+      "description": "你正对着屏幕前的人挥手打招呼，态度友好",
+      "frames": 61,
+      "frame_ms": 83,
+      "bubbles": ["你好。", "在忙吗？", "我在这儿。"]
+    },
+    "walk": {
+      "label": "走动",
+      "description": "你正在桌面上来回走动，脚步轻快，偶尔停下来看看",
+      "frames": 16,
+      "frame_ms": 150,
+      "bubbles": ["走走看。", "巡逻一圈。", "去那边看看。"]
+    },
+    "ride_motorcycle": {
+      "label": "骑摩托",
+      "description": "你正骑着摩托车出发兜风，风很大，心情不错",
+      "frames": 18,
+      "frame_ms": 150,
+      "bubbles": ["出发！", "兜一圈。", "风不错。"]
+    },
+    "sit_idle": {
+      "label": "坐着发呆",
+      "description": "你正坐着发呆，什么也不想，安安静静",
+      "frames": 18,
+      "frame_ms": 150,
+      "bubbles": ["坐一会儿。", "什么也不想。", "安静一下。"]
+    },
+    "lie_sleep": {
+      "label": "躺下睡觉",
+      "description": "你正躺着睡觉，只会嘟囔几句梦话",
+      "frames": 15,
+      "frame_ms": 150,
+      "bubbles": ["Zzz...", "睡一会儿……", "别吵……"]
+    },
+    "fight": {
+      "label": "挥剑战斗",
+      "description": "你正挥剑迎战，动作果断，注意力高度集中",
+      "frames": 17,
+      "frame_ms": 150,
+      "bubbles": ["来吧！", "别过来。", "喝！"]
+    }
   },
   "acknowledge": {
     "default": [{"clip": "greet_wave", "seconds": 3}],
-    "by_kind": {"hover": [{"clip": "observe", "seconds": 3}], "talk": [{"clip": "greet_wave", "seconds": 3}, {"clip": "observe", "seconds": 2}]},
-    "by_state": {"sleep": [{"clip": "lie_sleep", "seconds": 4}]}
+    "by_kind": {
+      "hover": [{"clip": "observe", "seconds": 3}],
+      "talk": [
+        {"clip": "greet_wave", "seconds": 3},
+        {"clip": "observe", "seconds": 2}
+      ]
+    },
+    "by_state": {
+      "sleep": [{"clip": "lie_sleep", "seconds": 4}]
+    }
   }
 }
