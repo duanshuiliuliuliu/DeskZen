@@ -49,6 +49,9 @@ pub struct PersonaConfig {
     /// 反应步骤、触发来源差异、限频参数都在这里配（详见 [`AcknowledgeConfig`]）。
     #[serde(default, skip_serializing_if = "AcknowledgeConfig::is_empty")]
     pub acknowledge: AcknowledgeConfig,
+    /// 内部需求/情绪：演化速率、把角色拉去某个状态的阈值、按标签调制链权重
+    #[serde(default, skip_serializing_if = "crate::needs::NeedsConfig::is_default")]
+    pub needs: crate::needs::NeedsConfig,
     pub schedule: ScheduleConfig,
 }
 
@@ -71,6 +74,7 @@ impl PersonaConfig {
                     label: scene.label.clone(),
                     weight: scene.weight.max(1),
                     segments: vec![scene.id.clone()],
+                    tags: vec![],
                     when: None,
                 })
                 .collect();
@@ -251,6 +255,9 @@ pub struct ChainConfig {
     pub weight: u32,
     #[serde(default)]
     pub segments: Vec<String>,
+    /// 标签：需求偏置（`needs.chain_bias`）按标签匹配，例如 "rest" / "social" / "explore"
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     /// 触发约束：权重只表达"偏好"，因果与节制交给它
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<ChainWhen>,
@@ -603,6 +610,10 @@ pub struct StateEngine {
     playback: Arc<Mutex<crate::playback::Playback>>,
     /// 用户关注事件（凑近/点击/搭话）的限频状态
     seen: Arc<Mutex<SeenState>>,
+    /// 内部需求/情绪（当前角色的）：随时间和状态演化，重启后按离线时长补算
+    needs: Arc<Mutex<crate::needs::NeedsState>>,
+    /// 最近一次下发的链 id（用于判断"换了一条新链"，给无聊降温）
+    last_chain: Arc<Mutex<Option<String>>>,
     /// 每日气泡生成任务是否在跑（防止重复起任务）
     pub(crate) generating: Arc<AtomicBool>,
     /// 后台节拍线程的唤醒信号：switch_persona / next_state 修改配置后 notify，
@@ -651,6 +662,7 @@ impl StateEngine {
         }
         let persona = personas.get("link").cloned().expect("缺少默认角色 link");
         let prefs = crate::prefs::load_prefs(&app);
+        let needs = crate::needs::load(&app, "link", &persona.needs);
         let gen_cache = crate::genbubble::load(&app, "link");
         let mut display = effective_display_size_zoomed(&persona, prefs.zoom);
         // 启动即按显示器工作区等比适配，避免离谱 display / 高 zoom 时窗口出屏（取不到工作区则不钳制）。
@@ -671,6 +683,8 @@ impl StateEngine {
             ambient: Arc::new(Mutex::new(AmbientBubbles::default())),
             playback: Arc::new(Mutex::new(crate::playback::Playback::default())),
             seen: Arc::new(Mutex::new(SeenState::default())),
+            needs: Arc::new(Mutex::new(needs)),
+            last_chain: Arc::new(Mutex::new(None)),
             generating: Arc::new(AtomicBool::new(false)),
             prefs: Arc::new(Mutex::new(prefs)),
             wake_lock: Arc::new(Mutex::new(())),
@@ -698,7 +712,9 @@ impl StateEngine {
                 }
             }
         }
-        runtime_state(persona, &effective_state(&guard, persona, &now))
+        // 需求快照在锁外取，避免与 manual_state 形成嵌套锁
+        let needs = crate::util::lock(&self.needs).clone();
+        runtime_state(persona, &effective_state(&guard, persona, &now, &needs))
     }
 
     /// 当前角色配置（克隆）
@@ -826,6 +842,8 @@ impl StateEngine {
         else {
             return;
         };
+        // 被人搭理：社交欲与无聊一起下降（需求层）
+        crate::util::lock(&self.needs).on_seen();
         {
             let mut seen = crate::util::lock(&self.seen);
             let pointer = AcknowledgeConfig::is_pointer_kind(kind);
@@ -955,8 +973,10 @@ impl StateEngine {
     /// 状态切换、切换角色、启动广播都会调用；前端只按事件渲染，不再自己挑场景。
     fn reset_playback(&self, state: &str, now: chrono::DateTime<chrono::Local>) {
         let persona = self.persona();
+        self.sync_needs_to_playback();
         let event = crate::util::lock(&self.playback).reset(&persona, state, now);
         if let Some(event) = event {
+            self.note_chain_change(&event.chain_id);
             let _ = self.app.emit("playback", event);
         }
         // 新动作实例 → 重新安排这个实例内要不要说话、什么时候说。
@@ -973,11 +993,28 @@ impl StateEngine {
             return;
         }
         let persona = self.persona();
+        self.sync_needs_to_playback();
         let event = crate::util::lock(&self.playback).advance(&persona, now);
         if let Some(event) = event {
+            self.note_chain_change(&event.chain_id);
             let _ = self.app.emit("playback", event);
         }
         self.reschedule_speech(now);
+    }
+
+    /// 把当前需求快照交给播放层（`chain_bias` 调制权重用）
+    fn sync_needs_to_playback(&self) {
+        let needs = crate::util::lock(&self.needs).clone();
+        crate::util::lock(&self.playback).set_needs(needs);
+    }
+
+    /// 换了一条新链：新鲜感让"无聊"下降
+    fn note_chain_change(&self, chain_id: &str) {
+        let mut last = crate::util::lock(&self.last_chain);
+        if last.as_deref() != Some(chain_id) {
+            *last = Some(chain_id.to_string());
+            crate::util::lock(&self.needs).on_new_chain();
+        }
     }
 
     /// 当前正在播放的动作 id（气泡文案按它取池）
@@ -1227,6 +1264,8 @@ impl StateEngine {
 
     /// 运行时切换角色：更新配置与作息表，并广播事件让前端重新渲染
     pub fn switch_persona(&self, app: &AppHandle, id: &str) -> Result<(), String> {
+        // 先记下"切换前的角色 id"：下面会覆盖 self.persona，晚了就读到新角色了
+        let previous_id = crate::util::lock(&self.persona).id.clone();
         let persona = crate::util::lock(&self.personas)
             .get(id)
             .cloned()
@@ -1247,6 +1286,13 @@ impl StateEngine {
             *crate::util::lock(&self.manual_state) = None;
             *crate::util::lock(&self.display_size) = display;
         }
+        // 需求/情绪按角色独立：先把旧角色的存档写回，再载入新角色（各自有各自的体力）
+        {
+            let snapshot = crate::util::lock(&self.needs).clone();
+            let _ = crate::needs::save(&self.app, &previous_id, &snapshot);
+            *crate::util::lock(&self.needs) = crate::needs::load(&self.app, id, &persona.needs);
+        }
+        *crate::util::lock(&self.last_chain) = None;
         // 气泡缓存整体切到新角色（内存换绑 + 磁盘加载），并视条件补跑当日生成
         {
             let cache = crate::genbubble::load(&self.app, id);
@@ -1318,6 +1364,8 @@ impl StateEngine {
         let manual_state = Arc::clone(&self.manual_state);
         let wake_lock = Arc::clone(&self.wake_lock);
         let wake_cond = Arc::clone(&self.wake_cond);
+        let needs = Arc::clone(&self.needs);
+        let mut needs_saved_at = chrono::Local::now().timestamp();
         thread::spawn(move || loop {
             // 先算出下一次状态切换时刻，再用带超时的 Condvar 等待（+1s 缓冲，避免边界竞态）。
             // 单次睡眠不超过 15 分钟：防止时钟漂移 / DST 导致久睡不醒，醒来重算即可。
@@ -1364,6 +1412,23 @@ impl StateEngine {
             drop(guard);
 
             let now = chrono::Local::now();
+            // 先按"上一次所处状态"推进需求（tick 间隔可能是几秒，也可能是 15 分钟）
+            let needs_now = {
+                let prev_state = crate::util::lock(&last_state)
+                    .clone()
+                    .unwrap_or_else(|| FALLBACK_STATE.to_string());
+                // 锁序：persona → needs（与其它路径一致）
+                let p = crate::util::lock(&persona);
+                let mut n = crate::util::lock(&needs);
+                let seconds = if n.updated_unix > 0 {
+                    (now.timestamp() - n.updated_unix).clamp(0, 3600)
+                } else {
+                    0
+                };
+                n.advance(&prev_state, seconds as f64 / 3600.0, &p.needs);
+                n.updated_unix = now.timestamp();
+                n.clone()
+            };
             let state = {
                 let p = crate::util::lock(&persona);
                 let mut m = crate::util::lock(&manual_state);
@@ -1374,8 +1439,15 @@ impl StateEngine {
                         }
                     }
                 }
-                runtime_state(&p, &effective_state(&m, &p, &now))
+                runtime_state(&p, &effective_state(&m, &p, &now, &needs_now))
             };
+            // 需求状态每 5 分钟落一次盘（保证重启后有连续感，又不至于频繁写盘）
+            if now.timestamp() - needs_saved_at >= 300 {
+                needs_saved_at = now.timestamp();
+                let snapshot = crate::util::lock(&needs).clone();
+                let persona_id = crate::util::lock(&persona).id.clone();
+                let _ = crate::needs::save(&app, &persona_id, &snapshot);
+            }
             let mut last = crate::util::lock(&last_state);
             let mut state_changed = false;
             if last.as_deref() != Some(state.as_str()) {
@@ -1561,16 +1633,17 @@ fn effective_state(
     manual: &Option<ManualOverride>,
     persona: &PersonaConfig,
     now: &chrono::DateTime<chrono::Local>,
+    needs: &crate::needs::NeedsState,
 ) -> String {
     if let Some(ov) = manual {
         if let Some(exp) = ov.expire_at {
             if *now >= exp {
-                return automatic_state(persona, now_minutes(now));
+                return automatic_state(persona, now_minutes(now), needs);
             }
         }
         return ov.state.clone();
     }
-    automatic_state(persona, now_minutes(now))
+    automatic_state(persona, now_minutes(now), needs)
 }
 
 /// 查找当前生效的 time 时段（支持跨午夜）
@@ -1856,6 +1929,79 @@ pub(crate) fn validate_persona_structure(persona: &PersonaConfig) -> Result<(), 
     {
         return Err("acknowledge 的间隔参数不能为负".into());
     }
+    // 需求/情绪配置：键必须是已知需求、状态必须是固定集合、阈值在 0~1
+    let needs = &persona.needs;
+    for (need, value) in &needs.start {
+        if !crate::needs::NEED_NAMES.contains(&need.as_str()) {
+            return Err(format!("needs.start 含未知需求 {need}"));
+        }
+        if !(0.0..=1.0).contains(value) {
+            return Err(format!("needs.start.{need} 必须在 0~1 之间"));
+        }
+    }
+    for (need, rate) in &needs.rates {
+        if !crate::needs::NEED_NAMES.contains(&need.as_str()) {
+            return Err(format!("needs.rates 含未知需求 {need}"));
+        }
+        if !rate.is_finite() {
+            return Err(format!("needs.rates.{need} 必须是有限数值"));
+        }
+    }
+    for (need, by_state) in &needs.restore {
+        if !crate::needs::NEED_NAMES.contains(&need.as_str()) {
+            return Err(format!("needs.restore 含未知需求 {need}"));
+        }
+        for (state, rate) in by_state {
+            if !CANONICAL_STATES.contains(&state.as_str()) {
+                return Err(format!("needs.restore.{need} 含未知状态 {state}"));
+            }
+            if !rate.is_finite() {
+                return Err(format!("needs.restore.{need}.{state} 必须是有限数值"));
+            }
+        }
+    }
+    for rule in &needs.pull {
+        if !crate::needs::NEED_NAMES.contains(&rule.need.as_str()) {
+            return Err(format!("needs.pull 含未知需求 {}", rule.need));
+        }
+        if !CANONICAL_STATES.contains(&rule.state.as_str()) {
+            return Err(format!("needs.pull 拉向未知状态 {}", rule.state));
+        }
+        if rule.above.is_none() && rule.below.is_none() {
+            return Err(format!(
+                "needs.pull({} → {}) 至少要写 above 或 below",
+                rule.need, rule.state
+            ));
+        }
+        for threshold in [rule.above, rule.below].into_iter().flatten() {
+            if !(0.0..=1.0).contains(&threshold) {
+                return Err(format!(
+                    "needs.pull({} → {}) 的阈值必须在 0~1 之间",
+                    rule.need, rule.state
+                ));
+            }
+        }
+    }
+    for rule in &needs.chain_bias {
+        if !crate::needs::NEED_NAMES.contains(&rule.need.as_str()) {
+            return Err(format!("needs.chain_bias 含未知需求 {}", rule.need));
+        }
+        if rule.tag.trim().is_empty() {
+            return Err("needs.chain_bias 的 tag 不能为空".into());
+        }
+        if !rule.factor.is_finite() || rule.factor < 0.0 {
+            return Err(format!(
+                "needs.chain_bias({} × {}) 的 factor 必须是非负数",
+                rule.need, rule.tag
+            ));
+        }
+        if rule.above.is_none() && rule.below.is_none() {
+            return Err(format!(
+                "needs.chain_bias({} × {}) 至少要写 above 或 below",
+                rule.need, rule.tag
+            ));
+        }
+    }
     for entry in persona.schedule.loop_entries() {
         if !CANONICAL_STATES.contains(&entry.state.as_str()) {
             return Err(format!("循环引用了未知状态 {}", entry.state));
@@ -1958,10 +2104,18 @@ pub(crate) fn resolve_bubble_pool(
 }
 
 /// 自动状态：time 时段优先，否则循环，最后兜底
-fn automatic_state(persona: &PersonaConfig, mins: u32) -> String {
+fn automatic_state(persona: &PersonaConfig, mins: u32, needs: &crate::needs::NeedsState) -> String {
+    // 1) 硬时段最高优先（作者写死的作息，比如夜间必须睡觉）
     if let Some(slot) = find_active_slot(&persona.schedule, mins) {
         return slot.state.clone();
     }
+    // 2) 需求拉取：饿了去吃饭、累了去休息/睡觉（拉去的状态必须真有素材，否则忽略）
+    if let Some(pulled) = persona.needs.pull_state(needs) {
+        if state_has_material(persona, &pulled) {
+            return pulled.to_string();
+        }
+    }
+    // 3) 按日程循环
     if let Some(s) = loop_state_at(&persona.schedule, mins) {
         return s;
     }
@@ -2509,7 +2663,38 @@ mod tests {
         } else {
             ((start + end + 1440) / 2) % 1440
         };
-        assert_eq!(automatic_state(&p, mid), slot.state);
+        let needs = crate::needs::NeedsState::default();
+        assert_eq!(automatic_state(&p, mid, &needs), slot.state);
+    }
+
+    #[test]
+    fn needs_pull_beats_loop_but_loses_to_time_slot() {
+        let mut p = link();
+        // 12:00 不在任何 time 时段内（link 只在 20:00~08:00 睡觉）→ 需求说了算
+        let noon = 12 * 60;
+        let looped = loop_state_at(&p.schedule, noon).unwrap();
+        let needs = crate::needs::NeedsState::default();
+        assert_eq!(automatic_state(&p, noon, &needs), looped);
+
+        // 饿了 → 拉去吃饭（需求优先于循环）
+        let hungry = crate::needs::NeedsState {
+            hunger: 0.95,
+            ..Default::default()
+        };
+        assert_eq!(automatic_state(&p, noon, &hungry), "eat");
+
+        // 很累 → 拉去睡觉（pull 里 energy 的规则更靠前）
+        let mut tired = hungry.clone();
+        tired.hunger = 0.2;
+        tired.energy = 0.1;
+        assert_eq!(automatic_state(&p, noon, &tired), "sleep");
+
+        // 需求拉去的状态必须真有素材，否则忽略
+        p.scenes.remove("eat");
+        assert_ne!(automatic_state(&p, noon, &hungry), "eat");
+
+        // 硬时段最高优先：20:00~08:00 是睡眠时段，再饿也得先睡
+        assert_eq!(automatic_state(&p, 23 * 60, &hungry), "sleep");
     }
 
     #[test]

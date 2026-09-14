@@ -267,6 +267,26 @@ DeskZen/
   `requires_recent` 列出**任一**动作最近播过即可（`within_min` 缺省 30 分钟）；`cooldown_min` 是这条链自己的冷却；
   `max_per_day` 限制单日出现次数。约束全部不满足时不会让角色卡住——会退回"不看约束"抽一条（宁可偶尔破例，也不空转）；
 - `schedule`：状态机配置 `{ "loop": [ {state,duration 分钟}... ], "time": [ {start,end,state}... ] }`——默认按 `loop` 逐状态循环，`time` 时段内固定为对应状态（支持跨午夜）。
+- `needs`：**内部需求/情绪**（energy 体力 / hunger 饥饿 / boredom 无聊 / social 社交欲，取值 0~1）。
+  随时间与所处状态演化（睡觉回体力、吃饭解饿），并用两条路影响编排：
+
+  ```jsonc
+  "needs": {
+    "rates":   {"energy": -0.055, "hunger": 0.075, "boredom": 0.06, "social": 0.09},  // 每小时，可省略
+    "restore": {"energy": {"sleep": 0.35, "relax": 0.06}},                             // 按状态覆盖
+    "pull": [ {"need": "hunger", "above": 0.72, "state": "eat"},                       // 饿了就去吃饭
+              {"need": "energy", "below": 0.40, "state": "relax"},                     // 累了去休息
+              {"need": "energy", "below": 0.22, "state": "sleep"} ],                   // 很累去睡觉
+    "chain_bias": [ {"need": "social", "above": 0.7, "tag": "social", "factor": 1.8} ] // 权重 ×1.8
+  }
+  ```
+
+  - **优先级铁律：硬时段 > 需求 > 权重**——`schedule.time` 里的时段是作者写死的硬约束（例如夜间必须睡觉），
+    需求只在时段之外把角色"拉"向某个状态；`pull` 的状态必须真有素材，否则忽略。
+  - `chain_bias` 按链的 `tags` 给权重乘倍率（例如 social 高时更常走带 `"social"` 标签的链）。
+  - 被用户注意到（凑近/点击/搭话）会降低 social 与 boredom；换一条新链会让 boredom 下降。
+  - 需求状态每 5 分钟落一次 `needs.json`；**关闭应用期间按"在休息"补算（最多 8 小时）**，
+    所以关一天再打开会看到它休息好了、但饿了也想让人陪。
 - `acknowledge`：「被注意到」时播的短反应（反应结束后回到被打断的那一步继续）：
 
   ```jsonc

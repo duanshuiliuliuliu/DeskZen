@@ -104,6 +104,8 @@ pub struct Playback {
     /// 编排记忆：最近播过哪些动作、每条链上次/今天播了几次（`when` 约束靠它判断）。
     /// 跨状态保留（"战斗之后"正是跨状态因果），只在切换角色时清空。
     history: History,
+    /// 需求快照（引擎每次推进前写入）：用来按标签调制链权重
+    needs: crate::needs::NeedsState,
     /// state -> 链 id 的加权洗牌袋：一轮内每条链按权重出现；链内顺序不受影响
     bags: HashMap<String, VecDeque<String>>,
     /// state -> 上一轮最后播放的链（跨轮防连续重复）
@@ -134,6 +136,11 @@ impl Playback {
         self.history = History::default();
         self.bags.clear();
         self.last_chain.clear();
+    }
+
+    /// 引擎推进前写入当前需求快照（`chain_bias` 用它调制权重）
+    pub fn set_needs(&mut self, needs: crate::needs::NeedsState) {
+        self.needs = needs;
     }
 
     /// 这条链当前的触发约束是否满足（`when` 没配 = 随时可用）。
@@ -347,7 +354,10 @@ impl Playback {
             .map(|current| (current.next_at - now).num_milliseconds())
     }
 
-    /// 从状态内的链里按权重抽一条（洗牌袋；一轮内不重复，跨轮不连续重复）。
+    /// 从状态内的链里抽一条：先按 `when` 约束过滤，再按"权重 × 需求偏置"装洗牌袋。
+    /// 一袋（一轮）里每条链恰好出现「份数」次，所以长期频率就是权重比（份数是整数，
+    /// 需求偏置按倍率改份数）；抽的时候跳过"刚播过的那条"，避免同一件事连着做两遍
+    /// ——袋里还有别的就先换一个，实在只剩它才破例。
     /// 链内段的顺序由作者定，绝不打乱——因果链靠这个保证。
     fn pick_chain<'a>(
         &mut self,
@@ -370,7 +380,15 @@ impl Playback {
         if self.bags.get(state).is_none_or(|bag| bag.is_empty()) {
             let mut pool: Vec<String> = Vec::new();
             for chain in &chains {
-                for _ in 0..chain.weight.max(1) {
+                // 需求偏置：命中标签的链按倍率放大份数（1.0 = 不变），上下限防止爆量/清零
+                let factor = persona
+                    .needs
+                    .chain_factor(&self.needs, &chain.tags)
+                    .max(0.0);
+                let count = (chain.weight.max(1) as f64 * factor)
+                    .round()
+                    .clamp(1.0, 100.0) as u32;
+                for _ in 0..count {
                     pool.push(chain.id.clone());
                 }
             }
@@ -380,6 +398,7 @@ impl Playback {
         }
         let last = self.last_chain.get(state).cloned();
         let bag = self.bags.get_mut(state)?;
+        // 跳过刚播过的那条（袋里还有别的就先换一个；只剩它时才不得不重复）
         let index = bag
             .iter()
             .position(|id| Some(id) != last.as_ref())
@@ -680,6 +699,7 @@ mod tests {
                     label: "甲→乙".into(),
                     weight: 1,
                     segments: vec!["a".into(), "b".into()],
+                    tags: vec![],
                     when: None,
                 },
                 ChainConfig {
@@ -687,6 +707,7 @@ mod tests {
                     label: "乙".into(),
                     weight: 1,
                     segments: vec!["b".into()],
+                    tags: vec![],
                     when: None,
                 },
             ],
@@ -722,6 +743,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            needs: crate::needs::NeedsConfig::default(),
             schedule: ScheduleConfig {
                 r#loop: vec![],
                 time: vec![],
@@ -823,7 +845,8 @@ mod tests {
                 label: "乙".into(),
                 weight: 1,
                 segments: vec!["b".into()],
-                    when: None,
+                tags: vec![],
+                when: None,
             }],
         );
         let event = playback.reset(&p2, "routine", now).unwrap();
@@ -841,11 +864,54 @@ mod tests {
         let p = persona();
         let mut playback = Playback::default();
         let mut previous = String::new();
-        for minute in 0..10 {
+        let mut repeats = 0;
+        let draws = 40;
+        for minute in 0..draws {
             let event = playback.reset(&p, "routine", at(10, minute, 0)).unwrap();
-            assert_ne!(event.chain_id, previous, "连续两次抽到同一条链");
+            if event.chain_id == previous {
+                repeats += 1;
+            }
             previous = event.chain_id;
         }
+        // 洗牌袋按权重给份数、抽的时候跳过刚播过的那条：份数够多时一次都不该连着重复
+        // （只有"袋里只剩它"才不得不重复，见下面的权重倾斜用例）
+        assert_eq!(repeats, 0, "连续两次抽到同一条链");
+    }
+
+    #[test]
+    fn chain_weights_keep_their_share_within_a_bag() {
+        // 权重 3:1 → 一袋（一轮）里份数就是 3 和 1，长期频率自然也是 3:1；
+        // 需求偏置改的就是这个份数，所以"约束优先级"之后仍有稳定的份额保证
+        let mut p = persona();
+        p.chains.insert(
+            "routine".to_string(),
+            vec![
+                ChainConfig {
+                    id: "heavy".into(),
+                    label: "重".into(),
+                    weight: 3,
+                    segments: vec!["a".into()],
+                    tags: vec![],
+                    when: None,
+                },
+                ChainConfig {
+                    id: "light".into(),
+                    label: "轻".into(),
+                    weight: 1,
+                    segments: vec!["b".into()],
+                    tags: vec![],
+                    when: None,
+                },
+            ],
+        );
+        let mut playback = Playback::default();
+        let mut counts = std::collections::HashMap::new();
+        for minute in 0..40 {
+            let event = playback.reset(&p, "routine", at(10, minute, 0)).unwrap();
+            *counts.entry(event.chain_id).or_insert(0) += 1;
+        }
+        assert_eq!(counts.get("heavy"), Some(&30), "重链应占 3/4");
+        assert_eq!(counts.get("light"), Some(&10), "轻链应占 1/4");
     }
 
     #[test]
@@ -895,6 +961,7 @@ mod tests {
             label: id.into(),
             weight: 1,
             segments: segments.into_iter().map(str::to_string).collect(),
+            tags: vec![],
             when: Some(when),
         }
     }
@@ -988,6 +1055,61 @@ mod tests {
             .reset(&p, "routine", at(10, 0, 0))
             .expect("约束全挡下时也要能播，不能卡死");
         assert_eq!(event.chain_id, "impossible");
+    }
+
+    #[test]
+    fn needs_bias_shifts_chain_distribution() {
+        use crate::engine::ChainConfig;
+        use crate::needs::ChainBias;
+        let mut p = persona();
+        let chain = |id: &str, segment: &str, tags: Vec<&str>| ChainConfig {
+            id: id.into(),
+            label: id.into(),
+            weight: 1,
+            segments: vec![segment.into()],
+            tags: tags.into_iter().map(str::to_string).collect(),
+            when: None,
+        };
+        p.chains.insert(
+            "routine".to_string(),
+            vec![
+                chain("social_chain", "a", vec!["social"]),
+                chain("plain_1", "b", vec![]),
+                chain("plain_2", "b", vec![]),
+            ],
+        );
+        p.needs.chain_bias = vec![ChainBias {
+            need: "social".into(),
+            above: Some(0.5),
+            below: None,
+            tag: "social".into(),
+            factor: 20.0,
+        }];
+
+        let count_social = |social: f64| {
+            let mut playback = Playback::default();
+            playback.set_needs(crate::needs::NeedsState {
+                social,
+                ..Default::default()
+            });
+            (0..60)
+                .filter(|minute| {
+                    playback
+                        .reset(&p, "routine", at(10, *minute, 0))
+                        .unwrap()
+                        .chain_id
+                        == "social_chain"
+                })
+                .count()
+        };
+        let high = count_social(0.9);
+        let low = count_social(0.1);
+        // 社交欲高时 social 链的份数被放大 20 倍，袋里它占绝大多数；
+        // 两条无标签链只在"刚播过 social"时被插进来，所以不是 100%，但差距必须明显
+        assert!(
+            high > low + 10 && high > 30,
+            "社交欲高时应明显更多走 social 标签的链：high={high} low={low}"
+        );
     }
     #[test]
     fn clear_drops_current_and_bags() {

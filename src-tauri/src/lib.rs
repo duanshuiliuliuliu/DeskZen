@@ -2,6 +2,7 @@ mod characters;
 mod engine;
 mod genbubble;
 mod llm;
+mod needs;
 mod playback;
 mod prefs;
 mod screen;

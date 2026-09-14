@@ -22,12 +22,7 @@
       {"state": "focus", "duration": 20},
       {"state": "relax", "duration": 30}
     ],
-    "time": [
-      {"start": "08:00", "end": "09:00", "state": "eat"},
-      {"start": "12:00", "end": "13:00", "state": "eat"},
-      {"start": "18:00", "end": "19:00", "state": "eat"},
-      {"start": "20:00", "end": "08:00", "state": "sleep"}
-    ]
+    "time": [{"start": "20:00", "end": "08:00", "state": "sleep"}]
   },
   "clips": {
     "observe": {
@@ -207,9 +202,16 @@
         "id": "patrol_round",
         "label": "巡视一圈",
         "weight": 5,
-        "segments": ["listen_and_observe", "patrol_a_round", "korok_hint"]
+        "segments": ["listen_and_observe", "patrol_a_round", "korok_hint"],
+        "tags": ["explore"]
       },
-      {"id": "notice_viewer", "label": "留意到你", "weight": 2, "segments": ["notice_the_viewer"]}
+      {
+        "id": "notice_viewer",
+        "label": "留意到你",
+        "weight": 2,
+        "segments": ["notice_the_viewer"],
+        "tags": ["social"]
+      }
     ],
     "focus": [
       {
@@ -217,18 +219,26 @@
         "label": "装备保养线",
         "weight": 5,
         "segments": ["maintain_the_shield", "check_the_route"],
+        "tags": ["calm"],
         "when": {"cooldown_min": 45}
       },
-      {"id": "wrap_up", "label": "收个尾", "weight": 1, "segments": ["focus_complete"]}
+      {"id": "wrap_up", "label": "收个尾", "weight": 1, "segments": ["focus_complete"], "tags": ["social"]}
     ],
     "active": [
-      {"id": "explore_out", "label": "出门探索", "weight": 5, "segments": ["ride_out", "zonai_power"]},
-      {"id": "ambush", "label": "遭遇战斗", "weight": 3, "segments": ["ambush_battle"]},
+      {
+        "id": "explore_out",
+        "label": "出门探索",
+        "weight": 5,
+        "segments": ["ride_out", "zonai_power"],
+        "tags": ["explore"]
+      },
+      {"id": "ambush", "label": "遭遇战斗", "weight": 3, "segments": ["ambush_battle"], "tags": ["explore"]},
       {
         "id": "battle_aftermath",
         "label": "战斗之后",
         "weight": 3,
         "segments": ["adventure_progress"],
+        "tags": ["social"],
         "when": {"requires_recent": ["fight"], "within_min": 20}
       }
     ],
@@ -237,11 +247,12 @@
         "id": "slow_down",
         "label": "慢下来",
         "weight": 5,
-        "segments": ["long_stretch", "brief_doze", "daydream_sit"]
+        "segments": ["long_stretch", "brief_doze", "daydream_sit"],
+        "tags": ["rest"]
       }
     ],
-    "eat": [{"id": "meal", "label": "吃点东西", "weight": 1, "segments": ["hyrule_apple"]}],
-    "sleep": [{"id": "sleep", "label": "睡觉", "weight": 1, "segments": ["lie_down_sleep"]}]
+    "eat": [{"id": "meal", "label": "吃点东西", "weight": 1, "segments": ["hyrule_apple"], "tags": ["rest"]}],
+    "sleep": [{"id": "sleep", "label": "睡觉", "weight": 1, "segments": ["lie_down_sleep"], "tags": ["rest"]}]
   },
   "acknowledge": {
     "default": [{"clip": "greet_wave", "seconds": 3}],
@@ -250,5 +261,17 @@
       "talk": [{"clip": "greet_wave", "seconds": 3}, {"clip": "observe", "seconds": 2}]
     },
     "by_state": {"sleep": [{"clip": "lie_sleep", "seconds": 4}]}
+  },
+  "needs": {
+    "pull": [
+      {"need": "energy", "below": 0.22, "state": "sleep"},
+      {"need": "energy", "below": 0.4, "state": "relax"},
+      {"need": "hunger", "above": 0.72, "state": "eat"}
+    ],
+    "chain_bias": [
+      {"need": "social", "above": 0.7, "tag": "social", "factor": 1.8},
+      {"need": "energy", "below": 0.4, "tag": "rest", "factor": 1.6},
+      {"need": "boredom", "above": 0.7, "tag": "explore", "factor": 1.5}
+    ]
   }
 }
