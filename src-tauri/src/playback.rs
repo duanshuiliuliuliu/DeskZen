@@ -9,20 +9,55 @@ use chrono::{DateTime, Local};
 use serde::Serialize;
 
 use crate::engine::{
-    refill_bag, AnimationClipConfig, ChainConfig, PersonaConfig, SceneConfig, SceneStepConfig,
+    refill_bag, rng_unit, AnimationClipConfig, ChainConfig, PersonaConfig, SceneConfig,
+    SceneStepConfig,
 };
 
 /// 单个动作实例的时长上限（毫秒）：防止手改配置把角色卡在同一个动作上
 pub const MAX_ACTION_MS: i64 = 5 * 60 * 1000;
 /// 旧格式 loops 的上限（避免旧配置异常放大）
 pub const MAX_STEP_LOOPS: u32 = 20;
+/// 播放速度抖动范围：±8%，让同一个循环不至于每次都是同一节奏
+const SPEED_MIN: f64 = 0.92;
+const SPEED_MAX: f64 = 1.08;
+/// 一段至少持续多久（毫秒）：作者只配了很短的一两拍时，重复这一段，
+/// 避免几秒钟就换一件事做（重复时会重新掷概率/抖动，不是原样循环）
+const MIN_SEGMENT_MS: i64 = 12_000;
 /// "注意你"实例在事件里的链/段标识与标题
 const ACK_CHAIN_ID: &str = "__ack__";
 const ACK_SEGMENT_ID: &str = "__ack__";
 const ACK_LABEL: &str = "注意到你";
 
+/// 一拍：段内的一个动作实例（已按概率筛过、时长/速度/相位已随机定好）
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ResolvedBeat {
+    pub(crate) clip: String,
+    loops: u32,
+    duration_ms: u64,
+    /// 播放速度倍率（0.92~1.08）：前端按它调整动画时长
+    speed: f64,
+    /// 起始帧相位：从循环的第几帧开始播（避免每次都从第 1 帧起）
+    phase_frames: u32,
+}
+
+/// 一次段播放计划：段（或「注意你」反应）在本遍展开成哪些拍、共多久
+#[derive(Debug, Clone)]
+pub(crate) struct SegmentRun {
+    pub(crate) chain_id: String,
+    pub(crate) chain_label: String,
+    pub(crate) scene_id: String,
+    pub(crate) scene_label: String,
+    /// 本段开始时刻（说话窗口按"段"而不是按"拍"计算）
+    pub(crate) started_at: DateTime<Local>,
+    /// 本段总时长 = 各拍之和
+    pub(crate) total_ms: u64,
+    pub(crate) beats: Vec<ResolvedBeat>,
+    /// 是否是「注意你」的短反应
+    pub(crate) ack: bool,
+}
+
 /// 发给前端的播放指令（前端只负责按它渲染，不再自己挑场景）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PlaybackEvent {
     pub state: String,
     /// 链 id / 中文说明（调试与后续 UI 用）
@@ -42,22 +77,22 @@ pub struct PlaybackEvent {
     pub loops: u32,
     /// 动作实例时长 = 目标秒数（取整到整数个循环）或 loops × 原生时长
     pub duration_ms: u64,
+    /// 本拍的播放速度倍率（前端用它算动画时长）
+    pub speed: f64,
+    /// 本拍的起始帧相位（前端用它做负 animation-delay）
+    pub phase_frames: u32,
 }
 
 /// 当前正在播放的动作实例
 #[derive(Debug, Clone)]
 pub(crate) struct Current {
     pub(crate) state: String,
-    pub(crate) chain_id: String,
-    pub(crate) scene_id: String,
-    pub(crate) scene_label: String,
-    pub(crate) step_index: usize,
+    /// 本段（或反应）的播放计划
+    pub(crate) run: SegmentRun,
+    /// 当前是第几拍（0 起）
+    pub(crate) beat_index: usize,
     pub(crate) clip: String,
-    pub(crate) started_at: DateTime<Local>,
     pub(crate) next_at: DateTime<Local>,
-    pub(crate) duration_ms: u64,
-    /// 是否是「注意到你」这类短反应实例：反应很短，说话规则要放宽（见 engine::ack_speech_window）
-    pub(crate) ack: bool,
 }
 
 /// 播放调度状态（与状态引擎同生命周期，不持久化）
@@ -66,9 +101,6 @@ pub struct Playback {
     current: Option<Current>,
     /// 被打断的动作：播完"注意你"后回到它继续（只保留一层，够用且不会无限套娃）
     suspended: Option<Current>,
-    /// 正在播的"注意你"步骤；非空表示处于打断反应中
-    ack_steps: Vec<SceneStepConfig>,
-    ack_index: usize,
     /// state -> 链 id 的加权洗牌袋：一轮内每条链按权重出现；链内顺序不受影响
     bags: HashMap<String, VecDeque<String>>,
     /// state -> 上一轮最后播放的链（跨轮防连续重复）
@@ -80,15 +112,13 @@ impl Playback {
     pub fn clear(&mut self) {
         self.current = None;
         self.suspended = None;
-        self.ack_steps.clear();
-        self.ack_index = 0;
         self.bags.clear();
         self.last_chain.clear();
     }
 
     /// 是否正处于"被打断去注意用户"的状态
     pub fn is_acknowledging(&self) -> bool {
-        !self.ack_steps.is_empty()
+        self.current.as_ref().is_some_and(|current| current.run.ack)
     }
 
     /// 为指定状态选一条链，并从第一段第一个动作开始（状态切换 / 启动 / 切角色后调用）
@@ -101,8 +131,6 @@ impl Playback {
         self.current = None;
         // 换状态/换角色时，被打断的旧活动不再恢复
         self.suspended = None;
-        self.ack_steps.clear();
-        self.ack_index = 0;
         let chain = self.pick_chain(persona, state)?;
         self.start_chain(persona, state, chain, now)
     }
@@ -129,9 +157,22 @@ impl Playback {
             return None;
         }
         self.suspended = Some(current);
-        self.ack_steps = steps.to_vec();
-        self.ack_index = 0;
-        self.start_ack_step(persona, state, now)
+        let beats = resolve_beats(persona, steps);
+        if beats.is_empty() {
+            self.suspended = None;
+            return None;
+        }
+        let run = SegmentRun {
+            chain_id: ACK_CHAIN_ID.into(),
+            chain_label: ACK_LABEL.into(),
+            scene_id: ACK_SEGMENT_ID.into(),
+            scene_label: ACK_LABEL.into(),
+            started_at: now,
+            total_ms: beats.iter().map(|beat| beat.duration_ms).sum(),
+            beats,
+            ack: true,
+        };
+        self.start_beat(persona, state, &run, 0, now)
     }
 
     /// 到点就推进：同段下一步 → 同链下一段 → 换一条链
@@ -144,46 +185,53 @@ impl Playback {
         if now < current.next_at {
             return None;
         }
-        // 0) 正在播「注意你」：还有下一步就继续，播完则回到被打断的活动
-        if self.is_acknowledging() {
-            if let Some(next) = self.next_ack_index(persona) {
-                self.ack_index = next;
-                return self.start_ack_step(persona, &current.state, now);
-            }
+        // 1) 同一段还有下一拍（本段的节拍在开段时就已定好，含概率筛选与时长/速度抖动）
+        if let Some(event) = self.start_beat(
+            persona,
+            &current.state,
+            &current.run,
+            current.beat_index + 1,
+            now,
+        ) {
+            return Some(event);
+        }
+        // 2) 「注意你」反应播完 → 回到被打断的活动
+        if current.run.ack {
             return self.resume_suspended(persona, now);
         }
-        // 1) 同一段还有下一步
-        if let Some(chain) = find_chain(persona, &current.state, &current.chain_id) {
-            if let Some(segment) = find_segment(persona, &current.state, &current.scene_id) {
-                if current.step_index + 1 < segment.steps.len() {
-                    if let Some(event) = self.start_step(
-                        persona,
-                        &current.state,
-                        chain,
-                        segment,
-                        current.step_index + 1,
-                        now,
-                    ) {
+        // 2.5) 这一段太短 → 再走一遍（重新掷概率/抖动），到够久才换段
+        if let Some(segment) = find_segment(persona, &current.state, &current.run.scene_id) {
+            let played_ms = (now - current.run.started_at).num_milliseconds();
+            let pass_ms = current.run.total_ms as i64;
+            if played_ms + pass_ms / 2 < MIN_SEGMENT_MS {
+                if let Some(chain) = find_chain(persona, &current.state, &current.run.chain_id) {
+                    let mut run = plan_segment(persona, chain, segment, now);
+                    // 保留本段的起始时刻：否则每次重播都把"已播多久"清零，永远攒不满最短时长
+                    run.started_at = current.run.started_at;
+                    if let Some(event) = self.start_beat(persona, &current.state, &run, 0, now) {
                         return Some(event);
                     }
                 }
             }
         }
-        // 2) 同一条链还有下一段（跳过没有有效动作的段）
-        if let Some(chain) = find_chain(persona, &current.state, &current.chain_id) {
-            if let Some(pos) = chain.segments.iter().position(|id| id == &current.scene_id) {
+        // 3) 同一条链还有下一段（跳过没有有效动作的段）
+        if let Some(chain) = find_chain(persona, &current.state, &current.run.chain_id) {
+            if let Some(pos) = chain
+                .segments
+                .iter()
+                .position(|id| id == &current.run.scene_id)
+            {
                 for segment_id in chain.segments.iter().skip(pos + 1) {
                     if let Some(segment) = find_segment(persona, &current.state, segment_id) {
-                        if let Some(event) =
-                            self.start_step(persona, &current.state, chain, segment, 0, now)
-                        {
+                        let run = plan_segment(persona, chain, segment, now);
+                        if let Some(event) = self.start_beat(persona, &current.state, &run, 0, now) {
                             return Some(event);
                         }
                     }
                 }
             }
         }
-        // 3) 链走完 → 按权重换一条链
+        // 4) 链走完 → 按权重换一条链
         let chain = self.pick_chain(persona, &current.state)?;
         self.start_chain(persona, &current.state, chain, now)
     }
@@ -267,147 +315,146 @@ impl Playback {
             let Some(segment) = find_segment(persona, state, segment_id) else {
                 continue;
             };
-            if let Some(event) = self.start_step(persona, state, chain, segment, 0, now) {
+            let run = plan_segment(persona, chain, segment, now);
+            if let Some(event) = self.start_beat(persona, state, &run, 0, now) {
                 return Some(event);
             }
         }
         None
     }
 
-    /// 播「注意你」反应里的第 `ack_index` 步（跳过引用不到动作的步骤）
-    fn start_ack_step(
-        &mut self,
-        persona: &PersonaConfig,
-        state: &str,
-        now: DateTime<Local>,
-    ) -> Option<PlaybackEvent> {
-        let step = self.ack_steps.get(self.ack_index)?.clone();
-        let chain = ChainConfig {
-            id: ACK_CHAIN_ID.into(),
-            label: ACK_LABEL.into(),
-            weight: 1,
-            segments: vec![ACK_SEGMENT_ID.into()],
-        };
-        let segment = SceneConfig {
-            id: ACK_SEGMENT_ID.into(),
-            label: ACK_LABEL.into(),
-            weight: 1,
-            steps: vec![step],
-        };
-        self.start_step_with_ack(persona, state, &chain, &segment, 0, now, true)
-    }
-
-    /// 反应步骤里下一个有可用动作的下标
-    fn next_ack_index(&self, persona: &PersonaConfig) -> Option<usize> {
-        (self.ack_index + 1..self.ack_steps.len())
-            .find(|index| persona.clips.contains_key(&self.ack_steps[*index].clip))
-    }
-
-    /// 反应播完：回到被打断的那一步重新开始；配置已不可用时按常规换链
+    /// 反应播完：回到被打断的那一拍重新开始；配置已不可用时按常规换链
     fn resume_suspended(
         &mut self,
         persona: &PersonaConfig,
         now: DateTime<Local>,
     ) -> Option<PlaybackEvent> {
-        self.ack_steps.clear();
-        self.ack_index = 0;
         let Some(suspended) = self.suspended.take() else {
             let state = self.current.as_ref()?.state.clone();
             let chain = self.pick_chain(persona, &state)?;
             return self.start_chain(persona, &state, chain, now);
         };
-        let chain = find_chain(persona, &suspended.state, &suspended.chain_id);
-        let segment = find_segment(persona, &suspended.state, &suspended.scene_id);
-        match (chain, segment) {
-            (Some(chain), Some(segment)) => self.start_step(
-                persona,
-                &suspended.state,
-                chain,
-                segment,
-                suspended.step_index,
-                now,
-            ),
-            _ => {
-                let chain = self.pick_chain(persona, &suspended.state)?;
-                self.start_chain(persona, &suspended.state, chain, now)
-            }
+        // 回到被打断的那一拍：沿用它当时定好的时长/速度/相位，读起来才是"接着做"
+        if let Some(event) = self.start_beat(
+            persona,
+            &suspended.state,
+            &suspended.run,
+            suspended.beat_index,
+            now,
+        ) {
+            return Some(event);
         }
+        let chain = self.pick_chain(persona, &suspended.state)?;
+        self.start_chain(persona, &suspended.state, chain, now)
     }
 
-    /// 开播某一步（一个动作实例），时长按 `seconds` 目标取整到整数个循环
-    fn start_step(
+    /// 开播某一段里的第 `index` 拍
+    fn start_beat(
         &mut self,
         persona: &PersonaConfig,
         state: &str,
-        chain: &ChainConfig,
-        scene: &SceneConfig,
+        run: &SegmentRun,
         index: usize,
         now: DateTime<Local>,
     ) -> Option<PlaybackEvent> {
-        self.start_step_with_ack(persona, state, chain, scene, index, now, false)
-    }
-
-    /// 开播某一步（一个动作实例），时长按 `seconds` 目标取整到整数个循环。
-    /// `ack` 标记这是"注意到你"的短反应。
-    #[allow(clippy::too_many_arguments)]
-    fn start_step_with_ack(
-        &mut self,
-        persona: &PersonaConfig,
-        state: &str,
-        chain: &ChainConfig,
-        scene: &SceneConfig,
-        index: usize,
-        now: DateTime<Local>,
-        ack: bool,
-    ) -> Option<PlaybackEvent> {
-        let step = scene.steps.get(index)?;
-        let clip: &AnimationClipConfig = persona.clips.get(&step.clip)?;
+        let beat = run.beats.get(index)?;
+        let clip: &AnimationClipConfig = persona.clips.get(&beat.clip)?;
         let frames = clip.frames.max(1);
         let frame_ms = clip.frame_ms.max(1);
-        let native_ms = (frames as i64 * frame_ms as i64).max(1);
-        let max_loops = ((MAX_ACTION_MS / native_ms).max(1)) as u32;
-        let (loops, duration_ms) = match step.seconds {
-            // 新格式：目标秒数 → 向上取整到整数个循环，保证动作实例至少播这么久
-            Some(seconds) => {
-                let target_ms = (seconds.max(1) as i64) * 1000;
-                let loops =
-                    ((target_ms + native_ms - 1) / native_ms).clamp(1, max_loops as i64) as u32;
-                (loops, loops as i64 * native_ms)
-            }
-            // 旧格式：按 loops 播放
-            None => {
-                let loops = step.loops.clamp(1, MAX_STEP_LOOPS).min(max_loops);
-                (loops, loops as i64 * native_ms)
-            }
-        };
-        let duration_ms = duration_ms.max(1) as u64;
+        let duration_ms = beat.duration_ms;
         self.current = Some(Current {
             state: state.to_string(),
-            chain_id: chain.id.clone(),
-            scene_id: scene.id.clone(),
-            scene_label: scene.label.clone(),
-            step_index: index,
-            clip: step.clip.clone(),
-            started_at: now,
+            run: run.clone(),
+            beat_index: index,
+            clip: beat.clip.clone(),
             next_at: now + chrono::Duration::milliseconds(duration_ms as i64),
-            duration_ms,
-            ack,
         });
         Some(PlaybackEvent {
             state: state.to_string(),
-            chain_id: chain.id.clone(),
-            chain_label: chain.label.clone(),
-            scene_id: scene.id.clone(),
-            scene_label: scene.label.clone(),
+            chain_id: run.chain_id.clone(),
+            chain_label: run.chain_label.clone(),
+            scene_id: run.scene_id.clone(),
+            scene_label: run.scene_label.clone(),
             step_index: index as u32,
-            clip: step.clip.clone(),
+            clip: beat.clip.clone(),
             spritesheet: clip.spritesheet.clone(),
             frames,
             frame_ms,
-            loops,
+            loops: beat.loops,
             duration_ms,
+            speed: beat.speed,
+            phase_frames: beat.phase_frames,
         })
     }
+}
+
+/// 把一段展开成本遍的节拍：按 `chance` 筛掉这次不出现的拍，并给每拍定好
+/// 时长（`seconds` 数字或区间）、速度抖动与起始相位。全部被筛掉时退回完整列表，
+/// 保证段不会空转。
+fn plan_segment(
+    persona: &PersonaConfig,
+    chain: &ChainConfig,
+    segment: &SceneConfig,
+    now: DateTime<Local>,
+) -> SegmentRun {
+    let beats = resolve_beats(persona, &segment.steps);
+    let total_ms = beats.iter().map(|beat| beat.duration_ms).sum();
+    SegmentRun {
+        chain_id: chain.id.clone(),
+        chain_label: chain.label.clone(),
+        scene_id: segment.id.clone(),
+        scene_label: segment.label.clone(),
+        started_at: now,
+        total_ms,
+        beats,
+        ack: false,
+    }
+}
+
+/// 「注意你」反应也走同一套节拍解析（一般只有一拍）
+fn resolve_beats(persona: &PersonaConfig, steps: &[SceneStepConfig]) -> Vec<ResolvedBeat> {
+    let beats: Vec<ResolvedBeat> = steps
+        .iter()
+        .filter(|step| persona.clips.contains_key(&step.clip))
+        .filter(|step| step.chance >= 1.0 || rng_unit() < step.chance)
+        .filter_map(|step| resolve_beat(persona, step))
+        .collect();
+    if beats.is_empty() {
+        steps
+            .iter()
+            .filter(|step| persona.clips.contains_key(&step.clip))
+            .filter_map(|step| resolve_beat(persona, step))
+            .collect()
+    } else {
+        beats
+    }
+}
+
+/// 单拍解析：目标时长 → 整数个循环；速度 ±8%；相位随机（从循环中间某帧起播）
+fn resolve_beat(persona: &PersonaConfig, step: &SceneStepConfig) -> Option<ResolvedBeat> {
+    let clip = persona.clips.get(&step.clip)?;
+    let frames = clip.frames.max(1);
+    let frame_ms = clip.frame_ms.max(1);
+    let speed = SPEED_MIN + rng_unit() * (SPEED_MAX - SPEED_MIN);
+    // 速度抖动会改变单圈实际时长，时长与循环数都按"抖动后的一圈"算，
+    // 前端按 speed 调整动画时长，两边才对得上。
+    let native_ms = (frames as f64 * frame_ms as f64 / speed).round().max(1.0) as i64;
+    let max_loops = ((MAX_ACTION_MS / native_ms).max(1)) as u32;
+    let loops = if step.once {
+        1
+    } else if let Some(spec) = &step.seconds {
+        (spec.sample_ms() as f64 / native_ms as f64).round().clamp(1.0, max_loops as f64) as u32
+    } else {
+        step.loops.clamp(1, MAX_STEP_LOOPS).min(max_loops)
+    };
+    let duration_ms = (loops as i64 * native_ms).max(1) as u64;
+    Some(ResolvedBeat {
+        clip: step.clip.clone(),
+        loops,
+        duration_ms,
+        speed,
+        phase_frames: (rng_unit() * frames as f64) as u32 % frames,
+    })
 }
 
 fn find_segment<'a>(
@@ -501,8 +548,9 @@ mod tests {
                     weight: 1,
                     steps: vec![SceneStepConfig {
                         clip: "one".into(),
-                        seconds: Some(1),
+                        seconds: Some(crate::engine::SecondsSpec::Fixed(1)),
                         loops: 1,
+                        ..Default::default()
                     }],
                 },
                 SceneConfig {
@@ -514,11 +562,13 @@ mod tests {
                             clip: "two".into(),
                             seconds: None,
                             loops: 2,
+                        ..Default::default()
                         },
                         SceneStepConfig {
                             clip: "three".into(),
-                            seconds: Some(1),
+                            seconds: Some(crate::engine::SecondsSpec::Fixed(1)),
                             loops: 1,
+                        ..Default::default()
                         },
                     ],
                 },
@@ -567,8 +617,9 @@ mod tests {
             acknowledge: crate::engine::AcknowledgeConfig {
                 default: vec![SceneStepConfig {
                     clip: "three".into(),
-                    seconds: Some(1),
+                    seconds: Some(crate::engine::SecondsSpec::Fixed(1)),
                     loops: 1,
+                        ..Default::default()
                 }],
                 ..Default::default()
             },
@@ -592,24 +643,34 @@ mod tests {
         let mut p = single_chain_persona();
         for scene in p.scenes.get_mut("routine").unwrap() {
             for step in &mut scene.steps {
-                step.seconds = Some(30);
+                step.seconds = Some(crate::engine::SecondsSpec::Fixed(30));
             }
         }
         p
     }
 
     #[test]
-    fn seconds_round_up_to_whole_loops() {
+    fn seconds_target_rounds_to_whole_loops_within_jitter() {
         let p = single_chain_persona();
         let mut playback = Playback::default();
         let now = at(10, 0, 0);
         let event = playback.reset(&p, "routine", now).unwrap();
         assert_eq!(event.scene_id, "a");
         assert_eq!(event.clip, "one");
-        // 目标 1 秒、原生 200ms → 5 个循环
+        // 目标 1 秒、原生 200ms → 5 个循环（速度抖动会改单圈时长，但循环数不变）
         assert_eq!(event.loops, 5);
-        assert_eq!(event.duration_ms, 1000);
-        assert_eq!(playback.next_at(), Some(now + chrono::Duration::seconds(1)));
+        // 速度抖动 ±8%：时长落在目标附近，但不再是精确的 1000ms
+        assert!((SPEED_MIN..=SPEED_MAX).contains(&event.speed));
+        assert!(
+            (event.duration_ms as i64 - 1000).abs() <= 100,
+            "时长应接近目标 1000ms，实际 {}ms",
+            event.duration_ms
+        );
+        assert!(event.phase_frames < event.frames.max(1), "相位必须在帧数范围内");
+        assert_eq!(
+            playback.next_at(),
+            Some(now + chrono::Duration::milliseconds(event.duration_ms as i64))
+        );
     }
 
     #[test]
@@ -621,29 +682,33 @@ mod tests {
         assert_eq!(first.scene_id, "a");
         assert_eq!(first.chain_id, "chain_ab");
 
-        // a 播完（1s）→ 同链下一段 b 的第一步（旧格式 loops=2 → 600ms）
-        let second = playback
-            .advance(&p, start + chrono::Duration::seconds(1))
-            .unwrap();
+        // 段 a 只有 1 秒（<12 秒最短保持）→ 会重复本段，直到累计够长才换到 b
+        let mut now = start + chrono::Duration::milliseconds(first.duration_ms as i64);
+        let mut second = None;
+        for _ in 0..300 {
+            let event = playback.advance(&p, now).unwrap();
+            now += chrono::Duration::milliseconds(event.duration_ms as i64);
+            if event.scene_id != "a" {
+                second = Some(event);
+                break;
+            }
+        }
+        let second = second.expect("段 a 重复够久后应切到下一段");
         assert_eq!(second.scene_id, "b");
         assert_eq!(second.step_index, 0);
         assert_eq!(second.clip, "two");
-        assert_eq!(second.duration_ms, 600);
+        assert!(
+            (second.duration_ms as i64 - 600).abs() <= 60,
+            "旧格式 2 圈应接近 600ms，实际 {}ms",
+            second.duration_ms
+        );
 
-        // b 的第一步播完 → 同段第二步（目标 1s）
-        let third = playback
-            .advance(&p, start + chrono::Duration::milliseconds(1600))
-            .unwrap();
+        // b 的第一步播完 → 同段第二步（目标 1s）；段没走完不会被"最短保持"拦下
+        let third = playback.advance(&p, now).unwrap();
         assert_eq!(third.scene_id, "b");
         assert_eq!(third.step_index, 1);
         assert_eq!(third.clip, "three");
-        assert_eq!(third.duration_ms, 1000);
-
-        // b 播完 → 链走完 → 重新开始（单链只能回到 a）
-        let fourth = playback
-            .advance(&p, start + chrono::Duration::milliseconds(2600))
-            .unwrap();
-        assert_eq!(fourth.scene_id, "a");
+        assert!((third.duration_ms as i64 - 1000).abs() <= 100);
     }
 
     #[test]
@@ -664,7 +729,11 @@ mod tests {
         let event = playback.reset(&p2, "routine", now).unwrap();
         assert_eq!(event.clip, "two");
         assert_eq!(event.loops, 2);
-        assert_eq!(event.duration_ms, 600);
+        assert!(
+            (event.duration_ms as i64 - 600).abs() <= 60,
+            "旧格式 loops=2 应接近 600ms，实际 {}ms",
+            event.duration_ms
+        );
     }
 
     #[test]
@@ -677,6 +746,46 @@ mod tests {
             assert_ne!(event.chain_id, previous, "连续两次抽到同一条链");
             previous = event.chain_id;
         }
+    }
+
+    #[test]
+    fn seconds_range_stays_near_bounds_and_jitters() {
+        let mut p = single_chain_persona();
+        p.scenes.get_mut("routine").unwrap()[0].steps[0].seconds =
+            Some(crate::engine::SecondsSpec::Range([5, 8]));
+        let mut durations = std::collections::HashSet::new();
+        for _ in 0..20 {
+            let mut playback = Playback::default();
+            let event = playback.reset(&p, "routine", at(10, 0, 0)).unwrap();
+            let ms = event.duration_ms as i64;
+            // clip "one" 原生 200ms：区间 [5,8] 秒取整后落在 4.5~9 秒之间
+            assert!((4_500..=9_000).contains(&ms), "区间取的时长越界: {ms}ms");
+            durations.insert(ms);
+        }
+        assert!(durations.len() > 1, "区间+抖动应当产生不止一种时长");
+    }
+
+    #[test]
+    fn chance_zero_skips_beat_and_once_plays_single_loop() {
+        let mut p = single_chain_persona();
+        // 让段 a 足够长（30 秒），免得被"最短保持"重复，方便直接走到段 b
+        p.scenes.get_mut("routine").unwrap()[0].steps[0].seconds =
+            Some(crate::engine::SecondsSpec::Fixed(30));
+        {
+            let scene = &mut p.scenes.get_mut("routine").unwrap()[1]; // 段 b：两步
+            scene.steps[0].chance = 0.0; // 这一遍不出现
+            scene.steps[1].once = true; // 只播一遍
+            scene.steps[1].seconds = Some(crate::engine::SecondsSpec::Fixed(30)); // once 优先
+        }
+        let mut playback = Playback::default();
+        let now = at(10, 0, 0);
+        let first = playback.reset(&p, "routine", now).unwrap();
+        let second = playback
+            .advance(&p, now + chrono::Duration::milliseconds(first.duration_ms as i64))
+            .unwrap();
+        assert_eq!(second.scene_id, "b");
+        assert_eq!(second.clip, "three", "chance=0 的那一拍应被跳过");
+        assert_eq!(second.loops, 1, "once 只播一遍，忽略 seconds");
     }
 
     #[test]

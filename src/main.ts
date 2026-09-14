@@ -38,6 +38,10 @@ interface PlaybackPayload {
   frame_ms: number;
   loops: number;
   duration_ms: number;
+  /** 本拍播放速度倍率（0.92~1.08）：让同一循环不总是同一节奏 */
+  speed: number;
+  /** 起始帧相位：从循环的第几帧开始播（负 animation-delay 实现） */
+  phase_frames: number;
 }
 
 let persona: PersonaConfig | null = null;
@@ -52,6 +56,11 @@ let bubbleTimer: ReturnType<typeof setTimeout> | undefined;
 let activeLayer = 0;
 let dragging = false;
 let pointerStart = { x: 0, y: 0 };
+/** hover 触发前要求鼠标"停住"的时长与容差：路过窗口不该算"注意到角色" */
+const HOVER_DWELL_MS = 700;
+const HOVER_MOVE_TOLERANCE = 10;
+let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+let hoverOrigin = { x: 0, y: 0 };
 
 /** 交叉淡入时长（ms）：写进 CSS 变量 --fade-ms，样式与这里的清理定时器同源 */
 const FADE_MS = 150;
@@ -94,6 +103,9 @@ function applyPersona(persona: PersonaConfig): void {
 function prepareLayer(layer: HTMLDivElement, payload: PlaybackPayload): void {
   const frames = Math.max(1, Math.floor(payload.frames));
   const frameMs = Math.max(40, Math.floor(payload.frame_ms));
+  const speed = payload.speed > 0 ? payload.speed : 1;
+  const cycleMs = (frames * frameMs) / speed;
+  const phase = Math.min(Math.max(0, Math.floor(payload.phase_frames ?? 0)), frames - 1);
   layer.style.setProperty("--cols", String(frames));
   layer.style.setProperty("--rows", "1");
   layer.style.setProperty("--frames", String(frames));
@@ -101,7 +113,9 @@ function prepareLayer(layer: HTMLDivElement, payload: PlaybackPayload): void {
   layer.style.animationName = "none";
   // 强制重排后再挂动画，保证换动作时从第 1 帧开始（而不是延续上一个动作的进度）
   void layer.offsetWidth;
-  layer.style.animationDuration = `${frames * frameMs}ms`;
+  layer.style.animationDuration = `${cycleMs}ms`;
+  // 相位：负 delay 让动画从循环中间某一帧起播（同一动作每遍的起点不同）
+  layer.style.animationDelay = phase > 0 ? `${-(cycleMs * phase) / frames}ms` : "0ms";
   layer.style.animationName = frames > 1 ? "sprite-cycle" : "none";
 }
 
@@ -205,10 +219,31 @@ async function init(): Promise<void> {
     }
   });
 
-  // 用户"注意到角色"：鼠标凑近 / 点一下（未拖动）→ 让角色放下手上的事看你一眼，
-  // 反应结束再回到原来在做的事（限频在后端，鼠标蹭过窗口不会反复打断）
-  character.addEventListener("pointerenter", () => {
-    void invoke("notify_seen", { kind: "hover" });
+  // 用户"注意到角色"：鼠标**停在**角色上 / 点一下（未拖动）→ 让角色放下手上的事看你一眼，
+  // 反应结束再回到原来在做的事。
+  //
+  // hover 要求"停住"而不是"扫过"：鼠标移到角色上后必须停留 HOVER_DWELL_MS，
+  // 期间移动超过 HOVER_MOVE_TOLERANCE 就重新计时（路过窗口去任务栏不会触发）。
+  const startHoverDwell = (e: PointerEvent): void => {
+    clearTimeout(hoverTimer);
+    hoverOrigin = { x: e.clientX, y: e.clientY };
+    hoverTimer = setTimeout(() => {
+      hoverTimer = undefined;
+      void invoke("notify_seen", { kind: "hover" });
+    }, HOVER_DWELL_MS);
+  };
+  character.addEventListener("pointerenter", startHoverDwell);
+  character.addEventListener("pointermove", (e) => {
+    if (hoverTimer === undefined) return;
+    const dx = e.clientX - hoverOrigin.x;
+    const dy = e.clientY - hoverOrigin.y;
+    if (Math.abs(dx) > HOVER_MOVE_TOLERANCE || Math.abs(dy) > HOVER_MOVE_TOLERANCE) {
+      startHoverDwell(e); // 还在动 → 重新计时
+    }
+  });
+  character.addEventListener("pointerleave", () => {
+    clearTimeout(hoverTimer);
+    hoverTimer = undefined;
   });
 
   character.addEventListener("pointerup", (e) => {

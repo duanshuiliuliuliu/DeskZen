@@ -189,12 +189,55 @@ pub struct SceneConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SceneStepConfig {
     pub clip: String,
-    /// 动作实例目标时长（秒）：写了就用它（按动作原生时长取整循环填满），
-    /// 没写则回退旧的 `loops` 语义。30 秒以下视为过渡动作，不参与说话。
+    /// 这一拍的目标时长（秒）：写数字表示固定，写 `[min,max]` 表示每遍随机取区间内一个值。
+    /// 实际时长会按动作原生时长取整到整数个循环；没写则回退 `loops` 语义。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seconds: Option<u32>,
+    pub seconds: Option<SecondsSpec>,
+    /// 只播一遍：用于在长动作之间插入微动作（张望、擦汗…），优先于 `seconds`
+    #[serde(default)]
+    pub once: bool,
+    /// 这一拍出现在本次表演里的概率（0~1，缺省 1）：同一个段每遍的节拍数会略有不同
+    #[serde(default = "default_chance")]
+    pub chance: f64,
     #[serde(default = "default_unit")]
     pub loops: u32,
+}
+
+/// 目标时长：固定值或随机区间
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum SecondsSpec {
+    Fixed(u32),
+    Range([u32; 2]),
+}
+
+impl SecondsSpec {
+    /// 这一遍的目标毫秒数（区间则随机取）
+    pub(crate) fn sample_ms(&self) -> i64 {
+        match self {
+            Self::Fixed(seconds) => *seconds as i64 * 1000,
+            Self::Range([min, max]) => {
+                let (min, max) = ((*min).max(1), (*max).max(1));
+                rng_range_i64(min.min(max) as i64, max as i64) * 1000
+            }
+        }
+    }
+}
+
+fn default_chance() -> f64 {
+    1.0
+}
+
+impl Default for SceneStepConfig {
+    fn default() -> Self {
+        Self {
+            clip: String::new(),
+            seconds: None,
+            once: false,
+            chance: 1.0,
+            loops: 1,
+        }
+    }
 }
 
 /// 一条有序链：链内段按配置顺序播放（表达因果，不洗牌），链之间按权重选择。
@@ -249,7 +292,8 @@ fn default_min_remaining_s() -> i64 {
 /// 点击/搭话是明确互动，可以快一点。persona 可用 `cooldown_s` 覆盖。
 pub(crate) fn default_cooldown_secs(kind: &str) -> i64 {
     match kind {
-        "hover" => 30,
+        // 停在角色身上一次就够了：两分钟内不再因为鼠标经过而反复打断
+        "hover" => 120,
         "click" => 8,
         "chat" => 10,
         "talk" => 8,
@@ -811,9 +855,20 @@ impl StateEngine {
             let playback = crate::util::lock(&self.playback);
             playback
                 .current()
-                .map(|c| (c.clip.clone(), c.started_at, c.duration_ms, c.ack))
+                .map(|c| {
+                    (
+                        c.run.started_at,
+                        c.run.total_ms,
+                        c.run.ack,
+                        c.run
+                            .beats
+                            .iter()
+                            .map(|beat| beat.clip.clone())
+                            .collect::<Vec<String>>(),
+                    )
+                })
         };
-        let Some((clip_id, started_at, duration_ms, ack)) = instance else {
+        let Some((started_at, duration_ms, ack, beat_clips)) = instance else {
             crate::util::lock(&self.ambient).speak_at = None;
             return;
         };
@@ -823,15 +878,28 @@ impl StateEngine {
             crate::util::lock(&self.ambient).speak_at = None;
             return; // mute：当前状态不说话
         };
-        // 「注意到你」这类短反应放宽时长要求：它就是对用户的即时回应
+        // 说话窗口按「段」算：段 ≥30 秒即可说话（段内由若干拍组成，拍本身可以很短）；
+        // 「注意到你」这类短反应例外，它就是对用户的即时回应
         if !ack && (duration_ms as i64) < SPEAK_MIN_ACTION_MS {
             crate::util::lock(&self.ambient).speak_at = None;
-            return; // 过渡动作：不配台词
+            return; // 过短的段：不配台词
         }
-        let ai_clip = crate::genbubble::today_pool(&self.gen_bubbles, &clip_id);
-        if resolve_bubble_pool(&persona, Some(&clip_id), ai_clip).is_none() {
+        // 本段已经排过话、且时刻仍落在本段内 → 保持不动。
+        // 否则每换一拍都会重新随机一次，一段可能冒出好几句。
+        {
+            let ambient = crate::util::lock(&self.ambient);
+            if speak_at_in_segment(ambient.speak_at, started_at, duration_ms) {
+                return;
+            }
+        }
+        // 整段里没有任何拍有可用文案 → 不排话（避免排了又发不出来的空转）
+        let has_text = beat_clips.iter().any(|clip_id| {
+            let ai_clip = crate::genbubble::today_pool(&self.gen_bubbles, clip_id);
+            resolve_bubble_pool(&persona, Some(clip_id), ai_clip).is_some()
+        });
+        if !has_text {
             crate::util::lock(&self.ambient).speak_at = None;
-            return; // 这个动作没有可用文案
+            return;
         }
         let mut ambient = crate::util::lock(&self.ambient);
         ambient.speak_at = None;
@@ -900,8 +968,8 @@ impl StateEngine {
             let current = playback.current()?;
             (
                 current.state.clone(),
-                current.scene_id.clone(),
-                current.scene_label.clone(),
+                current.run.scene_id.clone(),
+                current.run.scene_label.clone(),
                 current.clip.clone(),
             )
         };
@@ -1494,6 +1562,18 @@ fn find_active_slot(schedule: &ScheduleConfig, mins: u32) -> Option<&TimeSlot> {
 }
 
 /// 「注意到你」这类短反应的说话窗口。
+/// 已排定的说话时刻是否仍落在这一段内（用于「一段最多一句」：段内换拍时不重新随机）
+fn speak_at_in_segment(
+    speak_at: Option<chrono::DateTime<chrono::Local>>,
+    segment_started_at: chrono::DateTime<chrono::Local>,
+    segment_ms: u64,
+) -> bool {
+    speak_at.is_some_and(|t| {
+        t >= segment_started_at
+            && t <= segment_started_at + chrono::Duration::milliseconds(segment_ms as i64)
+    })
+}
+
 ///
 /// 反应通常只有 4~6 秒，用常规规则（≥30 秒才说话）一句都说不了。这里放宽为：
 /// 反应 ≥2.5 秒即可说话，时刻落在反应的 25% 处，展示到反应结束前 1.5 秒为止
@@ -1588,6 +1668,29 @@ pub(crate) fn ordered_state_keys(persona: &PersonaConfig) -> Vec<String> {
     keys
 }
 
+/// 单个节拍的参数校验（段与「注意到你」反应共用）
+fn validate_step(step: &SceneStepConfig, owner: &str) -> Result<(), String> {
+    match &step.seconds {
+        Some(SecondsSpec::Fixed(0)) => {
+            return Err(format!("{owner} 的动作 {} seconds 必须大于 0", step.clip));
+        }
+        Some(SecondsSpec::Range([min, max])) if *min == 0 || *max == 0 || min > max => {
+            return Err(format!(
+                "{owner} 的动作 {} seconds 区间非法（需 1 ≤ min ≤ max，实际 [{min}, {max}]）",
+                step.clip
+            ));
+        }
+        _ => {}
+    }
+    if !(0.0..=1.0).contains(&step.chance) || !step.chance.is_finite() {
+        return Err(format!(
+            "{owner} 的动作 {} chance 必须在 0~1 之间",
+            step.clip
+        ));
+    }
+    Ok(())
+}
+
 /// 角色配置的**结构**校验（不含资源文件）：导入与启动扫描共用同一套判据。
 ///
 /// 之前导入侧校验很严、加载侧只做粗略准入，结果是"手改过或旧版本写的"角色包能被注册，
@@ -1632,12 +1735,7 @@ pub(crate) fn validate_persona_structure(persona: &PersonaConfig) -> Result<(), 
                 if !persona.clips.contains_key(&step.clip) {
                     return Err(format!("段 {} 引用了未知动作 {}", scene.id, step.clip));
                 }
-                if step.seconds == Some(0) {
-                    return Err(format!(
-                        "段 {} 的动作 {} seconds 必须大于 0",
-                        scene.id, step.clip
-                    ));
-                }
+                validate_step(step, &format!("段 {}", scene.id))?;
             }
         }
     }
@@ -1708,12 +1806,7 @@ pub(crate) fn validate_persona_structure(persona: &PersonaConfig) -> Result<(), 
             if !persona.clips.contains_key(&step.clip) {
                 return Err(format!("acknowledge.{label} 引用了未知动作 {}", step.clip));
             }
-            if step.seconds == Some(0) {
-                return Err(format!(
-                    "acknowledge.{label} 的动作 {} seconds 必须大于 0",
-                    step.clip
-                ));
-            }
+            validate_step(step, &format!("acknowledge.{label}"))?;
         }
     }
     if ack.cooldown_s.values().any(|secs| *secs < 0)
@@ -2116,11 +2209,16 @@ fn rng_next() -> u64 {
 }
 
 /// [min, max] 闭区间内均匀取整（max <= min 时返回 min）
-fn rng_range_i64(min: i64, max: i64) -> i64 {
+pub(crate) fn rng_range_i64(min: i64, max: i64) -> i64 {
     if max <= min {
         return min;
     }
     min + (rng_next() % ((max - min + 1) as u64)) as i64
+}
+
+/// [0,1) 之间的随机数（用于速度抖动、概率判定）
+pub(crate) fn rng_unit() -> f64 {
+    (rng_range_i64(0, 9_999) as f64) / 10_000.0
 }
 
 /// Fisher–Yates 洗牌
@@ -2842,8 +2940,9 @@ mod tests {
             "click".to_string(),
             vec![SceneStepConfig {
                 clip: "不存在的动作".into(),
-                seconds: Some(3),
+                seconds: Some(crate::engine::SecondsSpec::Fixed(3)),
                 loops: 1,
+                ..Default::default()
             }],
         );
         let error = validate_persona_structure(&bad).unwrap_err();
@@ -2870,6 +2969,44 @@ mod tests {
         assert_eq!((ends_at - to).num_milliseconds(), 1_500);
         // 太短的过渡动作仍不配台词
         assert!(ack_speech_window(start, 2_000).is_none());
+    }
+
+    #[test]
+    fn speak_at_is_kept_only_inside_current_segment() {
+        let start = local_at(10, 0);
+        // 段内 → 保持（一段最多一句，段内换拍不重新随机）
+        assert!(speak_at_in_segment(
+            Some(start + chrono::Duration::seconds(20)),
+            start,
+            40_000
+        ));
+        // 落在段外（段已结束）→ 需要重新排
+        assert!(!speak_at_in_segment(
+            Some(start + chrono::Duration::seconds(41)),
+            start,
+            40_000
+        ));
+        assert!(!speak_at_in_segment(None, start, 40_000));
+    }
+
+    #[test]
+    fn step_validation_checks_seconds_range_and_chance() {
+        // 区间非法（min > max）
+        let mut bad_range = link();
+        bad_range.scenes.get_mut("routine").unwrap()[0].steps[0].seconds =
+            Some(SecondsSpec::Range([10, 5]));
+        assert!(validate_persona_structure(&bad_range).is_err());
+
+        // 概率越界
+        let mut bad_chance = link();
+        bad_chance.scenes.get_mut("routine").unwrap()[0].steps[0].chance = 1.5;
+        assert!(validate_persona_structure(&bad_chance).is_err());
+
+        // 合法区间通过
+        let mut ok = link();
+        ok.scenes.get_mut("routine").unwrap()[0].steps[0].seconds =
+            Some(SecondsSpec::Range([5, 10]));
+        assert!(validate_persona_structure(&ok).is_ok());
     }
 
     #[test]

@@ -154,13 +154,37 @@
   "scenes": {
     "routine": [
       {"id": "notice_the_viewer", "label": "打招呼", "steps": [{"clip": "greet_wave", "seconds": 30}]},
-      {"id": "listen_and_observe", "label": "观察周围", "steps": [{"clip": "observe", "seconds": 45}]},
-      {"id": "patrol_a_round", "label": "巡视一圈", "steps": [{"clip": "walk", "seconds": 45}]},
-      {"id": "korok_hint", "label": "发现奇怪叶子", "steps": [{"clip": "korok_leaf", "seconds": 45}]}
+      {"id": "listen_and_observe", "label": "观察周围", "steps": [{"clip": "observe", "seconds": [30, 50]}]},
+      {
+        "id": "patrol_a_round",
+        "label": "巡视一圈",
+        "steps": [
+          {"clip": "walk", "seconds": [18, 30]},
+          {"clip": "observe", "once": true, "chance": 0.7},
+          {"clip": "walk", "seconds": [10, 18]}
+        ]
+      },
+      {
+        "id": "korok_hint",
+        "label": "发现奇怪叶子",
+        "steps": [
+          {"clip": "korok_leaf", "seconds": [20, 32]},
+          {"clip": "observe", "once": true, "chance": 0.5},
+          {"clip": "korok_leaf", "seconds": [10, 16]}
+        ]
+      }
     ],
     "focus": [
       {"id": "check_the_route", "label": "查看希卡之石", "steps": [{"clip": "sheikah_slate", "seconds": 45}]},
-      {"id": "maintain_the_shield", "label": "保养盾牌", "steps": [{"clip": "polish_shield", "seconds": 45}]},
+      {
+        "id": "maintain_the_shield",
+        "label": "保养盾牌",
+        "steps": [
+          {"clip": "polish_shield", "seconds": [25, 40]},
+          {"clip": "sit_idle", "once": true, "chance": 0.4},
+          {"clip": "polish_shield", "seconds": [12, 20]}
+        ]
+      },
       {"id": "focus_complete", "label": "完成一轮专注", "steps": [{"clip": "task_cheer", "seconds": 30}]}
     ],
     "active": [
