@@ -179,21 +179,49 @@
   },
   "chains": {
     "routine": [
-      {"id": "patrol_round", "label": "巡视一圈", "weight": 5, "segments": ["listen_and_observe", "patrol_a_round", "korok_hint"]},
+      {
+        "id": "patrol_round",
+        "label": "巡视一圈",
+        "weight": 5,
+        "segments": ["listen_and_observe", "patrol_a_round", "korok_hint"]
+      },
       {"id": "notice_viewer", "label": "留意到你", "weight": 2, "segments": ["notice_the_viewer"]}
     ],
     "focus": [
-      {"id": "gear_maintenance", "label": "装备保养线", "weight": 5, "segments": ["maintain_the_shield", "check_the_route"]},
+      {
+        "id": "gear_maintenance",
+        "label": "装备保养线",
+        "weight": 5,
+        "segments": ["maintain_the_shield", "check_the_route"]
+      },
       {"id": "wrap_up", "label": "收个尾", "weight": 1, "segments": ["focus_complete"]}
     ],
     "active": [
       {"id": "explore_out", "label": "出门探索", "weight": 5, "segments": ["ride_out", "zonai_power"]},
-      {"id": "battle_aftermath", "label": "战斗之后", "weight": 2, "segments": ["ambush_battle", "adventure_progress"]}
+      {
+        "id": "battle_aftermath",
+        "label": "战斗之后",
+        "weight": 2,
+        "segments": ["ambush_battle", "adventure_progress"]
+      }
     ],
     "relax": [
-      {"id": "slow_down", "label": "慢下来", "weight": 5, "segments": ["long_stretch", "brief_doze", "daydream_sit"]}
+      {
+        "id": "slow_down",
+        "label": "慢下来",
+        "weight": 5,
+        "segments": ["long_stretch", "brief_doze", "daydream_sit"]
+      }
     ],
     "eat": [{"id": "meal", "label": "吃点东西", "weight": 1, "segments": ["hyrule_apple"]}],
     "sleep": [{"id": "sleep", "label": "睡觉", "weight": 1, "segments": ["lie_down_sleep"]}]
+  },
+  "acknowledge": {
+    "default": [{"clip": "greet_wave", "seconds": 3}],
+    "by_kind": {
+      "hover": [{"clip": "observe", "seconds": 3}],
+      "talk": [{"clip": "greet_wave", "seconds": 3}, {"clip": "observe", "seconds": 2}]
+    },
+    "by_state": {"sleep": [{"clip": "lie_sleep", "seconds": 4}]}
   }
 }

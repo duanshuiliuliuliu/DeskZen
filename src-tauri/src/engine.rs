@@ -20,6 +20,8 @@ pub(crate) const CANONICAL_STATES: &[&str] =
     &["routine", "focus", "active", "relax", "eat", "sleep"];
 /// 必配的兜底状态 id（日常）
 pub(crate) const FALLBACK_STATE: &str = "routine";
+/// `acknowledge` 里"所有状态的默认反应"的键名
+pub(crate) const DEFAULT_ACK_KEY: &str = "default";
 
 /// 一个角色的完整配置
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -43,6 +45,10 @@ pub struct PersonaConfig {
     /// 旧格式没有 chains 时，[`PersonaConfig::normalize`] 会为每个段合成一条单段链。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub chains: HashMap<String, Vec<ChainConfig>>,
+    /// 被用户注意到（鼠标凑近 / 点一下 / 开口说话）时的即时反应：键为状态 id 或 `default`。
+    /// 反应步骤、触发来源差异、限频参数都在这里配（详见 [`AcknowledgeConfig`]）。
+    #[serde(default, skip_serializing_if = "AcknowledgeConfig::is_empty")]
+    pub acknowledge: AcknowledgeConfig,
     pub schedule: ScheduleConfig,
 }
 
@@ -203,6 +209,105 @@ pub struct ChainConfig {
     pub segments: Vec<String>,
 }
 
+/// 「被用户注意到」时的即时反应配置。
+///
+/// 触发来源（kind）：`hover`（鼠标凑近）、`click`（单击）、`chat`（打开对话窗）、
+/// `talk`（发消息）。解析优先级：**按状态覆盖 > 按来源覆盖 > 默认**；任何一层
+/// 显式配成空数组都表示"不响应"（例如睡觉时被打扰不动）。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AcknowledgeConfig {
+    /// 所有来源、所有状态通用的反应
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default: Vec<SceneStepConfig>,
+    /// 按来源覆盖
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub by_kind: HashMap<String, Vec<SceneStepConfig>>,
+    /// 按状态覆盖（优先级高于来源）
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub by_state: HashMap<String, Vec<SceneStepConfig>>,
+    /// 各来源的最小间隔（秒）；`default` 键为未列出来源兜底，缺省 15
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub cooldown_s: HashMap<String, i64>,
+    /// 指针类事件（hover/click）之间的全局最小间隔（秒）。明确互动（chat/talk）
+    /// 不受它限制——用户主动搭话时不该被"刚看过你"挡掉。
+    #[serde(default = "default_global_cooldown_s")]
+    pub global_cooldown_s: i64,
+    /// 当前动作剩余不足这么多秒就不打断（刚打断就结束反而突兀）
+    #[serde(default = "default_min_remaining_s")]
+    pub min_remaining_s: i64,
+}
+
+fn default_global_cooldown_s() -> i64 {
+    6
+}
+
+fn default_min_remaining_s() -> i64 {
+    3
+}
+
+/// 各来源的默认最小间隔（秒）：鼠标蹭过窗口很常见，间隔拉大；
+/// 点击/搭话是明确互动，可以快一点。persona 可用 `cooldown_s` 覆盖。
+pub(crate) fn default_cooldown_secs(kind: &str) -> i64 {
+    match kind {
+        "hover" => 30,
+        "click" => 8,
+        "chat" => 10,
+        "talk" => 8,
+        _ => 15,
+    }
+}
+
+impl Default for AcknowledgeConfig {
+    fn default() -> Self {
+        Self {
+            default: Vec::new(),
+            by_kind: HashMap::new(),
+            by_state: HashMap::new(),
+            cooldown_s: HashMap::new(),
+            global_cooldown_s: default_global_cooldown_s(),
+            min_remaining_s: default_min_remaining_s(),
+        }
+    }
+}
+
+/// 合法的触发来源；`chat` 是"打开对话窗"，`talk` 是"发出一条消息"
+pub(crate) const ACK_KINDS: &[&str] = &["hover", "click", "chat", "talk"];
+
+impl AcknowledgeConfig {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.default.is_empty() && self.by_kind.is_empty() && self.by_state.is_empty()
+    }
+
+    /// 这次该播什么：状态覆盖 > 来源覆盖 > 默认；空 = 不响应
+    pub(crate) fn steps_for(&self, state: &str, kind: &str) -> Option<&[SceneStepConfig]> {
+        let steps = self
+            .by_state
+            .get(state)
+            .or_else(|| self.by_kind.get(kind))
+            .unwrap_or(&self.default);
+        if steps.is_empty() {
+            None
+        } else {
+            Some(steps)
+        }
+    }
+
+    /// 该来源的最小间隔（秒），缺省 15
+    pub(crate) fn cooldown_secs(&self, kind: &str) -> i64 {
+        self.cooldown_s
+            .get(kind)
+            .or_else(|| self.cooldown_s.get(DEFAULT_ACK_KEY))
+            .copied()
+            .unwrap_or_else(|| default_cooldown_secs(kind))
+            .max(0)
+    }
+
+    /// 指针类事件受全局间隔约束；chat/talk 作为明确互动不受限
+    pub(crate) fn is_pointer_kind(kind: &str) -> bool {
+        matches!(kind, "hover" | "click")
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ScheduleConfig {
     /// 循环状态（逐状态时长）
@@ -290,6 +395,12 @@ const FIRST_SPEAK_MIN_S: i64 = 30;
 const FIRST_SPEAK_MAX_S: i64 = 90;
 /// 聊天后的气泡抑制窗口（分钟）
 const CHAT_SUPPRESS_MIN: i64 = 3;
+/// 用户关注事件的限频状态
+#[derive(Debug, Default)]
+struct SeenState {
+    last_any: Option<chrono::DateTime<chrono::Local>>,
+    last_kind: HashMap<String, chrono::DateTime<chrono::Local>>,
+}
 
 /// 默认期望说话间隔（分钟）：按话痨档位；mute 返回 None（不说话）。
 /// 状态可用 `bubble_gap_min` 覆盖。
@@ -418,6 +529,8 @@ pub struct StateEngine {
     ambient: Arc<Mutex<AmbientBubbles>>,
     /// 场景播放调度：由后端决定"当前播哪个场景的哪个动作"，前端按事件渲染
     playback: Arc<Mutex<crate::playback::Playback>>,
+    /// 用户关注事件（凑近/点击/搭话）的限频状态
+    seen: Arc<Mutex<SeenState>>,
     /// 每日气泡生成任务是否在跑（防止重复起任务）
     pub(crate) generating: Arc<AtomicBool>,
     /// 后台节拍线程的唤醒信号：switch_persona / next_state 修改配置后 notify，
@@ -485,6 +598,7 @@ impl StateEngine {
             })),
             ambient: Arc::new(Mutex::new(AmbientBubbles::default())),
             playback: Arc::new(Mutex::new(crate::playback::Playback::default())),
+            seen: Arc::new(Mutex::new(SeenState::default())),
             generating: Arc::new(AtomicBool::new(false)),
             prefs: Arc::new(Mutex::new(prefs)),
             wake_lock: Arc::new(Mutex::new(())),
@@ -627,6 +741,48 @@ impl StateEngine {
         crate::util::lock(&self.ambient).last_chat_at = Some(chrono::Local::now());
     }
 
+    /// 用户「注意到角色」（鼠标凑近 / 点一下 / 开口说话）：让角色先放下手上的事看你一眼，
+    /// 反应结束再回到原来在做的事。限频避免鼠标蹭过窗口就反复打断。
+    pub(crate) fn notify_seen(&self, kind: &str) {
+        let now = chrono::Local::now();
+        let persona = self.persona();
+        let state = self.current_state();
+        let Some(steps) = persona
+            .acknowledge
+            .steps_for(&state, kind)
+            .map(<[SceneStepConfig]>::to_vec)
+        else {
+            return;
+        };
+        {
+            let mut seen = crate::util::lock(&self.seen);
+            let pointer = AcknowledgeConfig::is_pointer_kind(kind);
+            if pointer
+                && seen
+                    .last_any
+                    .is_some_and(|t| (now - t).num_seconds() < persona.acknowledge.global_cooldown_s)
+            {
+                return;
+            }
+            if seen
+                .last_kind
+                .get(kind)
+                .is_some_and(|t| (now - *t).num_seconds() < persona.acknowledge.cooldown_secs(kind))
+            {
+                return;
+            }
+            seen.last_any = Some(now);
+            seen.last_kind.insert(kind.to_string(), now);
+        }
+        let event = crate::util::lock(&self.playback).acknowledge(&persona, &state, &steps, now);
+        if let Some(event) = event {
+            let _ = self.app.emit("playback", event);
+            // 反应实例太短不配台词；回到原活动时会重新排说话
+            self.reschedule_speech(now);
+            self.notify_wake();
+        }
+    }
+
     /// 当前状态的期望说话间隔 E（分钟）；mute / 未配置返回 None。
     /// 优先用状态里显式配置的 `bubble_gap_min`，否则按话痨档位取默认值。
     fn state_gap_min(&self, persona: &PersonaConfig, state: &str) -> Option<f64> {
@@ -655,9 +811,9 @@ impl StateEngine {
             let playback = crate::util::lock(&self.playback);
             playback
                 .current()
-                .map(|c| (c.clip.clone(), c.started_at, c.duration_ms))
+                .map(|c| (c.clip.clone(), c.started_at, c.duration_ms, c.ack))
         };
-        let Some((clip_id, started_at, duration_ms)) = instance else {
+        let Some((clip_id, started_at, duration_ms, ack)) = instance else {
             crate::util::lock(&self.ambient).speak_at = None;
             return;
         };
@@ -667,7 +823,8 @@ impl StateEngine {
             crate::util::lock(&self.ambient).speak_at = None;
             return; // mute：当前状态不说话
         };
-        if (duration_ms as i64) < SPEAK_MIN_ACTION_MS {
+        // 「注意到你」这类短反应放宽时长要求：它就是对用户的即时回应
+        if !ack && (duration_ms as i64) < SPEAK_MIN_ACTION_MS {
             crate::util::lock(&self.ambient).speak_at = None;
             return; // 过渡动作：不配台词
         }
@@ -678,14 +835,19 @@ impl StateEngine {
         }
         let mut ambient = crate::util::lock(&self.ambient);
         ambient.speak_at = None;
-        let Some((from, to)) = speech_window(
-            now,
-            started_at,
-            duration_ms,
-            ambient.earliest_at,
-            ambient.last_shown_at,
-            e,
-        ) else {
+        let window = if ack {
+            ack_speech_window(started_at, duration_ms)
+        } else {
+            speech_window(
+                now,
+                started_at,
+                duration_ms,
+                ambient.earliest_at,
+                ambient.last_shown_at,
+                e,
+            )
+        };
+        let Some((from, to)) = window else {
             return;
         };
         let span = (to - from).num_seconds().max(0);
@@ -1073,7 +1235,7 @@ impl StateEngine {
                 next_transition_at(&p, &m, &now)
             };
             // 当前动作实例排定的说话时刻若早于状态切换，则按说话时刻唤醒
-            let (wake_at, playback_leads) = {
+            let (wake_at, needs_precise_wake) = {
                 let bubble_at = crate::util::lock(&ambient).speak_at;
                 let play_at = crate::util::lock(&playback).next_at();
                 let mut earliest = next;
@@ -1083,13 +1245,16 @@ impl StateEngine {
                 if let Some(t) = play_at {
                     earliest = earliest.min(t);
                 }
-                // 播放是否是最早的那个唤醒时刻：是的话要踩点，不能按状态切换那样多睡 1 秒
-                (earliest, play_at.is_some_and(|t| t == earliest))
+                // 唤醒来自「该说话了」或「动作播完了」时要踩点：这两件事都是秒级接力，
+                // 1 秒防抖会把短反应（如「注意到你」）的台词挤到临结束才出现。
+                let precise = bubble_at.is_some_and(|t| t == earliest)
+                    || play_at.is_some_and(|t| t == earliest);
+                (earliest, precise)
             };
             let mut sleep_dur = (wake_at - now).to_std().unwrap_or(Duration::from_secs(0));
-            // 状态切换按分钟对齐，多睡 1 秒可避开边界竞态；动作播放是毫秒级接力，
+            // 状态切换按分钟对齐，多睡 1 秒可避开边界竞态；说话/动作推进都是秒级接力，
             // 多睡 1 秒会让画面在切换前"定格一下"，所以只留 60ms 余量。
-            sleep_dur += if playback_leads {
+            sleep_dur += if needs_precise_wake {
                 Duration::from_millis(60)
             } else {
                 Duration::from_secs(1)
@@ -1189,6 +1354,12 @@ pub fn get_persona_config(engine: tauri::State<'_, StateEngine>) -> PersonaView 
 #[tauri::command]
 pub fn get_current_state(engine: tauri::State<'_, StateEngine>) -> String {
     engine.current_state()
+}
+
+/// 前端上报「用户注意到角色」：kind = hover | click | talk
+#[tauri::command]
+pub fn notify_seen(kind: String, engine: tauri::State<'_, StateEngine>) {
+    engine.notify_seen(&kind);
 }
 
 /// 对话历史文件最大加载字节数：超过则放弃加载（防手工塞入巨型文件拖慢启动）
@@ -1320,6 +1491,30 @@ fn find_active_slot(schedule: &ScheduleConfig, mins: u32) -> Option<&TimeSlot> {
             false
         }
     })
+}
+
+/// 「注意到你」这类短反应的说话窗口。
+///
+/// 反应通常只有 4~6 秒，用常规规则（≥30 秒才说话）一句都说不了。这里放宽为：
+/// 反应 ≥2.5 秒即可说话，时刻落在反应的 25% 处，展示到反应结束前 1.5 秒为止
+/// （气泡展示时长本来就会被实例剩余时间截短）；间隔护栏不适用——这是对用户的即时回应。
+fn ack_speech_window(
+    started_at: chrono::DateTime<chrono::Local>,
+    duration_ms: u64,
+) -> Option<(
+    chrono::DateTime<chrono::Local>,
+    chrono::DateTime<chrono::Local>,
+)> {
+    const ACK_SPEAK_MIN_MS: i64 = 2_500;
+    const ACK_LINE_MIN_MS: i64 = 1_500;
+    let duration = duration_ms as i64;
+    if duration < ACK_SPEAK_MIN_MS {
+        return None;
+    }
+    let ends_at = started_at + chrono::Duration::milliseconds(duration);
+    let from = started_at + chrono::Duration::milliseconds(duration / 4);
+    let to = ends_at - chrono::Duration::milliseconds(ACK_LINE_MIN_MS);
+    Some((from, if to > from { to } else { from }))
 }
 
 /// 依据墙钟时间在循环状态中取当前状态
@@ -1481,6 +1676,52 @@ pub(crate) fn validate_persona_structure(persona: &PersonaConfig) -> Result<(), 
     }
     // 日程引用校验：状态必须来自固定集合。引用"未配置素材"的状态是允许的——
     // 运行时该状态完全按 routine 处理（见 runtime_state），不算错误。
+    // 「被注意到」的即时反应：来源/状态键合法、步骤引用的动作必须存在、限频参数合理
+    let ack = &persona.acknowledge;
+    for kind in ack.by_kind.keys() {
+        if !ACK_KINDS.contains(&kind.as_str()) {
+            return Err(format!("acknowledge.by_kind 含未知来源 {kind}"));
+        }
+    }
+    for state in ack.by_state.keys() {
+        if !CANONICAL_STATES.contains(&state.as_str()) {
+            return Err(format!("acknowledge.by_state 含未知状态 {state}"));
+        }
+    }
+    for kind in ack.cooldown_s.keys() {
+        if kind != DEFAULT_ACK_KEY && !ACK_KINDS.contains(&kind.as_str()) {
+            return Err(format!("acknowledge.cooldown_s 含未知来源 {kind}"));
+        }
+    }
+    for (label, steps) in ack
+        .by_kind
+        .iter()
+        .map(|(kind, steps)| (format!("by_kind[{kind}]"), steps))
+        .chain(
+            ack.by_state
+                .iter()
+                .map(|(state, steps)| (format!("by_state[{state}]"), steps)),
+        )
+        .chain(std::iter::once(("default".to_string(), &ack.default)))
+    {
+        for step in steps {
+            if !persona.clips.contains_key(&step.clip) {
+                return Err(format!("acknowledge.{label} 引用了未知动作 {}", step.clip));
+            }
+            if step.seconds == Some(0) {
+                return Err(format!(
+                    "acknowledge.{label} 的动作 {} seconds 必须大于 0",
+                    step.clip
+                ));
+            }
+        }
+    }
+    if ack.cooldown_s.values().any(|secs| *secs < 0)
+        || ack.global_cooldown_s < 0
+        || ack.min_remaining_s < 0
+    {
+        return Err("acknowledge 的间隔参数不能为负".into());
+    }
     for entry in persona.schedule.loop_entries() {
         if !CANONICAL_STATES.contains(&entry.state.as_str()) {
             return Err(format!("循环引用了未知状态 {}", entry.state));
@@ -2572,6 +2813,63 @@ mod tests {
         bad_step.scenes.get_mut("relax").unwrap()[0].steps[0].clip = "不存在的动作".into();
         let error = validate_persona_structure(&bad_step).unwrap_err();
         assert!(error.contains("未知动作"), "{error}");
+    }
+
+    #[test]
+    fn structure_validation_checks_acknowledge_config() {
+        let p = link();
+        let ack = &p.acknowledge;
+        assert!(
+            ack.steps_for("routine", "click").is_some(),
+            "内置角色应配了「注意你」的反应"
+        );
+        assert!(
+            ack.steps_for("routine", "hover").is_some(),
+            "凑近也应有反应"
+        );
+        assert!(
+            ack.steps_for("sleep", "talk").is_some(),
+            "睡觉时被打扰应配成「翻个身」而不是不理会"
+        );
+        assert!(
+            ack.steps_for("routine", "talk").is_some(),
+            "搭话应有反应（按来源覆盖）"
+        );
+
+        // 引用了不存在的动作 → 结构校验拦下
+        let mut bad = link();
+        bad.acknowledge.by_kind.insert(
+            "click".to_string(),
+            vec![SceneStepConfig {
+                clip: "不存在的动作".into(),
+                seconds: Some(3),
+                loops: 1,
+            }],
+        );
+        let error = validate_persona_structure(&bad).unwrap_err();
+        assert!(error.contains("acknowledge"), "{error}");
+
+        // 未知来源 / 未知状态键 → 同样拦下
+        let mut bad_key = link();
+        bad_key.acknowledge.by_state.insert("walking".to_string(), vec![]);
+        let error = validate_persona_structure(&bad_key).unwrap_err();
+        assert!(error.contains("未知状态"), "{error}");
+        let mut bad_kind = link();
+        bad_kind.acknowledge.by_kind.insert("poke".to_string(), vec![]);
+        let error = validate_persona_structure(&bad_kind).unwrap_err();
+        assert!(error.contains("未知来源"), "{error}");
+    }
+
+    #[test]
+    fn ack_speech_window_allows_short_reactions() {
+        let start = local_at(10, 0);
+        // 5 秒的反应：说话窗口落在 25% 处、结尾留 1.5 秒（常规规则要求 ≥30 秒，这里放宽）
+        let (from, to) = ack_speech_window(start, 5_000).unwrap();
+        assert_eq!((from - start).num_milliseconds(), 1_250);
+        let ends_at = start + chrono::Duration::milliseconds(5_000);
+        assert_eq!((ends_at - to).num_milliseconds(), 1_500);
+        // 太短的过渡动作仍不配台词
+        assert!(ack_speech_window(start, 2_000).is_none());
     }
 
     #[test]

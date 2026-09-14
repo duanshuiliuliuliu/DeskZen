@@ -205,6 +205,21 @@ async function init(): Promise<void> {
     }
   });
 
+  // 用户"注意到角色"：鼠标凑近 / 点一下（未拖动）→ 让角色放下手上的事看你一眼，
+  // 反应结束再回到原来在做的事（限频在后端，鼠标蹭过窗口不会反复打断）
+  character.addEventListener("pointerenter", () => {
+    void invoke("notify_seen", { kind: "hover" });
+  });
+
+  character.addEventListener("pointerup", (e) => {
+    if (e.button !== 0) return;
+    if (dragging) {
+      dragging = false; // 拖动收尾，不算"点一下"
+      return;
+    }
+    void invoke("notify_seen", { kind: "click" });
+  });
+
   // 左键双击（未拖动）角色 → 打开对话窗口
   character.addEventListener("dblclick", () => {
     if (dragging) {

@@ -8,12 +8,18 @@ use std::collections::{HashMap, VecDeque};
 use chrono::{DateTime, Local};
 use serde::Serialize;
 
-use crate::engine::{refill_bag, AnimationClipConfig, ChainConfig, PersonaConfig, SceneConfig};
+use crate::engine::{
+    refill_bag, AnimationClipConfig, ChainConfig, PersonaConfig, SceneConfig, SceneStepConfig,
+};
 
 /// 单个动作实例的时长上限（毫秒）：防止手改配置把角色卡在同一个动作上
 pub const MAX_ACTION_MS: i64 = 5 * 60 * 1000;
 /// 旧格式 loops 的上限（避免旧配置异常放大）
 pub const MAX_STEP_LOOPS: u32 = 20;
+/// "注意你"实例在事件里的链/段标识与标题
+const ACK_CHAIN_ID: &str = "__ack__";
+const ACK_SEGMENT_ID: &str = "__ack__";
+const ACK_LABEL: &str = "注意到你";
 
 /// 发给前端的播放指令（前端只负责按它渲染，不再自己挑场景）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -50,12 +56,19 @@ pub(crate) struct Current {
     pub(crate) started_at: DateTime<Local>,
     pub(crate) next_at: DateTime<Local>,
     pub(crate) duration_ms: u64,
+    /// 是否是「注意到你」这类短反应实例：反应很短，说话规则要放宽（见 engine::ack_speech_window）
+    pub(crate) ack: bool,
 }
 
 /// 播放调度状态（与状态引擎同生命周期，不持久化）
 #[derive(Debug, Default)]
 pub struct Playback {
     current: Option<Current>,
+    /// 被打断的动作：播完"注意你"后回到它继续（只保留一层，够用且不会无限套娃）
+    suspended: Option<Current>,
+    /// 正在播的"注意你"步骤；非空表示处于打断反应中
+    ack_steps: Vec<SceneStepConfig>,
+    ack_index: usize,
     /// state -> 链 id 的加权洗牌袋：一轮内每条链按权重出现；链内顺序不受影响
     bags: HashMap<String, VecDeque<String>>,
     /// state -> 上一轮最后播放的链（跨轮防连续重复）
@@ -66,8 +79,16 @@ impl Playback {
     /// 切换角色时清空：袋子与"当前播放"都属于旧角色
     pub fn clear(&mut self) {
         self.current = None;
+        self.suspended = None;
+        self.ack_steps.clear();
+        self.ack_index = 0;
         self.bags.clear();
         self.last_chain.clear();
+    }
+
+    /// 是否正处于"被打断去注意用户"的状态
+    pub fn is_acknowledging(&self) -> bool {
+        !self.ack_steps.is_empty()
     }
 
     /// 为指定状态选一条链，并从第一段第一个动作开始（状态切换 / 启动 / 切角色后调用）
@@ -78,8 +99,39 @@ impl Playback {
         now: DateTime<Local>,
     ) -> Option<PlaybackEvent> {
         self.current = None;
+        // 换状态/换角色时，被打断的旧活动不再恢复
+        self.suspended = None;
+        self.ack_steps.clear();
+        self.ack_index = 0;
         let chain = self.pick_chain(persona, state)?;
         self.start_chain(persona, state, chain, now)
+    }
+
+    /// 「被用户注意到」：挂起当前动作，插一段短反应（注意你），之后再回到原处继续。
+    ///
+    /// 返回要播的反应动作；以下情况不打断并返回 None：
+    /// - 没有正在播的内容 / 已经在反应中；
+    /// - 当前动作剩余不足 3 秒（刚打断就结束，更突兀）；
+    /// - 反应步骤里没有任何可用动作。
+    pub fn acknowledge(
+        &mut self,
+        persona: &PersonaConfig,
+        state: &str,
+        steps: &[SceneStepConfig],
+        now: DateTime<Local>,
+    ) -> Option<PlaybackEvent> {
+        if self.is_acknowledging() {
+            return None;
+        }
+        let current = self.current.clone()?;
+        let min_remaining_ms = persona.acknowledge.min_remaining_s.max(0) * 1000;
+        if (current.next_at - now).num_milliseconds() < min_remaining_ms {
+            return None;
+        }
+        self.suspended = Some(current);
+        self.ack_steps = steps.to_vec();
+        self.ack_index = 0;
+        self.start_ack_step(persona, state, now)
     }
 
     /// 到点就推进：同段下一步 → 同链下一段 → 换一条链
@@ -91,6 +143,14 @@ impl Playback {
         let current = self.current.clone()?;
         if now < current.next_at {
             return None;
+        }
+        // 0) 正在播「注意你」：还有下一步就继续，播完则回到被打断的活动
+        if self.is_acknowledging() {
+            if let Some(next) = self.next_ack_index(persona) {
+                self.ack_index = next;
+                return self.start_ack_step(persona, &current.state, now);
+            }
+            return self.resume_suspended(persona, now);
         }
         // 1) 同一段还有下一步
         if let Some(chain) = find_chain(persona, &current.state, &current.chain_id) {
@@ -214,6 +274,66 @@ impl Playback {
         None
     }
 
+    /// 播「注意你」反应里的第 `ack_index` 步（跳过引用不到动作的步骤）
+    fn start_ack_step(
+        &mut self,
+        persona: &PersonaConfig,
+        state: &str,
+        now: DateTime<Local>,
+    ) -> Option<PlaybackEvent> {
+        let step = self.ack_steps.get(self.ack_index)?.clone();
+        let chain = ChainConfig {
+            id: ACK_CHAIN_ID.into(),
+            label: ACK_LABEL.into(),
+            weight: 1,
+            segments: vec![ACK_SEGMENT_ID.into()],
+        };
+        let segment = SceneConfig {
+            id: ACK_SEGMENT_ID.into(),
+            label: ACK_LABEL.into(),
+            weight: 1,
+            steps: vec![step],
+        };
+        self.start_step_with_ack(persona, state, &chain, &segment, 0, now, true)
+    }
+
+    /// 反应步骤里下一个有可用动作的下标
+    fn next_ack_index(&self, persona: &PersonaConfig) -> Option<usize> {
+        (self.ack_index + 1..self.ack_steps.len())
+            .find(|index| persona.clips.contains_key(&self.ack_steps[*index].clip))
+    }
+
+    /// 反应播完：回到被打断的那一步重新开始；配置已不可用时按常规换链
+    fn resume_suspended(
+        &mut self,
+        persona: &PersonaConfig,
+        now: DateTime<Local>,
+    ) -> Option<PlaybackEvent> {
+        self.ack_steps.clear();
+        self.ack_index = 0;
+        let Some(suspended) = self.suspended.take() else {
+            let state = self.current.as_ref()?.state.clone();
+            let chain = self.pick_chain(persona, &state)?;
+            return self.start_chain(persona, &state, chain, now);
+        };
+        let chain = find_chain(persona, &suspended.state, &suspended.chain_id);
+        let segment = find_segment(persona, &suspended.state, &suspended.scene_id);
+        match (chain, segment) {
+            (Some(chain), Some(segment)) => self.start_step(
+                persona,
+                &suspended.state,
+                chain,
+                segment,
+                suspended.step_index,
+                now,
+            ),
+            _ => {
+                let chain = self.pick_chain(persona, &suspended.state)?;
+                self.start_chain(persona, &suspended.state, chain, now)
+            }
+        }
+    }
+
     /// 开播某一步（一个动作实例），时长按 `seconds` 目标取整到整数个循环
     fn start_step(
         &mut self,
@@ -223,6 +343,22 @@ impl Playback {
         scene: &SceneConfig,
         index: usize,
         now: DateTime<Local>,
+    ) -> Option<PlaybackEvent> {
+        self.start_step_with_ack(persona, state, chain, scene, index, now, false)
+    }
+
+    /// 开播某一步（一个动作实例），时长按 `seconds` 目标取整到整数个循环。
+    /// `ack` 标记这是"注意到你"的短反应。
+    #[allow(clippy::too_many_arguments)]
+    fn start_step_with_ack(
+        &mut self,
+        persona: &PersonaConfig,
+        state: &str,
+        chain: &ChainConfig,
+        scene: &SceneConfig,
+        index: usize,
+        now: DateTime<Local>,
+        ack: bool,
     ) -> Option<PlaybackEvent> {
         let step = scene.steps.get(index)?;
         let clip: &AnimationClipConfig = persona.clips.get(&step.clip)?;
@@ -255,6 +391,7 @@ impl Playback {
             started_at: now,
             next_at: now + chrono::Duration::milliseconds(duration_ms as i64),
             duration_ms,
+            ack,
         });
         Some(PlaybackEvent {
             state: state.to_string(),
@@ -426,6 +563,15 @@ mod tests {
             clips,
             scenes,
             chains,
+            // 默认给所有状态配一个 1 秒的"注意你"反应，供 acknowledge 用例使用
+            acknowledge: crate::engine::AcknowledgeConfig {
+                default: vec![SceneStepConfig {
+                    clip: "three".into(),
+                    seconds: Some(1),
+                    loops: 1,
+                }],
+                ..Default::default()
+            },
             schedule: ScheduleConfig {
                 r#loop: vec![],
                 time: vec![],
@@ -438,6 +584,17 @@ mod tests {
         let mut p = persona();
         p.chains
             .insert("routine".to_string(), vec![p.chains["routine"][0].clone()]);
+        p
+    }
+
+    /// 长动作实例版本：「注意你」的打断/恢复用例需要当前动作还剩足够时间
+    fn long_instance_persona() -> PersonaConfig {
+        let mut p = single_chain_persona();
+        for scene in p.scenes.get_mut("routine").unwrap() {
+            for step in &mut scene.steps {
+                step.seconds = Some(30);
+            }
+        }
         p
     }
 
@@ -530,5 +687,66 @@ mod tests {
         playback.clear();
         assert!(playback.current_clip().is_none());
         assert!(playback.next_at().is_none());
+        assert!(!playback.is_acknowledging());
+    }
+
+    #[test]
+    fn acknowledge_interrupts_then_resumes_same_action() {
+        let p = long_instance_persona();
+        let mut playback = Playback::default();
+        let start = at(10, 0, 0);
+        let before = playback.reset(&p, "routine", start).unwrap();
+        let steps = p.acknowledge.steps_for("routine", "click").unwrap().to_vec();
+
+        let ack = playback
+            .acknowledge(&p, "routine", &steps, start + chrono::Duration::seconds(1))
+            .unwrap();
+        assert_eq!(ack.clip, "three");
+        assert_eq!(ack.scene_label, ACK_LABEL);
+        assert!(playback.is_acknowledging());
+        assert_eq!(playback.current_clip(), Some("three"));
+
+        // 反应播完 → 回到被打断的那条链、那一段、那一步
+        let resumed_at =
+            start + chrono::Duration::seconds(1) + chrono::Duration::milliseconds(ack.duration_ms as i64);
+        let resumed = playback.advance(&p, resumed_at).unwrap();
+        assert_eq!(resumed.clip, before.clip);
+        assert_eq!(resumed.chain_id, before.chain_id);
+        assert_eq!(resumed.scene_id, before.scene_id);
+        assert_eq!(resumed.step_index, before.step_index);
+        assert!(!playback.is_acknowledging(), "恢复后应退出反应状态");
+    }
+
+    #[test]
+    fn acknowledge_skips_when_no_current_already_reacting_or_too_late() {
+        let p = long_instance_persona();
+        let steps = p.acknowledge.steps_for("routine", "click").unwrap().to_vec();
+
+        // 没有正在播的内容 → 不打断
+        let mut idle = Playback::default();
+        assert!(idle
+            .acknowledge(&p, "routine", &steps, at(10, 0, 0))
+            .is_none());
+
+        let mut playback = Playback::default();
+        let start = at(10, 0, 0);
+        playback.reset(&p, "routine", start).unwrap();
+        let ack = playback
+            .acknowledge(&p, "routine", &steps, start + chrono::Duration::seconds(1))
+            .unwrap();
+        // 反应中不重复打断
+        assert!(playback
+            .acknowledge(&p, "routine", &steps, start + chrono::Duration::seconds(2))
+            .is_none());
+
+        // 恢复后，当前动作只剩不到 3 秒 → 不再打断
+        let resumed_at = start
+            + chrono::Duration::seconds(1)
+            + chrono::Duration::milliseconds(ack.duration_ms as i64);
+        playback.advance(&p, resumed_at).unwrap();
+        let end = playback.current.as_ref().unwrap().next_at;
+        assert!(playback
+            .acknowledge(&p, "routine", &steps, end - chrono::Duration::seconds(1))
+            .is_none());
     }
 }

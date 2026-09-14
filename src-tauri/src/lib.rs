@@ -151,6 +151,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             engine::get_persona_config,
             engine::get_current_state,
+            engine::notify_seen,
             engine::load_chat_history,
             engine::save_chat_history,
             chat_send,
@@ -210,6 +211,8 @@ fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
 /// 点击角色/气泡后打开（或聚焦）对话窗口
 #[tauri::command]
 async fn open_chat(app: AppHandle) -> Result<(), String> {
+    // 打开对话窗 = "用户来搭话了"：让角色先看你一眼（走 acknowledge 的 chat 来源）
+    app.state::<engine::StateEngine>().notify_seen("chat");
     if let Some(win) = app.get_webview_window("chat") {
         place_chat_bubble(&app);
         let _ = win.show();
@@ -533,6 +536,8 @@ async fn chat_send(
 ) -> Result<ChatReply, String> {
     // 记录聊天互动：随后数分钟内抑制环境气泡（即使本轮回复失败，用户也在互动中）
     engine.record_chat_activity();
+    // 再加上「被注意到」的即时反应：放下手上的事看你一眼
+    engine.notify_seen("talk");
     let state = engine.current_state();
     let cfg = llm::load_config(&app);
     let persona = engine.persona();
