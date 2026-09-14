@@ -155,7 +155,12 @@
       {"state": "focus", "duration": 20},
       {"state": "relax", "duration": 30}
     ],
-    "time": [{"start": "20:00", "end": "08:00", "state": "sleep"}]
+    "time": [
+      {"start": "20:00", "end": "08:00", "state": "sleep"},
+      {"start": "08:00", "end": "09:00", "state": "eat"},
+      {"start": "12:00", "end": "13:00", "state": "eat"},
+      {"start": "18:00", "end": "19:00", "state": "eat"}
+    ]
   },
   "clips_dir": "/characters/link/clips",
   "clips": {
