@@ -3,6 +3,7 @@ mod engine;
 mod genbubble;
 mod llm;
 mod needs;
+mod plan;
 mod playback;
 mod prefs;
 mod screen;
@@ -115,6 +116,8 @@ pub fn run() {
 
             // 启动即检查并补跑当日 AI 气泡生成（开关关闭/未配 Key/已生成完时内部直接返回）
             genbubble::maybe_spawn_for_state(app.handle());
+            // 启动即检查并补跑当日计划（同上：开关关闭/未配 Key/当天已有计划时直接返回）
+            plan::maybe_spawn_for_today(app.handle());
 
             // 等前端就绪后再显示，避免透明窗口启动白屏闪烁
             let persona = app.get_webview_window("persona").unwrap();
@@ -509,6 +512,7 @@ fn set_ai_bubbles(
     prefs::save_prefs(&app, &engine.prefs())?;
     if enabled {
         genbubble::maybe_spawn_for_state(&app);
+        plan::maybe_spawn_for_today(&app);
     }
     Ok(())
 }

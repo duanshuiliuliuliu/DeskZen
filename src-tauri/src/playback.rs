@@ -23,6 +23,10 @@ const SPEED_MAX: f64 = 1.08;
 /// 一段至少持续多久（毫秒）：作者只配了很短的一两拍时，重复这一段，
 /// 避免几秒钟就换一件事做（重复时会重新掷概率/抖动，不是原样循环）
 const MIN_SEGMENT_MS: i64 = 12_000;
+/// 当日计划：今天想多做的标签，权重 ×1.6
+const PLAN_FOCUS_FACTOR: f64 = 1.6;
+/// 当日计划：今天想少做的标签，权重 ×0.45（降到"偶尔来一下"，不是禁掉）
+const PLAN_AVOID_FACTOR: f64 = 0.45;
 /// "注意你"实例在事件里的链/段标识与标题
 const ACK_CHAIN_ID: &str = "__ack__";
 const ACK_SEGMENT_ID: &str = "__ack__";
@@ -106,6 +110,9 @@ pub struct Playback {
     history: History,
     /// 需求快照（引擎每次推进前写入）：用来按标签调制链权重
     needs: crate::needs::NeedsState,
+    /// 当日计划的活动偏好：今天想多做 / 少做的标签（空 = 不调制）
+    plan_focus: Vec<String>,
+    plan_avoid: Vec<String>,
     /// state -> 链 id 的加权洗牌袋：一轮内每条链按权重出现；链内顺序不受影响
     bags: HashMap<String, VecDeque<String>>,
     /// state -> 上一轮最后播放的链（跨轮防连续重复）
@@ -141,6 +148,25 @@ impl Playback {
     /// 引擎推进前写入当前需求快照（`chain_bias` 用它调制权重）
     pub fn set_needs(&mut self, needs: crate::needs::NeedsState) {
         self.needs = needs;
+    }
+
+    /// 引擎推进前写入当日计划的活动偏好（focus 加分、avoid 减分，都按链的 tags 匹配）
+    pub fn set_plan_tags(&mut self, focus: Vec<String>, avoid: Vec<String>) {
+        self.plan_focus = focus;
+        self.plan_avoid = avoid;
+    }
+
+    /// 当日计划对这条链的权重倍率：命中 focus ×1.6、命中 avoid ×0.45（同时命中则相乘）
+    fn plan_factor(&self, tags: &[String]) -> f64 {
+        let hit = |list: &[String]| tags.iter().any(|tag| list.contains(tag));
+        let mut factor = 1.0;
+        if hit(&self.plan_focus) {
+            factor *= PLAN_FOCUS_FACTOR;
+        }
+        if hit(&self.plan_avoid) {
+            factor *= PLAN_AVOID_FACTOR;
+        }
+        factor
     }
 
     /// 这条链当前的触发约束是否满足（`when` 没配 = 随时可用）。
@@ -380,11 +406,12 @@ impl Playback {
         if self.bags.get(state).is_none_or(|bag| bag.is_empty()) {
             let mut pool: Vec<String> = Vec::new();
             for chain in &chains {
-                // 需求偏置：命中标签的链按倍率放大份数（1.0 = 不变），上下限防止爆量/清零
+                // 需求偏置 × 当日计划偏置：命中标签的链按倍率放大份数，上下限防止爆量/清零
                 let factor = persona
                     .needs
                     .chain_factor(&self.needs, &chain.tags)
-                    .max(0.0);
+                    .max(0.0)
+                    * self.plan_factor(&chain.tags);
                 let count = (chain.weight.max(1) as f64 * factor)
                     .round()
                     .clamp(1.0, 100.0) as u32;
@@ -1055,6 +1082,48 @@ mod tests {
             .reset(&p, "routine", at(10, 0, 0))
             .expect("约束全挡下时也要能播，不能卡死");
         assert_eq!(event.chain_id, "impossible");
+    }
+
+    #[test]
+    fn plan_tags_bias_chain_weights() {
+        use crate::engine::ChainConfig;
+        // 当日计划：今天想多做 explore、少做 social（两条链权重相同，只看计划）
+        let mut p = persona();
+        let chain = |id: &str, segment: &str, tag: &str| ChainConfig {
+            id: id.into(),
+            label: id.into(),
+            weight: 5,
+            segments: vec![segment.into()],
+            tags: vec![tag.to_string()],
+            when: None,
+        };
+        p.chains.insert(
+            "routine".to_string(),
+            vec![
+                chain("explore_chain", "a", "explore"),
+                chain("social_chain", "b", "social"),
+            ],
+        );
+        let count_explore = |focus: Vec<String>, avoid: Vec<String>| {
+            let mut playback = Playback::default();
+            playback.set_plan_tags(focus, avoid);
+            (0..40)
+                .filter(|minute| {
+                    playback
+                        .reset(&p, "routine", at(10, *minute, 0))
+                        .unwrap()
+                        .chain_id
+                        == "explore_chain"
+                })
+                .count()
+        };
+        // 没计划：权重相同 → 一袋 5:5，各占一半
+        assert_eq!(count_explore(vec![], vec![]), 20);
+        // 有计划：explore 份数 5×1.6=8、social 5×0.45≈2 → 一袋 8:2
+        assert_eq!(
+            count_explore(vec!["explore".into()], vec!["social".into()]),
+            32
+        );
     }
 
     #[test]

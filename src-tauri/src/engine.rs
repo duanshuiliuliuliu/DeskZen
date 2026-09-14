@@ -460,6 +460,8 @@ struct AmbientBubbles {
     bags: HashMap<String, VecDeque<String>>,
     /// 各池键上一条弹出的文案（跨轮防重复）
     last_text: HashMap<String, String>,
+    /// 当日计划的"开场白"：当天第一次开口优先说它，说完即清（一天只说一次）
+    opening: Option<String>,
 }
 
 /// 气泡默认展示时长（毫秒）；实际下发时还会被当前动作剩余时间截短
@@ -614,6 +616,10 @@ pub struct StateEngine {
     needs: Arc<Mutex<crate::needs::NeedsState>>,
     /// 最近一次下发的链 id（用于判断"换了一条新链"，给无聊降温）
     last_chain: Arc<Mutex<Option<String>>>,
+    /// 当日计划（当前角色的）：每天生成一次，调制链权重 + 当天第一次开口说出来
+    plan: Arc<Mutex<crate::plan::PlanState>>,
+    /// 当日计划生成任务是否在跑（防止重复起任务）
+    pub(crate) plan_generating: Arc<AtomicBool>,
     /// 每日气泡生成任务是否在跑（防止重复起任务）
     pub(crate) generating: Arc<AtomicBool>,
     /// 后台节拍线程的唤醒信号：switch_persona / next_state 修改配置后 notify，
@@ -664,6 +670,7 @@ impl StateEngine {
         let prefs = crate::prefs::load_prefs(&app);
         let needs = crate::needs::load(&app, "link", &persona.needs);
         let gen_cache = crate::genbubble::load(&app, "link");
+        let plan_cache = crate::plan::load(&app, "link");
         let mut display = effective_display_size_zoomed(&persona, prefs.zoom);
         // 启动即按显示器工作区等比适配，避免离谱 display / 高 zoom 时窗口出屏（取不到工作区则不钳制）。
         if let Some((mw, mh)) = work_area_content_limit(&app) {
@@ -685,6 +692,11 @@ impl StateEngine {
             seen: Arc::new(Mutex::new(SeenState::default())),
             needs: Arc::new(Mutex::new(needs)),
             last_chain: Arc::new(Mutex::new(None)),
+            plan: Arc::new(Mutex::new(crate::plan::PlanState {
+                persona_id: "link".to_string(),
+                cache: plan_cache,
+            })),
+            plan_generating: Arc::new(AtomicBool::new(false)),
             generating: Arc::new(AtomicBool::new(false)),
             prefs: Arc::new(Mutex::new(prefs)),
             wake_lock: Arc::new(Mutex::new(())),
@@ -973,7 +985,7 @@ impl StateEngine {
     /// 状态切换、切换角色、启动广播都会调用；前端只按事件渲染，不再自己挑场景。
     fn reset_playback(&self, state: &str, now: chrono::DateTime<chrono::Local>) {
         let persona = self.persona();
-        self.sync_needs_to_playback();
+        self.sync_bias_to_playback();
         let event = crate::util::lock(&self.playback).reset(&persona, state, now);
         if let Some(event) = event {
             self.note_chain_change(&event.chain_id);
@@ -993,7 +1005,7 @@ impl StateEngine {
             return;
         }
         let persona = self.persona();
-        self.sync_needs_to_playback();
+        self.sync_bias_to_playback();
         let event = crate::util::lock(&self.playback).advance(&persona, now);
         if let Some(event) = event {
             self.note_chain_change(&event.chain_id);
@@ -1002,10 +1014,70 @@ impl StateEngine {
         self.reschedule_speech(now);
     }
 
-    /// 把当前需求快照交给播放层（`chain_bias` 调制权重用）
-    fn sync_needs_to_playback(&self) {
+    /// 把"需求快照 + 当日计划的标签偏好"一起交给播放层（两者都调制链权重）
+    fn sync_bias_to_playback(&self) {
         let needs = crate::util::lock(&self.needs).clone();
-        crate::util::lock(&self.playback).set_needs(needs);
+        let (focus, avoid) = crate::plan::today_plan(&self.plan)
+            .map(|plan| (plan.focus, plan.avoid))
+            .unwrap_or_default();
+        let mut playback = crate::util::lock(&self.playback);
+        playback.set_needs(needs);
+        playback.set_plan_tags(focus, avoid);
+    }
+
+    /// 今天的计划是否还缺（今天没有、且今天也没失败过）
+    pub(crate) fn plan_needs_today(&self) -> bool {
+        crate::plan::needs_generation(&self.plan)
+    }
+
+    /// 近期主题（跨天）：生成当日计划时要求"换个不一样的"
+    pub(crate) fn plan_recent_themes(&self) -> Vec<String> {
+        crate::util::lock(&self.plan).cache.recent.clone()
+    }
+
+    /// 收下刚生成的当日计划：落盘 + 交给播放层做偏置 + 排进"当天第一次开口"
+    pub(crate) fn apply_plan(&self, persona_id: &str, plan: crate::plan::DailyPlan) {
+        let cache = {
+            let mut p = crate::util::lock(&self.plan);
+            if p.persona_id != persona_id {
+                return;
+            }
+            p.cache.date = crate::genbubble::today_str();
+            p.cache.failed = false;
+            p.cache.recent.push(plan.theme.clone());
+            let keep = p
+                .cache
+                .recent
+                .len()
+                .saturating_sub(crate::plan::RECENT_KEEP);
+            if keep > 0 {
+                p.cache.recent.drain(..keep);
+            }
+            p.cache.plan = Some(plan.clone());
+            p.cache.clone()
+        };
+        let _ = crate::plan::save(&self.app, persona_id, &cache);
+        // "要说话"：计划不能只活在权重里，当天第一次开口就把它说出来
+        if !plan.say.is_empty() {
+            crate::util::lock(&self.ambient).opening = Some(plan.say.clone());
+        }
+        self.sync_bias_to_playback();
+        let _ = self.app.emit("plan-changed", plan);
+    }
+
+    /// 记录当天计划生成失败：当天不再重试（跨天后重新试）
+    pub(crate) fn record_plan_failure(&self, persona_id: &str) {
+        let cache = {
+            let mut p = crate::util::lock(&self.plan);
+            if p.persona_id != persona_id {
+                return;
+            }
+            p.cache.date = crate::genbubble::today_str();
+            p.cache.failed = true;
+            p.cache.plan = None;
+            p.cache.clone()
+        };
+        let _ = crate::plan::save(&self.app, persona_id, &cache);
     }
 
     /// 换了一条新链：新鲜感让"无聊"下降
@@ -1072,6 +1144,10 @@ impl StateEngine {
 
     /// 取当前动作的下一条气泡文案（池来源与优先级见 [`resolve_bubble_pool`]）。
     fn next_ambient_text(&self) -> Option<String> {
+        // 当日计划的"开场白"优先：当天第一次开口就说「今天想怎么过」，说完即清
+        if let Some(say) = crate::util::lock(&self.ambient).opening.take() {
+            return Some(say);
+        }
         let persona = self.persona();
         let clip_id = self.current_clip();
         let ai_clip = clip_id
@@ -1293,6 +1369,16 @@ impl StateEngine {
             *crate::util::lock(&self.needs) = crate::needs::load(&self.app, id, &persona.needs);
         }
         *crate::util::lock(&self.last_chain) = None;
+        // 当日计划同样按角色独立：换成本角色今天的计划（已经生成过的直接复用）
+        {
+            let cache = crate::plan::load(&self.app, id);
+            *crate::util::lock(&self.plan) = crate::plan::PlanState {
+                persona_id: id.to_string(),
+                cache,
+            };
+        }
+        // 上一位角色的"开场白"不能留给新角色说
+        crate::util::lock(&self.ambient).opening = None;
         // 气泡缓存整体切到新角色（内存换绑 + 磁盘加载），并视条件补跑当日生成
         {
             let cache = crate::genbubble::load(&self.app, id);
@@ -1315,6 +1401,7 @@ impl StateEngine {
         let now = chrono::Local::now();
         self.arm_first_speech(now);
         crate::genbubble::maybe_spawn_for_state(app);
+        crate::plan::maybe_spawn_for_today(app);
         // 修改完成后唤醒节拍线程，使新日程表立即生效（否则线程仍睡在旧 next_transition_at）。
         self.notify_wake();
         // 给前端的显示配置带 zoomed 尺寸，前端 applyPersona 据此零改动呈现缩放后的角色。
@@ -1366,6 +1453,8 @@ impl StateEngine {
         let wake_cond = Arc::clone(&self.wake_cond);
         let needs = Arc::clone(&self.needs);
         let mut needs_saved_at = chrono::Local::now().timestamp();
+        // 当日计划的"今天"标记：跨天时补一次生成，同一天不反复试
+        let mut plan_checked_day = crate::genbubble::today_str();
         thread::spawn(move || loop {
             // 先算出下一次状态切换时刻，再用带超时的 Condvar 等待（+1s 缓冲，避免边界竞态）。
             // 单次睡眠不超过 15 分钟：防止时钟漂移 / DST 导致久睡不醒，醒来重算即可。
@@ -1462,6 +1551,12 @@ impl StateEngine {
             }
             drop(last);
             let engine = app.state::<StateEngine>();
+            // 跨天补一次当日计划（生成失败当天不再重试，见 plan::maybe_spawn_for_today）
+            let today = crate::genbubble::today_str();
+            if plan_checked_day != today {
+                plan_checked_day = today;
+                crate::plan::maybe_spawn_for_today(&app);
+            }
             if state_changed {
                 // 新状态换一套编排：重开播放并把第一步广播给前端；
                 // 说话排期随新的动作实例重排（状态切换本身不弹气泡）。
