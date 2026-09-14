@@ -101,10 +101,29 @@ pub struct Playback {
     current: Option<Current>,
     /// 被打断的动作：播完"注意你"后回到它继续（只保留一层，够用且不会无限套娃）
     suspended: Option<Current>,
+    /// 编排记忆：最近播过哪些动作、每条链上次/今天播了几次（`when` 约束靠它判断）。
+    /// 跨状态保留（"战斗之后"正是跨状态因果），只在切换角色时清空。
+    history: History,
     /// state -> 链 id 的加权洗牌袋：一轮内每条链按权重出现；链内顺序不受影响
     bags: HashMap<String, VecDeque<String>>,
     /// state -> 上一轮最后播放的链（跨轮防连续重复）
     last_chain: HashMap<String, String>,
+}
+
+/// 当天日期键（用于 max_per_day 计数）
+fn today_key(now: DateTime<Local>) -> String {
+    now.format("%Y-%m-%d").to_string()
+}
+
+/// 编排记忆
+#[derive(Debug, Default)]
+struct History {
+    /// clip id -> 最近一次播放时刻
+    recent_clips: HashMap<String, DateTime<Local>>,
+    /// chain id -> 最近一次播放时刻
+    chain_last: HashMap<String, DateTime<Local>>,
+    /// chain id -> (日期, 当天播放次数)
+    chain_today: HashMap<String, (String, u32)>,
 }
 
 impl Playback {
@@ -112,8 +131,71 @@ impl Playback {
     pub fn clear(&mut self) {
         self.current = None;
         self.suspended = None;
+        self.history = History::default();
         self.bags.clear();
         self.last_chain.clear();
+    }
+
+    /// 这条链当前的触发约束是否满足（`when` 没配 = 随时可用）。
+    /// - `requires_recent`：最近 `within_min` 分钟内播过其中任一动作；
+    /// - `cooldown_min`：距上次播这条链已超过冷却；
+    /// - `max_per_day`：当天出现次数未达上限。
+    fn chain_allowed(&self, chain: &ChainConfig, now: DateTime<Local>) -> bool {
+        let Some(when) = &chain.when else {
+            return true;
+        };
+        if !when.requires_recent.is_empty() {
+            let within = when.within_minutes();
+            let hit = when.requires_recent.iter().any(|clip| {
+                self.history
+                    .recent_clips
+                    .get(clip)
+                    .is_some_and(|at| (now - *at).num_minutes() < within)
+            });
+            if !hit {
+                return false;
+            }
+        }
+        if let Some(cooldown) = when.cooldown_min {
+            if self
+                .history
+                .chain_last
+                .get(&chain.id)
+                .is_some_and(|at| (now - *at).num_minutes() < cooldown as i64)
+            {
+                return false;
+            }
+        }
+        if let Some(max) = when.max_per_day {
+            let today = today_key(now);
+            if self
+                .history
+                .chain_today
+                .get(&chain.id)
+                .is_some_and(|(date, count)| *date == today && *count >= max)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// 记住"这条链开播了"（冷却与每日上限都基于它）
+    fn remember_chain(&mut self, chain_id: &str, now: DateTime<Local>) {
+        self.history
+            .chain_last
+            .insert(chain_id.to_string(), now);
+        let today = today_key(now);
+        let entry = self
+            .history
+            .chain_today
+            .entry(chain_id.to_string())
+            .or_insert_with(|| (today.clone(), 0));
+        if entry.0 != today {
+            *entry = (today, 1);
+        } else {
+            entry.1 += 1;
+        }
     }
 
     /// 是否正处于"被打断去注意用户"的状态
@@ -131,7 +213,7 @@ impl Playback {
         self.current = None;
         // 换状态/换角色时，被打断的旧活动不再恢复
         self.suspended = None;
-        let chain = self.pick_chain(persona, state)?;
+        let chain = self.pick_chain(persona, state, now)?;
         self.start_chain(persona, state, chain, now)
     }
 
@@ -231,8 +313,8 @@ impl Playback {
                 }
             }
         }
-        // 4) 链走完 → 按权重换一条链
-        let chain = self.pick_chain(persona, &current.state)?;
+        // 4) 链走完 → 在满足约束的链里按权重换一条
+        let chain = self.pick_chain(persona, &current.state, now)?;
         self.start_chain(persona, &current.state, chain, now)
     }
 
@@ -271,11 +353,20 @@ impl Playback {
         &mut self,
         persona: &'a PersonaConfig,
         state: &str,
+        now: DateTime<Local>,
     ) -> Option<&'a ChainConfig> {
         let chains = valid_chains(persona, state);
         if chains.is_empty() {
             return None;
         }
+        // 约束优先：先只在满足 when 的链里抽；全被挡下时退回不筛选，
+        // 宁可偶尔破例也不让角色卡死（约束是"过滤"，不是"死锁"）
+        let eligible: Vec<&ChainConfig> = chains
+            .iter()
+            .copied()
+            .filter(|chain| self.chain_allowed(chain, now))
+            .collect();
+        let chains = if eligible.is_empty() { chains } else { eligible };
         if self.bags.get(state).is_none_or(|bag| bag.is_empty()) {
             let mut pool: Vec<String> = Vec::new();
             for chain in &chains {
@@ -297,7 +388,7 @@ impl Playback {
         // 袋里残留的失效链 id 直接丢弃后重挑
         let picked = match chains.iter().find(|chain| chain.id == id) {
             Some(chain) => *chain,
-            None => return self.pick_chain(persona, state),
+            None => return self.pick_chain(persona, state, now),
         };
         self.last_chain.insert(state.to_string(), id);
         Some(picked)
@@ -317,6 +408,8 @@ impl Playback {
             };
             let run = plan_segment(persona, chain, segment, now);
             if let Some(event) = self.start_beat(persona, state, &run, 0, now) {
+                // 链真正开播了才记账（冷却/每日上限都基于它）
+                self.remember_chain(&chain.id, now);
                 return Some(event);
             }
         }
@@ -331,7 +424,7 @@ impl Playback {
     ) -> Option<PlaybackEvent> {
         let Some(suspended) = self.suspended.take() else {
             let state = self.current.as_ref()?.state.clone();
-            let chain = self.pick_chain(persona, &state)?;
+            let chain = self.pick_chain(persona, &state, now)?;
             return self.start_chain(persona, &state, chain, now);
         };
         // 回到被打断的那一拍：沿用它当时定好的时长/速度/相位，读起来才是"接着做"
@@ -344,7 +437,7 @@ impl Playback {
         ) {
             return Some(event);
         }
-        let chain = self.pick_chain(persona, &suspended.state)?;
+        let chain = self.pick_chain(persona, &suspended.state, now)?;
         self.start_chain(persona, &suspended.state, chain, now)
     }
 
@@ -359,6 +452,10 @@ impl Playback {
     ) -> Option<PlaybackEvent> {
         let beat = run.beats.get(index)?;
         let clip: &AnimationClipConfig = persona.clips.get(&beat.clip)?;
+        // 记住这个动作最近播过（`when.requires_recent` 靠它判断因果）
+        self.history
+            .recent_clips
+            .insert(beat.clip.clone(), now);
         let frames = clip.frames.max(1);
         let frame_ms = clip.frame_ms.max(1);
         let duration_ms = beat.duration_ms;
@@ -583,12 +680,14 @@ mod tests {
                     label: "甲→乙".into(),
                     weight: 1,
                     segments: vec!["a".into(), "b".into()],
+                    when: None,
                 },
                 ChainConfig {
                     id: "chain_b".into(),
                     label: "乙".into(),
                     weight: 1,
                     segments: vec!["b".into()],
+                    when: None,
                 },
             ],
         );
@@ -724,6 +823,7 @@ mod tests {
                 label: "乙".into(),
                 weight: 1,
                 segments: vec!["b".into()],
+                    when: None,
             }],
         );
         let event = playback.reset(&p2, "routine", now).unwrap();
@@ -788,6 +888,107 @@ mod tests {
         assert_eq!(second.loops, 1, "once 只播一遍，忽略 seconds");
     }
 
+    /// 造一条带 when 约束的链（段 `a` 播 clip "one"，段 `b` 播 "two"+"three"）
+    fn chain_with_when(id: &str, segments: Vec<&str>, when: crate::engine::ChainWhen) -> ChainConfig {
+        ChainConfig {
+            id: id.into(),
+            label: id.into(),
+            weight: 1,
+            segments: segments.into_iter().map(str::to_string).collect(),
+            when: Some(when),
+        }
+    }
+
+    #[test]
+    fn requires_recent_gates_chain_and_expires() {
+        use crate::engine::ChainWhen;
+        let mut playback = Playback::default();
+        let chain = chain_with_when(
+            "aftermath",
+            vec!["b"],
+            ChainWhen {
+                requires_recent: vec!["one".into()],
+                within_min: Some(10),
+                ..Default::default()
+            },
+        );
+        let start = at(10, 0, 0);
+        // 还没播过 "one" → 不可选
+        assert!(!playback.chain_allowed(&chain, start));
+        // 播过之后 5 分钟内可选
+        playback
+            .history
+            .recent_clips
+            .insert("one".into(), start);
+        assert!(playback.chain_allowed(&chain, start + chrono::Duration::minutes(5)));
+        // 超过有效期 → 再次不可选
+        assert!(!playback.chain_allowed(&chain, start + chrono::Duration::minutes(11)));
+        // 没配 when 的链随时可选
+        let free = ChainConfig {
+            when: None,
+            ..chain.clone()
+        };
+        assert!(playback.chain_allowed(&free, start));
+    }
+
+    #[test]
+    fn cooldown_and_daily_cap_limit_chain() {
+        use crate::engine::ChainWhen;
+        let mut playback = Playback::default();
+        let start = at(10, 0, 0);
+        let chain = chain_with_when(
+            "maintenance",
+            vec!["a"],
+            ChainWhen {
+                cooldown_min: Some(45),
+                ..Default::default()
+            },
+        );
+        assert!(playback.chain_allowed(&chain, start), "首次可选");
+        playback.remember_chain(&chain.id, start);
+        assert!(!playback.chain_allowed(&chain, start + chrono::Duration::minutes(30)));
+        assert!(playback.chain_allowed(&chain, start + chrono::Duration::minutes(46)), "冷却结束");
+
+        let capped = chain_with_when(
+            "egg",
+            vec!["a"],
+            ChainWhen {
+                max_per_day: Some(2),
+                ..Default::default()
+            },
+        );
+        let mut playback = Playback::default();
+        assert!(playback.chain_allowed(&capped, start));
+        playback.remember_chain(&capped.id, start);
+        playback.remember_chain(&capped.id, start + chrono::Duration::minutes(5));
+        assert!(!playback.chain_allowed(&capped, start + chrono::Duration::minutes(10)));
+        // 跨天重置
+        assert!(playback.chain_allowed(&capped, start + chrono::Duration::days(1)));
+    }
+
+    #[test]
+    fn blocked_chains_never_starve_the_state() {
+        use crate::engine::ChainWhen;
+        let mut p = single_chain_persona();
+        // 唯一的一条链被"最近播过某动作"挡住（那个动作永远不会出现）
+        p.chains.insert(
+            "routine".to_string(),
+            vec![chain_with_when(
+                "impossible",
+                vec!["a"],
+                ChainWhen {
+                    requires_recent: vec!["two".into()],
+                    within_min: Some(10),
+                    ..Default::default()
+                },
+            )],
+        );
+        let mut playback = Playback::default();
+        let event = playback
+            .reset(&p, "routine", at(10, 0, 0))
+            .expect("约束全挡下时也要能播，不能卡死");
+        assert_eq!(event.chain_id, "impossible");
+    }
     #[test]
     fn clear_drops_current_and_bags() {
         let p = persona();

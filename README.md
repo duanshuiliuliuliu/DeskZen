@@ -254,7 +254,18 @@ DeskZen/
 
   `seconds` 可为数字（固定）或 `[min,max]`（随机区间），按动作原生时长取整到整数个循环；`once` 表示只播一遍（优先于 `seconds`）；
   `chance`（0~1，缺省 1）决定这一拍出现在本次表演里的概率；`loops` 是旧格式回退。**说话按"段"算**：段总时长 ≥30 秒才配台词，且一段最多一句（落在段内的哪一拍，就用那一拍动作的文案）；
-- `chains`：状态 → **链**列表，`{id,label,weight,segments:[段id...]}`。链内段按数组顺序播放（表达因果，不洗牌），链之间按 `weight` 选择且不与上一条相同；每个段至少要出现在一条链里；
+- `chains`：状态 → **链**列表，`{id,label,weight,segments:[段id...],when}`。链内段按数组顺序播放（表达因果，不洗牌），链之间按 `weight` 选择且不与上一条相同；每个段至少要出现在一条链里；
+  `when` 是**触发约束**（权重只能表达偏好，因果与节制靠它）：
+
+  ```jsonc
+  {"id": "battle_aftermath", "segments": ["adventure_progress"],
+   "when": {"requires_recent": ["fight"], "within_min": 20}},   // 最近 20 分钟真打过架才可能出现
+  {"id": "gear_maintenance", "segments": ["maintain_the_shield", "check_the_route"],
+   "when": {"cooldown_min": 45}}                                 // 保养完 45 分钟内不再保养
+  ```
+
+  `requires_recent` 列出**任一**动作最近播过即可（`within_min` 缺省 30 分钟）；`cooldown_min` 是这条链自己的冷却；
+  `max_per_day` 限制单日出现次数。约束全部不满足时不会让角色卡住——会退回"不看约束"抽一条（宁可偶尔破例，也不空转）；
 - `schedule`：状态机配置 `{ "loop": [ {state,duration 分钟}... ], "time": [ {start,end,state}... ] }`——默认按 `loop` 逐状态循环，`time` 时段内固定为对应状态（支持跨午夜）。
 - `acknowledge`：「被注意到」时播的短反应（反应结束后回到被打断的那一步继续）：
 

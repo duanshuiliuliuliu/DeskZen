@@ -216,17 +216,20 @@
         "id": "gear_maintenance",
         "label": "装备保养线",
         "weight": 5,
-        "segments": ["maintain_the_shield", "check_the_route"]
+        "segments": ["maintain_the_shield", "check_the_route"],
+        "when": {"cooldown_min": 45}
       },
       {"id": "wrap_up", "label": "收个尾", "weight": 1, "segments": ["focus_complete"]}
     ],
     "active": [
       {"id": "explore_out", "label": "出门探索", "weight": 5, "segments": ["ride_out", "zonai_power"]},
+      {"id": "ambush", "label": "遭遇战斗", "weight": 3, "segments": ["ambush_battle"]},
       {
         "id": "battle_aftermath",
         "label": "战斗之后",
-        "weight": 2,
-        "segments": ["ambush_battle", "adventure_progress"]
+        "weight": 3,
+        "segments": ["adventure_progress"],
+        "when": {"requires_recent": ["fight"], "within_min": 20}
       }
     ],
     "relax": [

@@ -71,6 +71,7 @@ impl PersonaConfig {
                     label: scene.label.clone(),
                     weight: scene.weight.max(1),
                     segments: vec![scene.id.clone()],
+                    when: None,
                 })
                 .collect();
             self.chains.insert(state.clone(), chains);
@@ -250,6 +251,33 @@ pub struct ChainConfig {
     pub weight: u32,
     #[serde(default)]
     pub segments: Vec<String>,
+    /// 触发约束：权重只表达"偏好"，因果与节制交给它
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<ChainWhen>,
+}
+
+/// 一条链的触发约束。三项都不配 = 随时可选（保持旧行为）。
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ChainWhen {
+    /// 需要最近播过其中**任一**动作（clip id）才可选——用来表达因果，例如
+    /// "战斗之后"这条链要求 `["fight"]`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires_recent: Vec<String>,
+    /// `requires_recent` 的有效期（分钟），缺省 30
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub within_min: Option<u32>,
+    /// 这条链播放后的冷却（分钟）：冷却期内不再选它（避免"保养上瘾"）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_min: Option<u32>,
+    /// 每天最多出现几次（给"彩蛋"类链条用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_day: Option<u32>,
+}
+
+impl ChainWhen {
+    pub(crate) fn within_minutes(&self) -> i64 {
+        self.within_min.unwrap_or(30) as i64
+    }
 }
 
 /// 「被用户注意到」时的即时反应配置。
@@ -1763,6 +1791,19 @@ pub(crate) fn validate_persona_structure(persona: &PersonaConfig) -> Result<(), 
             for segment in &chain.segments {
                 if !scenes.iter().any(|s| s.id == *segment) {
                     return Err(format!("链 {} 引用了不存在的段 {}", chain.id, segment));
+                }
+            }
+            if let Some(when) = &chain.when {
+                for clip in &when.requires_recent {
+                    if !persona.clips.contains_key(clip) {
+                        return Err(format!(
+                            "链 {} 的 when.requires_recent 引用了未知动作 {clip}",
+                            chain.id
+                        ));
+                    }
+                }
+                if when.max_per_day == Some(0) {
+                    return Err(format!("链 {} 的 when.max_per_day 必须大于 0", chain.id));
                 }
             }
         }
