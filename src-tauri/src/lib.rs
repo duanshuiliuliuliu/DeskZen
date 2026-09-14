@@ -183,32 +183,24 @@ pub fn run() {
         .expect("DeskZen 启动失败");
 }
 
-/// 角色右键菜单：下个状态 / 隐藏
+/// 角色右键菜单：隐藏
 #[tauri::command]
 fn show_persona_menu(app: AppHandle) -> Result<(), String> {
     // 注意：id 不能以 "persona_" 开头，否则会被托盘菜单当成“切换角色”解析
-    let next = MenuItem::with_id(&app, "ctx_next_state", "下个状态", true, None::<&str>)
-        .map_err(|e| e.to_string())?;
     let hide = MenuItem::with_id(&app, "ctx_hide", "隐藏", true, None::<&str>)
         .map_err(|e| e.to_string())?;
-    let menu = Menu::with_items(&app, &[&next, &hide]).map_err(|e| e.to_string())?;
+    let menu = Menu::with_items(&app, &[&hide]).map_err(|e| e.to_string())?;
     let persona = app.get_webview_window("persona").ok_or("找不到角色窗口")?;
     persona.popup_menu(&menu).map_err(|e| e.to_string())
 }
 
 /// 菜单项点击分发（应用级全局处理角色右键菜单事件）
 fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
-    match event.id().as_ref() {
-        "ctx_next_state" => {
-            app.state::<engine::StateEngine>().next_state();
+    if event.id().as_ref() == "ctx_hide" {
+        if let Some(win) = app.get_webview_window("persona") {
+            let _ = win.hide();
         }
-        "ctx_hide" => {
-            if let Some(win) = app.get_webview_window("persona") {
-                let _ = win.hide();
-            }
-            update_persona_menu_label(app);
-        }
-        _ => {}
+        update_persona_menu_label(app);
     }
 }
 

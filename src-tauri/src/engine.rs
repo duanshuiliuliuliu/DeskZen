@@ -424,14 +424,6 @@ pub struct TimeSlot {
     pub state: String,
 }
 
-/// 手动指定的状态覆盖（右键“下个状态”）
-#[derive(Debug, Clone)]
-pub struct ManualOverride {
-    pub state: String,
-    /// 覆盖到期时间；到点后自动恢复为“日程自动计算”。None 表示持续到切换角色/重启。
-    pub expire_at: Option<chrono::DateTime<chrono::Local>>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct StateChanged {
     pub state: String,
@@ -597,8 +589,6 @@ pub struct StateEngine {
     /// 当前角色配置；用 Arc 包一层，热路径（动作结束/气泡）克隆引用计数而不是整份配置
     persona: Arc<Mutex<Arc<PersonaConfig>>>,
     last_state: Arc<Mutex<Option<String>>>,
-    /// 手动指定的状态覆盖（右键“下个状态”）；到期后自动恢复日程计算
-    manual_state: Arc<Mutex<Option<ManualOverride>>>,
     /// 当前角色的有效显示尺寸缓存：拖动/贴气泡时频繁读取，避免每次都克隆整个 persona
     /// 或对导入角色读磁盘做 image_dimensions。
     display_size: Arc<Mutex<(u32, u32)>>,
@@ -622,7 +612,7 @@ pub struct StateEngine {
     pub(crate) plan_generating: Arc<AtomicBool>,
     /// 每日气泡生成任务是否在跑（防止重复起任务）
     pub(crate) generating: Arc<AtomicBool>,
-    /// 后台节拍线程的唤醒信号：switch_persona / next_state 修改配置后 notify，
+    /// 后台节拍线程的唤醒信号：switch_persona 换角色后 notify，
     /// 让线程立即醒来重算下一次切换时刻，避免睡到旧的 next_transition_at。
     wake_lock: Arc<Mutex<()>>,
     wake_cond: Arc<Condvar>,
@@ -681,7 +671,6 @@ impl StateEngine {
             personas: Arc::new(Mutex::new(personas)),
             persona: Arc::new(Mutex::new(persona)),
             last_state: Arc::new(Mutex::new(None)),
-            manual_state: Arc::new(Mutex::new(None)),
             display_size: Arc::new(Mutex::new(display)),
             gen_bubbles: Arc::new(Mutex::new(crate::genbubble::GenState {
                 persona_id: "link".into(),
@@ -704,29 +693,21 @@ impl StateEngine {
         }
     }
 
-    /// 当前状态：若手动指定则用之，否则按本地时间实时计算
+    /// 当前状态：按本地时间（硬时段 > 需求 > 循环）实时计算
     pub fn current_state(&self) -> String {
         let persona = crate::util::lock(&self.persona);
         self.resolve_state(&persona, chrono::Local::now())
     }
 
-    /// 结合手动覆盖与日程计算得出最终状态
+    /// 结合日程与内部需求得出最终状态
     fn resolve_state(
         &self,
         persona: &PersonaConfig,
         now: chrono::DateTime<chrono::Local>,
     ) -> String {
-        let mut guard = crate::util::lock(&self.manual_state);
-        if let Some(ov) = guard.as_ref() {
-            if let Some(exp) = ov.expire_at {
-                if now >= exp {
-                    *guard = None;
-                }
-            }
-        }
-        // 需求快照在锁外取，避免与 manual_state 形成嵌套锁
+        // 需求快照在锁外取，避免与 persona 形成嵌套锁
         let needs = crate::util::lock(&self.needs).clone();
-        runtime_state(persona, &effective_state(&guard, persona, &now, &needs))
+        runtime_state(persona, &automatic_state(persona, now_minutes(&now), &needs))
     }
 
     /// 当前角色配置（克隆）
@@ -1263,9 +1244,9 @@ impl StateEngine {
         }
     }
 
-    /// 唤醒后台节拍线程：switch_persona / next_state 在修改 persona / manual_state 后调用，
-    /// 让它在新的日程/覆盖下重新计算下一次切换时刻，避免睡到旧的 next_transition_at。
-    /// 只锁 wake_lock（不持有 persona / manual_state），与线程侧锁序保持一致，避免死锁。
+    /// 唤醒后台节拍线程：switch_persona 在换角色后调用，
+    /// 让它在新的日程下重新计算下一次切换时刻，避免睡到旧的 next_transition_at。
+    /// 只锁 wake_lock（不持有 persona），与线程侧锁序保持一致，避免死锁。
     fn notify_wake(&self) {
         let _guard = crate::util::lock(&self.wake_lock);
         self.wake_cond.notify_one();
@@ -1359,7 +1340,6 @@ impl StateEngine {
             let mut cur = crate::util::lock(&self.persona);
             *cur = Arc::clone(&persona);
             *crate::util::lock(&self.last_state) = Some(state.clone());
-            *crate::util::lock(&self.manual_state) = None;
             *crate::util::lock(&self.display_size) = display;
         }
         // 需求/情绪按角色独立：先把旧角色的存档写回，再载入新角色（各自有各自的体力）
@@ -1448,7 +1428,6 @@ impl StateEngine {
         let ambient = Arc::clone(&self.ambient);
         let playback = Arc::clone(&self.playback);
         let last_state = Arc::clone(&self.last_state);
-        let manual_state = Arc::clone(&self.manual_state);
         let wake_lock = Arc::clone(&self.wake_lock);
         let wake_cond = Arc::clone(&self.wake_cond);
         let needs = Arc::clone(&self.needs);
@@ -1458,14 +1437,13 @@ impl StateEngine {
         thread::spawn(move || loop {
             // 先算出下一次状态切换时刻，再用带超时的 Condvar 等待（+1s 缓冲，避免边界竞态）。
             // 单次睡眠不超过 15 分钟：防止时钟漂移 / DST 导致久睡不醒，醒来重算即可。
-            // 持有 wake_lock 计算并进入 wait：switch_persona / next_state 的 notify
+            // 持有 wake_lock 计算并进入 wait：switch_persona 的 notify
             // 必然在本线程进入等待后送达，不会丢失唤醒（唤醒后统一走下面的重算）。
             let now = chrono::Local::now();
             let wake = crate::util::lock(&wake_lock);
             let next = {
                 let p = crate::util::lock(&persona);
-                let m = crate::util::lock(&manual_state);
-                next_transition_at(&p, &m, &now)
+                next_transition_at(&p, &now)
             };
             // 当前动作实例排定的说话时刻若早于状态切换，则按说话时刻唤醒
             let (wake_at, needs_precise_wake) = {
@@ -1520,15 +1498,7 @@ impl StateEngine {
             };
             let state = {
                 let p = crate::util::lock(&persona);
-                let mut m = crate::util::lock(&manual_state);
-                if let Some(ov) = m.as_ref() {
-                    if let Some(exp) = ov.expire_at {
-                        if now >= exp {
-                            *m = None;
-                        }
-                    }
-                }
-                runtime_state(&p, &effective_state(&m, &p, &now, &needs_now))
+                runtime_state(&p, &automatic_state(&p, now_minutes(&now), &needs_now))
             };
             // 需求状态每 5 分钟落一次盘（保证重启后有连续感，又不至于频繁写盘）
             if now.timestamp() - needs_saved_at >= 300 {
@@ -1572,40 +1542,6 @@ impl StateEngine {
         });
     }
 
-    /// 切换到“下一个状态”（优先按日程 loop 顺序），并手动锁定该状态。
-    /// 返回切换后的状态 id。
-    pub fn next_state(&self) -> String {
-        // 先在作用域内读取 persona 并算出下一个状态/到期时刻，随后释放 persona 锁，
-        // 再写覆盖并 notify（避免在持有 persona 锁时再锁 wake_lock）。
-        let (next, expire_at) = {
-            let persona = crate::util::lock(&self.persona);
-            let now = chrono::Local::now();
-            let current = self.resolve_state(&persona, now);
-            // states 为空（正常导入已在 characters 侧校验，这里仅作防御）时没有可切换的下一状态，
-            // 停留在当前状态，避免进入后续手动覆盖逻辑时状态为空。
-            let next = next_loop_state(&persona, &current).unwrap_or_else(|| current.clone());
-            // 到期时间：time 时段内 → 到该时段结束；否则按 loop 时长；
-            // 都不适用（不在 loop/零时长）→ 30 分钟兜底，避免手动锁定永久卡死。
-            let expire_at = next_state_expire_at(&persona.schedule, &next, now);
-            (next, expire_at)
-        };
-        *crate::util::lock(&self.manual_state) = Some(ManualOverride {
-            state: next.clone(),
-            expire_at,
-        });
-        *crate::util::lock(&self.last_state) = Some(next.clone());
-        // 新的手动覆盖带到期时间 → 唤醒线程，使该到期时刻尽早接管。
-        self.notify_wake();
-        let _ = self.app.emit(
-            "state-changed",
-            StateChanged {
-                state: next.clone(),
-            },
-        );
-        // 手动切换状态同样要换一整套场景，否则画面会停在上一个状态的动作上
-        self.reset_playback(&next, chrono::Local::now());
-        next
-    }
 }
 
 #[tauri::command]
@@ -1723,24 +1659,6 @@ fn now_minutes(now: &chrono::DateTime<chrono::Local>) -> u32 {
     now.hour() * 60 + now.minute()
 }
 
-/// 结合手动覆盖与日程自动计算
-fn effective_state(
-    manual: &Option<ManualOverride>,
-    persona: &PersonaConfig,
-    now: &chrono::DateTime<chrono::Local>,
-    needs: &crate::needs::NeedsState,
-) -> String {
-    if let Some(ov) = manual {
-        if let Some(exp) = ov.expire_at {
-            if *now >= exp {
-                return automatic_state(persona, now_minutes(now), needs);
-            }
-        }
-        return ov.state.clone();
-    }
-    automatic_state(persona, now_minutes(now), needs)
-}
-
 /// 查找当前生效的 time 时段（支持跨午夜）
 fn find_active_slot(schedule: &ScheduleConfig, mins: u32) -> Option<&TimeSlot> {
     schedule.time().iter().find(|slot| {
@@ -1811,37 +1729,6 @@ fn loop_state_at(schedule: &ScheduleConfig, mins: u32) -> Option<String> {
         idx -= e.duration as u64;
     }
     None
-}
-
-/// 某循环状态在 loop 里的时长（分钟）；不在循环里或未配置则返回 0
-fn loop_duration(schedule: &ScheduleConfig, state: &str) -> u32 {
-    schedule
-        .loop_entries()
-        .iter()
-        .find(|e| e.state == state)
-        .map(|e| e.duration)
-        .unwrap_or(0)
-}
-
-/// 计算右键“下个状态”被手动锁定后的到期时间：
-/// - 命中的 time 时段 → 到该时段结束；
-/// - 否则命中 loop 条目 → 到该条目时长；
-/// - 否则（不在 loop，或条目时长恰为 0，无法给出自然到期点）→ 用 30 分钟兜底。
-///   兜底避免状态被手动锁死到切角色/重启；语义与 next_transition_at 的 30s 兜底一致（都是防久睡/锁死）。
-fn next_state_expire_at(
-    schedule: &ScheduleConfig,
-    next: &str,
-    now: chrono::DateTime<chrono::Local>,
-) -> Option<chrono::DateTime<chrono::Local>> {
-    if let Some(slot) = find_active_slot(schedule, now_minutes(&now)) {
-        return Some(slot_end_datetime(&now, slot));
-    }
-    let dur = loop_duration(schedule, next);
-    if dur > 0 {
-        Some(now + chrono::Duration::minutes(dur as i64))
-    } else {
-        Some(now + chrono::Duration::minutes(30))
-    }
 }
 
 /// 状态遍历顺序：优先按 schedule.loop 的出场顺序（去重），其余状态按字典序排在后面。
@@ -2214,7 +2101,7 @@ fn automatic_state(persona: &PersonaConfig, mins: u32, needs: &crate::needs::Nee
     if let Some(s) = loop_state_at(&persona.schedule, mins) {
         return s;
     }
-    // 兜底：按日程顺序取第一个状态（与 next_loop_state 的排序一致）；
+    // 兜底：按日程顺序取第一个状态；
     // 仅当角色完全没有定义状态时才使用硬编码值。
     ordered_state_keys(persona)
         .first()
@@ -2293,30 +2180,7 @@ fn work_area_content_limit(app: &AppHandle) -> Option<(u32, u32)> {
     Some((max_w, max_h))
 }
 
-/// “下一个状态”：优先取循环列表中的下一个；当前不在循环列表则取循环第一个；
-/// 若无循环配置，按日程顺序取下一个。
-fn next_loop_state(persona: &PersonaConfig, current: &str) -> Option<String> {
-    let entries = persona.schedule.loop_entries();
-    if !entries.is_empty() {
-        let idx = entries.iter().position(|e| e.state == current);
-        return match idx {
-            Some(i) => Some(entries[(i + 1) % entries.len()].state.clone()),
-            None => Some(entries[0].state.clone()),
-        };
-    }
-    // 无循环配置 → 按日程顺序兜底
-    let keys = ordered_state_keys(persona);
-    // states 为空时 keys.len() 为 0，`(pos + 1) % keys.len()` 会除零 panic；
-    // 且该调用发生在持有 persona 锁的上下文，panic 会毒化 Mutex 导致后续连环崩溃。
-    // 这里直接返回 None，由调用方安全跳过（正常导入已在 characters 侧校验 states 非空）。
-    if keys.is_empty() {
-        return None;
-    }
-    let pos = keys.iter().position(|key| key == current).unwrap_or(0);
-    Some(keys[(pos + 1) % keys.len()].clone())
-}
-
-/// 计算 time 时段的结束时刻（用于手动覆盖到期）
+/// 计算 time 时段的结束时刻（用于推算下一次状态切换）
 fn slot_end_datetime(
     now: &chrono::DateTime<chrono::Local>,
     slot: &TimeSlot,
@@ -2379,22 +2243,13 @@ fn next_loop_boundary_time(
 }
 
 /// 计算下一次可能的状态切换时刻（取所有候选的最早者）：
-/// manual 到期、当前 time 时段结束、下一个 loop 边界；都不可得则 now + 30s 兜底。
+/// 当前 time 时段结束、下一个 loop 边界；都不可得则 now + 30s 兜底。
 fn next_transition_at(
     persona: &PersonaConfig,
-    manual: &Option<ManualOverride>,
     now: &chrono::DateTime<chrono::Local>,
 ) -> chrono::DateTime<chrono::Local> {
     let mut candidates: Vec<chrono::DateTime<chrono::Local>> = Vec::new();
 
-    // manual 到期
-    if let Some(ov) = manual {
-        if let Some(exp) = ov.expire_at {
-            if *now < exp {
-                candidates.push(exp);
-            }
-        }
-    }
     // 当前 time 时段结束
     let mins = now_minutes(now);
     if let Some(slot) = find_active_slot(&persona.schedule, mins) {
@@ -2793,58 +2648,6 @@ mod tests {
     }
 
     #[test]
-    fn next_loop_state_cycles() {
-        let p = link();
-        let entries = p.schedule.loop_entries();
-        assert_eq!(
-            next_loop_state(&p, &entries[0].state),
-            Some(entries[1].state.clone())
-        );
-        assert_eq!(
-            next_loop_state(&p, &entries[entries.len() - 1].state),
-            Some(entries[0].state.clone())
-        );
-        // 当前不在循环列表（如未知状态）→ 取循环第一个
-        assert_eq!(
-            next_loop_state(&p, "unknown"),
-            Some(entries[0].state.clone())
-        );
-    }
-
-    #[test]
-    fn next_loop_state_empty_states_is_none() {
-        // 空 states 且无循环配置时会落入 keys 兜底分支，历史上 `(pos+1) % keys.len()`
-        // 会除零 panic；现在应安全返回 None。
-        let mut p = link();
-        p.states.clear();
-        p.schedule.r#loop.clear();
-        assert_eq!(next_loop_state(&p, "Awake"), None);
-    }
-
-    #[test]
-    fn next_state_expire_zero_duration_uses_30min_fallback() {
-        // 命中零时长 loop 条目时没有自然到期点，历史上 expire_at=None 会把该状态永久锁死；
-        // 现在应回退为 30 分钟兜底，而不是 None。
-        let mut p = link();
-        p.schedule.time.clear();
-        let state = p
-            .schedule
-            .r#loop
-            .first()
-            .expect("link 应有循环")
-            .state
-            .clone();
-        p.schedule.r#loop = vec![LoopEntry {
-            state: state.clone(),
-            duration: 0,
-        }];
-        let now = chrono::Local::now();
-        let exp = next_state_expire_at(&p.schedule, &state, now)
-            .expect("零时长条目应回退 30 分钟，而非 None");
-        assert_eq!((exp - now).num_minutes(), 30);
-    }
-
-    #[test]
     fn loop_state_at_follows_durations() {
         let p = link();
         let entries = p.schedule.loop_entries();
@@ -3039,7 +2842,7 @@ mod tests {
         let p = link();
         let (now, boundary) = find_slot_with_earlier_loop_boundary(&p);
         assert!(boundary > now, "loop 边界必须在 now 之后");
-        assert_eq!(next_transition_at(&p, &None, &now), boundary);
+        assert_eq!(next_transition_at(&p, &now), boundary);
     }
 
     #[test]
@@ -3053,27 +2856,7 @@ mod tests {
             (end > now && end < scanned_loop_boundary(&p.schedule, &now)).then_some((now, end))
         });
         let (now, end) = found.expect("当前日程里不存在「时段结束更早」的时刻");
-        assert_eq!(next_transition_at(&p, &None, &now), end);
-    }
-
-    #[test]
-    fn next_transition_uses_manual_expiry() {
-        let p = link();
-        // 找一个无时段、且下一分钟早于 loop 边界的时刻，验证 manual 到期优先
-        let found = (0..24 * 60).find_map(|mins| {
-            if find_active_slot(&p.schedule, mins).is_some() {
-                return None;
-            }
-            let now = today_at(mins);
-            let expire = now + chrono::Duration::minutes(1);
-            (expire < scanned_loop_boundary(&p.schedule, &now)).then_some((now, expire))
-        });
-        let (now, expire) = found.expect("当前日程里不存在可验证 manual 到期的时刻");
-        let manual = Some(ManualOverride {
-            state: "idle".into(),
-            expire_at: Some(expire),
-        });
-        assert_eq!(next_transition_at(&p, &manual, &now), expire);
+        assert_eq!(next_transition_at(&p, &now), end);
     }
 
     #[test]
@@ -3092,7 +2875,7 @@ mod tests {
             (boundary < end && boundary.date_naive() > now.date_naive()).then_some((now, boundary))
         });
         let (now, boundary) = found.expect("当前日程里不存在跨午夜且 loop 边界更早的时刻");
-        assert_eq!(next_transition_at(&p, &None, &now), boundary);
+        assert_eq!(next_transition_at(&p, &now), boundary);
     }
 
     #[test]
@@ -3104,7 +2887,7 @@ mod tests {
         };
         let now = local_at(9, 0);
         assert_eq!(
-            next_transition_at(&p, &None, &now),
+            next_transition_at(&p, &now),
             now + chrono::Duration::seconds(30)
         );
     }

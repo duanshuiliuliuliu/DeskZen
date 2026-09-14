@@ -189,7 +189,7 @@ function hideBubble(): void {
 }
 
 async function init(): Promise<void> {
-  // 右键角色 → 弹出原生菜单（下个状态 / 隐藏）
+  // 右键角色 → 弹出原生菜单（隐藏）
   character.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     void invoke("show_persona_menu");
