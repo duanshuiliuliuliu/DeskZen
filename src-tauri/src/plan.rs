@@ -70,8 +70,8 @@ pub struct PlanState {
 /// 角色身上实际存在的标签 → 示例链名（提示词里给模型挑，避免它自造标签）
 pub fn tag_options(persona: &PersonaConfig) -> BTreeMap<String, String> {
     let mut out: BTreeMap<String, String> = BTreeMap::new();
-    for chains in persona.chains.values() {
-        for chain in chains {
+    for cfg in persona.states.values() {
+        for chain in &cfg.chains {
             for tag in &chain.tags {
                 out.entry(tag.clone())
                     .or_insert_with(|| chain.label.clone());
@@ -327,9 +327,9 @@ mod tests {
         }
         // 例子取自真实链名（同一标签可能挂多条链，取哪条都行），模型才知道这个标签意味着什么
         let social_labels: Vec<&str> = persona
-            .chains
+            .states
             .values()
-            .flatten()
+            .flat_map(|cfg| cfg.chains.iter())
             .filter(|chain| chain.tags.iter().any(|t| t == "social"))
             .map(|chain| chain.label.as_str())
             .collect();

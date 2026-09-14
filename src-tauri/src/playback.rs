@@ -9,14 +9,12 @@ use chrono::{DateTime, Local};
 use serde::Serialize;
 
 use crate::engine::{
-    refill_bag, rng_unit, AnimationClipConfig, ChainConfig, PersonaConfig, SceneConfig,
+    refill_bag, rng_unit, AnimationClipConfig, ChainConfig, PersonaConfig, SegmentConfig,
     SceneStepConfig,
 };
 
 /// 单个动作实例的时长上限（毫秒）：防止手改配置把角色卡在同一个动作上
 pub const MAX_ACTION_MS: i64 = 5 * 60 * 1000;
-/// 旧格式 loops 的上限（避免旧配置异常放大）
-pub const MAX_STEP_LOOPS: u32 = 20;
 /// 播放速度抖动范围：±8%，让同一个循环不至于每次都是同一节奏
 const SPEED_MIN: f64 = 0.92;
 const SPEED_MAX: f64 = 1.08;
@@ -314,34 +312,32 @@ impl Playback {
         if current.run.ack {
             return self.resume_suspended(persona, now);
         }
+        let chain = find_chain(persona, &current.state, &current.run.chain_id);
+        let segment = chain.and_then(|chain| find_segment(chain, &current.run.scene_id));
         // 2.5) 这一段太短 → 再走一遍（重新掷概率/抖动），到够久才换段
-        if let Some(segment) = find_segment(persona, &current.state, &current.run.scene_id) {
+        if let (Some(chain), Some(segment)) = (chain, segment) {
             let played_ms = (now - current.run.started_at).num_milliseconds();
             let pass_ms = current.run.total_ms as i64;
             if played_ms + pass_ms / 2 < MIN_SEGMENT_MS {
-                if let Some(chain) = find_chain(persona, &current.state, &current.run.chain_id) {
-                    let mut run = plan_segment(persona, chain, segment, now);
-                    // 保留本段的起始时刻：否则每次重播都把"已播多久"清零，永远攒不满最短时长
-                    run.started_at = current.run.started_at;
-                    if let Some(event) = self.start_beat(persona, &current.state, &run, 0, now) {
-                        return Some(event);
-                    }
+                let mut run = plan_segment(persona, chain, segment, now);
+                // 保留本段的起始时刻：否则每次重播都把"已播多久"清零，永远攒不满最短时长
+                run.started_at = current.run.started_at;
+                if let Some(event) = self.start_beat(persona, &current.state, &run, 0, now) {
+                    return Some(event);
                 }
             }
         }
         // 3) 同一条链还有下一段（跳过没有有效动作的段）
-        if let Some(chain) = find_chain(persona, &current.state, &current.run.chain_id) {
-            if let Some(pos) = chain
+        if let Some(chain) = chain {
+            let pos = chain
                 .segments
                 .iter()
-                .position(|id| id == &current.run.scene_id)
-            {
-                for segment_id in chain.segments.iter().skip(pos + 1) {
-                    if let Some(segment) = find_segment(persona, &current.state, segment_id) {
-                        let run = plan_segment(persona, chain, segment, now);
-                        if let Some(event) = self.start_beat(persona, &current.state, &run, 0, now) {
-                            return Some(event);
-                        }
+                .position(|segment| segment.id == current.run.scene_id);
+            if let Some(pos) = pos {
+                for segment in chain.segments.iter().skip(pos + 1) {
+                    let run = plan_segment(persona, chain, segment, now);
+                    if let Some(event) = self.start_beat(persona, &current.state, &run, 0, now) {
+                        return Some(event);
                     }
                 }
             }
@@ -448,10 +444,7 @@ impl Playback {
         chain: &ChainConfig,
         now: DateTime<Local>,
     ) -> Option<PlaybackEvent> {
-        for segment_id in &chain.segments {
-            let Some(segment) = find_segment(persona, state, segment_id) else {
-                continue;
-            };
+        for segment in &chain.segments {
             let run = plan_segment(persona, chain, segment, now);
             if let Some(event) = self.start_beat(persona, state, &run, 0, now) {
                 // 链真正开播了才记账（冷却/每日上限都基于它）
@@ -537,7 +530,7 @@ impl Playback {
 fn plan_segment(
     persona: &PersonaConfig,
     chain: &ChainConfig,
-    segment: &SceneConfig,
+    segment: &SegmentConfig,
     now: DateTime<Local>,
 ) -> SegmentRun {
     let beats = resolve_beats(persona, &segment.steps);
@@ -583,12 +576,12 @@ fn resolve_beat(persona: &PersonaConfig, step: &SceneStepConfig) -> Option<Resol
     // 前端按 speed 调整动画时长，两边才对得上。
     let native_ms = (frames as f64 * frame_ms as f64 / speed).round().max(1.0) as i64;
     let max_loops = ((MAX_ACTION_MS / native_ms).max(1)) as u32;
-    let loops = if step.once {
-        1
-    } else if let Some(spec) = &step.seconds {
-        (spec.sample_ms() as f64 / native_ms as f64).round().clamp(1.0, max_loops as f64) as u32
-    } else {
-        step.loops.clamp(1, MAX_STEP_LOOPS).min(max_loops)
+    let loops = match &step.seconds {
+        Some(spec) => {
+            (spec.sample_ms() as f64 / native_ms as f64).round().clamp(1.0, max_loops as f64) as u32
+        }
+        // 不写时长 = 只播一遍
+        None => 1,
     };
     let duration_ms = (loops as i64 * native_ms).max(1) as u64;
     Some(ResolvedBeat {
@@ -600,16 +593,9 @@ fn resolve_beat(persona: &PersonaConfig, step: &SceneStepConfig) -> Option<Resol
     })
 }
 
-fn find_segment<'a>(
-    persona: &'a PersonaConfig,
-    state: &str,
-    segment_id: &str,
-) -> Option<&'a SceneConfig> {
-    persona
-        .scenes
-        .get(state)?
-        .iter()
-        .find(|scene| scene.id == segment_id)
+/// 链内按 id 找段（段现在内联在链里，不再有独立段表）
+fn find_segment<'a>(chain: &'a ChainConfig, segment_id: &str) -> Option<&'a SegmentConfig> {
+    chain.segments.iter().find(|segment| segment.id == segment_id)
 }
 
 fn find_chain<'a>(
@@ -618,8 +604,9 @@ fn find_chain<'a>(
     chain_id: &str,
 ) -> Option<&'a ChainConfig> {
     persona
-        .chains
+        .states
         .get(state)?
+        .chains
         .iter()
         .find(|chain| chain.id == chain_id)
 }
@@ -627,19 +614,17 @@ fn find_chain<'a>(
 /// 某状态下可用的链：至少有一个段包含已定义动作
 fn valid_chains<'a>(persona: &'a PersonaConfig, state: &str) -> Vec<&'a ChainConfig> {
     persona
-        .chains
+        .states
         .get(state)
-        .map(|chains| {
-            chains
+        .map(|cfg| {
+            cfg.chains
                 .iter()
                 .filter(|chain| {
-                    chain.segments.iter().any(|segment_id| {
-                        find_segment(persona, state, segment_id).is_some_and(|scene| {
-                            scene
-                                .steps
-                                .iter()
-                                .any(|step| persona.clips.contains_key(&step.clip))
-                        })
+                    chain.segments.iter().any(|segment| {
+                        segment
+                            .steps
+                            .iter()
+                            .any(|step| persona.clips.contains_key(&step.clip))
                     })
                 })
                 .collect()
@@ -673,72 +658,75 @@ mod tests {
         }
     }
 
+    /// 造一段：`id`/`label` 都给全，steps 是段内的拍
+    fn seg(id: &str, label: &str, steps: Vec<SceneStepConfig>) -> SegmentConfig {
+        SegmentConfig {
+            id: id.into(),
+            label: label.into(),
+            steps,
+        }
+    }
+
+    /// 一拍：不写 seconds = 只播一遍
+    fn step(clip: &str) -> SceneStepConfig {
+        SceneStepConfig {
+            clip: clip.into(),
+            ..Default::default()
+        }
+    }
+
+    /// 一拍：指定目标秒数
+    fn step_secs(clip: &str, seconds: u32) -> SceneStepConfig {
+        SceneStepConfig {
+            clip: clip.into(),
+            seconds: Some(crate::engine::SecondsSpec::Fixed(seconds)),
+            ..Default::default()
+        }
+    }
+
+    /// 整体替换某状态的活动链
+    fn set_chains(p: &mut PersonaConfig, state: &str, chains: Vec<ChainConfig>) {
+        p.states.get_mut(state).unwrap().chains = chains;
+    }
+
+    /// 取某状态第 `chain` 条链的第 `segment` 个段
+    fn segment_mut<'a>(
+        p: &'a mut PersonaConfig,
+        state: &str,
+        chain: usize,
+        segment: usize,
+    ) -> &'a mut SegmentConfig {
+        &mut p.states.get_mut(state).unwrap().chains[chain].segments[segment]
+    }
+
+    /// 用现成的段造一条链
+    fn chain_of(id: &str, weight: u32, segments: Vec<SegmentConfig>, tags: Vec<&str>) -> ChainConfig {
+        ChainConfig {
+            id: id.into(),
+            label: id.into(),
+            weight,
+            segments,
+            steps: vec![],
+            tags: tags.into_iter().map(str::to_string).collect(),
+            when: None,
+        }
+    }
+
+    /// 取某状态第一条链的段（clone，供造新链用）
+    fn segments_of(p: &PersonaConfig, state: &str) -> Vec<SegmentConfig> {
+        p.states[state].chains[0].segments.clone()
+    }
+
     /// 一个状态两条链：
-    /// - chain_ab（a → b）：a 单步（200ms 原生，目标 1 秒）；b 两步（先 loops=2，再目标 1 秒）
-    /// - chain_b：只有 b
+    /// - chain_ab（甲 → 乙）：甲单步（200ms 原生，目标 1 秒）；乙两步（播一遍 + 目标 1 秒）
+    /// - chain_b：只有乙
     fn persona() -> PersonaConfig {
         let mut clips = HashMap::new();
         clips.insert("one".to_string(), clip(2, 100)); // 原生 200ms
         clips.insert("two".to_string(), clip(3, 100)); // 原生 300ms
         clips.insert("three".to_string(), clip(2, 100)); // 原生 200ms
-        let mut scenes = HashMap::new();
-        scenes.insert(
-            "routine".to_string(),
-            vec![
-                SceneConfig {
-                    id: "a".into(),
-                    label: "甲".into(),
-                    weight: 1,
-                    steps: vec![SceneStepConfig {
-                        clip: "one".into(),
-                        seconds: Some(crate::engine::SecondsSpec::Fixed(1)),
-                        loops: 1,
-                        ..Default::default()
-                    }],
-                },
-                SceneConfig {
-                    id: "b".into(),
-                    label: "乙".into(),
-                    weight: 1,
-                    steps: vec![
-                        SceneStepConfig {
-                            clip: "two".into(),
-                            seconds: None,
-                            loops: 2,
-                        ..Default::default()
-                        },
-                        SceneStepConfig {
-                            clip: "three".into(),
-                            seconds: Some(crate::engine::SecondsSpec::Fixed(1)),
-                            loops: 1,
-                        ..Default::default()
-                        },
-                    ],
-                },
-            ],
-        );
-        let mut chains = HashMap::new();
-        chains.insert(
-            "routine".to_string(),
-            vec![
-                ChainConfig {
-                    id: "chain_ab".into(),
-                    label: "甲→乙".into(),
-                    weight: 1,
-                    segments: vec!["a".into(), "b".into()],
-                    tags: vec![],
-                    when: None,
-                },
-                ChainConfig {
-                    id: "chain_b".into(),
-                    label: "乙".into(),
-                    weight: 1,
-                    segments: vec!["b".into()],
-                    tags: vec![],
-                    when: None,
-                },
-            ],
-        );
+        let a = seg("a", "甲", vec![step_secs("one", 1)]);
+        let b = seg("b", "乙", vec![step("two"), step_secs("three", 1)]);
         PersonaConfig {
             id: "test".into(),
             name: "测试".into(),
@@ -755,19 +743,33 @@ mod tests {
                     talkativeness: String::new(),
                     tone: String::new(),
                     bubble_gap_min: None,
+                    chains: vec![
+                        ChainConfig {
+                            id: "chain_ab".into(),
+                            label: "甲→乙".into(),
+                            weight: 1,
+                            segments: vec![a.clone(), b.clone()],
+                            steps: vec![],
+                            tags: vec![],
+                            when: None,
+                        },
+                        ChainConfig {
+                            id: "chain_b".into(),
+                            label: "乙".into(),
+                            weight: 1,
+                            segments: vec![b.clone()],
+                            steps: vec![],
+                            tags: vec![],
+                            when: None,
+                        },
+                    ],
                 },
             )]),
             clips,
-            scenes,
-            chains,
+            clips_dir: String::new(),
             // 默认给所有状态配一个 1 秒的"注意你"反应，供 acknowledge 用例使用
             acknowledge: crate::engine::AcknowledgeConfig {
-                default: vec![SceneStepConfig {
-                    clip: "three".into(),
-                    seconds: Some(crate::engine::SecondsSpec::Fixed(1)),
-                    loops: 1,
-                        ..Default::default()
-                }],
+                default: vec![step_secs("three", 1)],
                 ..Default::default()
             },
             needs: crate::needs::NeedsConfig::default(),
@@ -781,17 +783,18 @@ mod tests {
     /// 单链版本，用于确定性地验证链内顺序
     fn single_chain_persona() -> PersonaConfig {
         let mut p = persona();
-        p.chains
-            .insert("routine".to_string(), vec![p.chains["routine"][0].clone()]);
+        p.states.get_mut("routine").unwrap().chains.truncate(1);
         p
     }
 
     /// 长动作实例版本：「注意你」的打断/恢复用例需要当前动作还剩足够时间
     fn long_instance_persona() -> PersonaConfig {
         let mut p = single_chain_persona();
-        for scene in p.scenes.get_mut("routine").unwrap() {
-            for step in &mut scene.steps {
-                step.seconds = Some(crate::engine::SecondsSpec::Fixed(30));
+        for chain in &mut p.states.get_mut("routine").unwrap().chains {
+            for segment in &mut chain.segments {
+                for beat in &mut segment.steps {
+                    beat.seconds = Some(crate::engine::SecondsSpec::Fixed(30));
+                }
             }
         }
         p
@@ -845,9 +848,11 @@ mod tests {
         assert_eq!(second.scene_id, "b");
         assert_eq!(second.step_index, 0);
         assert_eq!(second.clip, "two");
+        // 这一拍没写 seconds = 只播一遍："two" 原生 300ms
+        assert_eq!(second.loops, 1, "不写 seconds 就是播一遍");
         assert!(
-            (second.duration_ms as i64 - 600).abs() <= 60,
-            "旧格式 2 圈应接近 600ms，实际 {}ms",
+            (second.duration_ms as i64 - 300).abs() <= 60,
+            "播一遍应接近 300ms，实际 {}ms",
             second.duration_ms
         );
 
@@ -860,28 +865,17 @@ mod tests {
     }
 
     #[test]
-    fn legacy_loops_still_work() {
-        let p = persona();
-        let mut playback = Playback::default();
-        let now = at(10, 0, 0);
-        let mut p2 = p.clone();
-        p2.chains.insert(
-            "routine".to_string(),
-            vec![ChainConfig {
-                id: "only_b".into(),
-                label: "乙".into(),
-                weight: 1,
-                segments: vec!["b".into()],
-                tags: vec![],
-                when: None,
-            }],
-        );
-        let event = playback.reset(&p2, "routine", now).unwrap();
+    fn beat_without_seconds_plays_single_loop() {
+        let mut p = persona();
+        // 只留"乙"这条链：首拍不写 seconds → 播一遍（"two" 原生 300ms）
+        let b = p.states["routine"].chains[1].clone();
+        set_chains(&mut p, "routine", vec![b]);
+        let event = Playback::default().reset(&p, "routine", at(10, 0, 0)).unwrap();
         assert_eq!(event.clip, "two");
-        assert_eq!(event.loops, 2);
+        assert_eq!(event.loops, 1);
         assert!(
-            (event.duration_ms as i64 - 600).abs() <= 60,
-            "旧格式 loops=2 应接近 600ms，实际 {}ms",
+            (event.duration_ms as i64 - 300).abs() <= 60,
+            "播一遍应接近 300ms，实际 {}ms",
             event.duration_ms
         );
     }
@@ -910,25 +904,13 @@ mod tests {
         // 权重 3:1 → 一袋（一轮）里份数就是 3 和 1，长期频率自然也是 3:1；
         // 需求偏置改的就是这个份数，所以"约束优先级"之后仍有稳定的份额保证
         let mut p = persona();
-        p.chains.insert(
-            "routine".to_string(),
+        let segs = segments_of(&p, "routine");
+        set_chains(
+            &mut p,
+            "routine",
             vec![
-                ChainConfig {
-                    id: "heavy".into(),
-                    label: "重".into(),
-                    weight: 3,
-                    segments: vec!["a".into()],
-                    tags: vec![],
-                    when: None,
-                },
-                ChainConfig {
-                    id: "light".into(),
-                    label: "轻".into(),
-                    weight: 1,
-                    segments: vec!["b".into()],
-                    tags: vec![],
-                    when: None,
-                },
+                chain_of("heavy", 3, vec![segs[0].clone()], vec![]),
+                chain_of("light", 1, vec![segs[1].clone()], vec![]),
             ],
         );
         let mut playback = Playback::default();
@@ -944,7 +926,7 @@ mod tests {
     #[test]
     fn seconds_range_stays_near_bounds_and_jitters() {
         let mut p = single_chain_persona();
-        p.scenes.get_mut("routine").unwrap()[0].steps[0].seconds =
+        segment_mut(&mut p, "routine", 0, 0).steps[0].seconds =
             Some(crate::engine::SecondsSpec::Range([5, 8]));
         let mut durations = std::collections::HashSet::new();
         for _ in 0..20 {
@@ -959,16 +941,15 @@ mod tests {
     }
 
     #[test]
-    fn chance_zero_skips_beat_and_once_plays_single_loop() {
+    fn chance_zero_skips_beat_and_missing_seconds_plays_once() {
         let mut p = single_chain_persona();
         // 让段 a 足够长（30 秒），免得被"最短保持"重复，方便直接走到段 b
-        p.scenes.get_mut("routine").unwrap()[0].steps[0].seconds =
+        segment_mut(&mut p, "routine", 0, 0).steps[0].seconds =
             Some(crate::engine::SecondsSpec::Fixed(30));
         {
-            let scene = &mut p.scenes.get_mut("routine").unwrap()[1]; // 段 b：两步
-            scene.steps[0].chance = 0.0; // 这一遍不出现
-            scene.steps[1].once = true; // 只播一遍
-            scene.steps[1].seconds = Some(crate::engine::SecondsSpec::Fixed(30)); // once 优先
+            let segment = segment_mut(&mut p, "routine", 0, 1); // 段 b：两步
+            segment.steps[0].chance = 0.0; // 这一遍不出现
+            segment.steps[1].seconds = None; // 不写时长 = 只播一遍
         }
         let mut playback = Playback::default();
         let now = at(10, 0, 0);
@@ -978,16 +959,21 @@ mod tests {
             .unwrap();
         assert_eq!(second.scene_id, "b");
         assert_eq!(second.clip, "three", "chance=0 的那一拍应被跳过");
-        assert_eq!(second.loops, 1, "once 只播一遍，忽略 seconds");
+        assert_eq!(second.loops, 1, "不写 seconds 就是播一遍");
     }
 
     /// 造一条带 when 约束的链（段 `a` 播 clip "one"，段 `b` 播 "two"+"three"）
-    fn chain_with_when(id: &str, segments: Vec<&str>, when: crate::engine::ChainWhen) -> ChainConfig {
+    fn chain_with_when(
+        id: &str,
+        segments: Vec<SegmentConfig>,
+        when: crate::engine::ChainWhen,
+    ) -> ChainConfig {
         ChainConfig {
             id: id.into(),
             label: id.into(),
             weight: 1,
-            segments: segments.into_iter().map(str::to_string).collect(),
+            segments,
+            steps: vec![],
             tags: vec![],
             when: Some(when),
         }
@@ -999,7 +985,7 @@ mod tests {
         let mut playback = Playback::default();
         let chain = chain_with_when(
             "aftermath",
-            vec!["b"],
+            vec![seg("b", "乙", vec![step("two")])],
             ChainWhen {
                 requires_recent: vec!["one".into()],
                 within_min: Some(10),
@@ -1032,7 +1018,7 @@ mod tests {
         let start = at(10, 0, 0);
         let chain = chain_with_when(
             "maintenance",
-            vec!["a"],
+            vec![seg("a", "甲", vec![step_secs("one", 1)])],
             ChainWhen {
                 cooldown_min: Some(45),
                 ..Default::default()
@@ -1045,7 +1031,7 @@ mod tests {
 
         let capped = chain_with_when(
             "egg",
-            vec!["a"],
+            vec![seg("a", "甲", vec![step_secs("one", 1)])],
             ChainWhen {
                 max_per_day: Some(2),
                 ..Default::default()
@@ -1065,11 +1051,12 @@ mod tests {
         use crate::engine::ChainWhen;
         let mut p = single_chain_persona();
         // 唯一的一条链被"最近播过某动作"挡住（那个动作永远不会出现）
-        p.chains.insert(
-            "routine".to_string(),
+        set_chains(
+            &mut p,
+            "routine",
             vec![chain_with_when(
                 "impossible",
-                vec!["a"],
+                vec![seg("a", "甲", vec![step_secs("one", 1)])],
                 ChainWhen {
                     requires_recent: vec!["two".into()],
                     within_min: Some(10),
@@ -1086,22 +1073,15 @@ mod tests {
 
     #[test]
     fn plan_tags_bias_chain_weights() {
-        use crate::engine::ChainConfig;
         // 当日计划：今天想多做 explore、少做 social（两条链权重相同，只看计划）
         let mut p = persona();
-        let chain = |id: &str, segment: &str, tag: &str| ChainConfig {
-            id: id.into(),
-            label: id.into(),
-            weight: 5,
-            segments: vec![segment.into()],
-            tags: vec![tag.to_string()],
-            when: None,
-        };
-        p.chains.insert(
-            "routine".to_string(),
+        let segs = segments_of(&p, "routine");
+        set_chains(
+            &mut p,
+            "routine",
             vec![
-                chain("explore_chain", "a", "explore"),
-                chain("social_chain", "b", "social"),
+                chain_of("explore_chain", 5, vec![segs[0].clone()], vec!["explore"]),
+                chain_of("social_chain", 5, vec![segs[1].clone()], vec!["social"]),
             ],
         );
         let count_explore = |focus: Vec<String>, avoid: Vec<String>| {
@@ -1128,23 +1108,16 @@ mod tests {
 
     #[test]
     fn needs_bias_shifts_chain_distribution() {
-        use crate::engine::ChainConfig;
         use crate::needs::ChainBias;
         let mut p = persona();
-        let chain = |id: &str, segment: &str, tags: Vec<&str>| ChainConfig {
-            id: id.into(),
-            label: id.into(),
-            weight: 1,
-            segments: vec![segment.into()],
-            tags: tags.into_iter().map(str::to_string).collect(),
-            when: None,
-        };
-        p.chains.insert(
-            "routine".to_string(),
+        let segs = segments_of(&p, "routine");
+        set_chains(
+            &mut p,
+            "routine",
             vec![
-                chain("social_chain", "a", vec!["social"]),
-                chain("plain_1", "b", vec![]),
-                chain("plain_2", "b", vec![]),
+                chain_of("social_chain", 1, vec![segs[0].clone()], vec!["social"]),
+                chain_of("plain_1", 1, vec![segs[1].clone()], vec![]),
+                chain_of("plain_2", 1, vec![segs[1].clone()], vec![]),
             ],
         );
         p.needs.chain_bias = vec![ChainBias {

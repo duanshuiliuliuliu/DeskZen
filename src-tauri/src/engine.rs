@@ -34,17 +34,14 @@ pub struct PersonaConfig {
     #[serde(default)]
     pub display_h: u32,
     pub system_prompt: SystemPromptConfig,
+    /// 状态：展示/说话配置 + 该状态的活动链（链内段按顺序播放，表达因果）
     pub states: HashMap<String, StateConfig>,
-    /// 可复用动画片段；每个片段可来自独立的横向 spritesheet。
+    /// 可复用的动作片段；每个片段可来自独立的横向 spritesheet。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub clips: HashMap<String, AnimationClipConfig>,
-    /// 语义状态对应的微场景池；场景只影响视觉表现，不参与状态机计算。
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub scenes: HashMap<String, Vec<SceneConfig>>,
-    /// 状态 -> 有序链：链内段按顺序播放（表达因果），链之间按权重选择。
-    /// 旧格式没有 chains 时，[`PersonaConfig::normalize`] 会为每个段合成一条单段链。
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub chains: HashMap<String, Vec<ChainConfig>>,
+    /// 动作资源目录（可选）：动作没写 `spritesheet` 时按 `<clips_dir>/<动作id>.webp` 派生
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub clips_dir: String,
     /// 被用户注意到（鼠标凑近 / 点一下 / 开口说话）时的即时反应：键为状态 id 或 `default`。
     /// 反应步骤、触发来源差异、限频参数都在这里配（详见 [`AcknowledgeConfig`]）。
     #[serde(default, skip_serializing_if = "AcknowledgeConfig::is_empty")]
@@ -56,29 +53,64 @@ pub struct PersonaConfig {
 }
 
 impl PersonaConfig {
-    /// 兼容旧格式：没有 chains 的状态，用它的段合成"一段一链"（权重取段权重），
-    /// 让播放层可以统一按 chains 工作。
-    pub(crate) fn normalize(&mut self) {
-        for (state, scenes) in &self.scenes {
-            if self
-                .chains
-                .get(state)
-                .is_some_and(|chains| !chains.is_empty())
-            {
-                continue;
+    /// 加载/导入后补齐**派生字段**，让配置文件里能省则省：
+    /// - 段 `id` 缺省 → `<链id>#<段序号>`（事件里的 `scene_id`）
+    /// - 段 `label` 缺省 → 该段首个动作的 label（窗口标题用）
+    /// - 链 `label` 缺省 → 该链首段的 label
+    /// - 动作 `spritesheet` 缺省 → `<clips_dir>/<动作id>.webp`
+    pub(crate) fn finalize(&mut self) {
+        // 先在只读阶段取好动作名，避免下面可变遍历时借用冲突
+        let clip_labels: HashMap<String, String> = self
+            .clips
+            .iter()
+            .map(|(id, clip)| {
+                let label = if clip.label.is_empty() {
+                    id.clone()
+                } else {
+                    clip.label.clone()
+                };
+                (id.clone(), label)
+            })
+            .collect();
+        for cfg in self.states.values_mut() {
+            for chain in cfg.chains.iter_mut() {
+                // 单段链简写：steps → segments[0].steps
+                if chain.segments.is_empty() && !chain.steps.is_empty() {
+                    chain.segments.push(SegmentConfig {
+                        // 单段链写在外面的 label 就是这一段的段名
+                        label: std::mem::take(&mut chain.label),
+                        steps: std::mem::take(&mut chain.steps),
+                        ..Default::default()
+                    });
+                }
+                for (index, segment) in chain.segments.iter_mut().enumerate() {
+                    if segment.id.is_empty() {
+                        segment.id = format!("{}#{index}", chain.id);
+                    }
+                    if segment.label.is_empty() {
+                        segment.label = segment
+                            .steps
+                            .first()
+                            .and_then(|step| clip_labels.get(&step.clip).cloned())
+                            .unwrap_or_else(|| segment.id.clone());
+                    }
+                }
+                if chain.label.is_empty() {
+                    chain.label = chain
+                        .segments
+                        .first()
+                        .map(|segment| segment.label.clone())
+                        .unwrap_or_else(|| chain.id.clone());
+                }
             }
-            let chains: Vec<ChainConfig> = scenes
-                .iter()
-                .map(|scene| ChainConfig {
-                    id: format!("auto-{}", scene.id),
-                    label: scene.label.clone(),
-                    weight: scene.weight.max(1),
-                    segments: vec![scene.id.clone()],
-                    tags: vec![],
-                    when: None,
-                })
-                .collect();
-            self.chains.insert(state.clone(), chains);
+        }
+        if !self.clips_dir.is_empty() {
+            let dir = self.clips_dir.trim_end_matches('/').to_string();
+            for (clip_id, clip) in self.clips.iter_mut() {
+                if clip.spritesheet.is_empty() {
+                    clip.spritesheet = format!("{dir}/{clip_id}.webp");
+                }
+            }
         }
     }
 }
@@ -138,6 +170,9 @@ pub struct StateConfig {
     /// 期望说话间隔（分钟，可选）：不写则按 `talkativeness` 取默认值
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_gap_min: Option<f64>,
+    /// 该状态的活动：链内段按顺序播放（表达因果），链之间按 `weight` 选择
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chains: Vec<ChainConfig>,
 }
 
 impl StateConfig {
@@ -155,7 +190,7 @@ impl StateConfig {
     }
 }
 
-/// 场景权重与步骤循环次数的缺省值：均为 1
+/// 权重缺省值：1
 fn default_unit() -> u32 {
     1
 }
@@ -163,6 +198,8 @@ fn default_unit() -> u32 {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AnimationClipConfig {
     /// 横向帧条资源路径；内置资源以 / 开头，导入角色为磁盘绝对路径。
+    /// 不写则按 `<clips_dir>/<动作id>.webp` 派生（见 [`PersonaConfig::finalize`]）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub spritesheet: String,
     /// 动作的中文说明（气泡生成提示词与调试用）
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -178,15 +215,15 @@ pub struct AnimationClipConfig {
     pub bubbles: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SceneConfig {
-    /// 段 id（语义：一段有名字、有起止的 UI 表现）
+/// 一段连续表演：有名字、有起止。段是"最短保持 + 一段最多一句台词"的单位。
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct SegmentConfig {
+    /// 段 id；不写则取 `<链id>#<段序号>`（事件里的 `scene_id`）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
+    /// 段名（窗口标题用）；不写则取本段首个动作的 label
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
-    /// 旧格式权重：没有 chains 时用来合成单段链
-    #[serde(default = "default_unit")]
-    pub weight: u32,
     #[serde(default)]
     pub steps: Vec<SceneStepConfig>,
 }
@@ -195,17 +232,12 @@ pub struct SceneConfig {
 pub struct SceneStepConfig {
     pub clip: String,
     /// 这一拍的目标时长（秒）：写数字表示固定，写 `[min,max]` 表示每遍随机取区间内一个值。
-    /// 实际时长会按动作原生时长取整到整数个循环；没写则回退 `loops` 语义。
+    /// 实际时长会按动作原生时长取整到整数个循环；**不写 = 只播一遍**。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seconds: Option<SecondsSpec>,
-    /// 只播一遍：用于在长动作之间插入微动作（张望、擦汗…），优先于 `seconds`
-    #[serde(default)]
-    pub once: bool,
     /// 这一拍出现在本次表演里的概率（0~1，缺省 1）：同一个段每遍的节拍数会略有不同
     #[serde(default = "default_chance")]
     pub chance: f64,
-    #[serde(default = "default_unit")]
-    pub loops: u32,
 }
 
 /// 目标时长：固定值或随机区间
@@ -238,9 +270,7 @@ impl Default for SceneStepConfig {
         Self {
             clip: String::new(),
             seconds: None,
-            once: false,
             chance: 1.0,
-            loops: 1,
         }
     }
 }
@@ -249,12 +279,18 @@ impl Default for SceneStepConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChainConfig {
     pub id: String,
+    /// 链名（可选）：不写则取首段的 label；只用于调试/日志，不影响播放
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
     #[serde(default = "default_unit")]
     pub weight: u32,
+    /// 链内的段（按数组顺序播放，表达因果）：一段 = 一次连续表演
     #[serde(default)]
-    pub segments: Vec<String>,
+    pub segments: Vec<SegmentConfig>,
+    /// 单段链的简写：等价于 `segments: [{steps}]`（与 `segments` 二选一）。
+    /// 大部分链只有一个段，这样写少一层嵌套。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<SceneStepConfig>,
     /// 标签：需求偏置（`needs.chain_bias`）按标签匹配，例如 "rest" / "social" / "explore"
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
@@ -623,7 +659,7 @@ impl StateEngine {
         let mut personas = HashMap::new();
         for (id, json) in EMBEDDED_PERSONAS {
             let mut cfg: PersonaConfig = serde_json::from_str(json).expect("persona 配置解析失败");
-            cfg.normalize();
+            cfg.finalize();
             personas.insert((*id).to_string(), Arc::new(cfg));
         }
         // 加载用户导入的角色（持久化在用户数据目录；clips/scenes 格式由导入时校验）
@@ -638,7 +674,7 @@ impl StateEngine {
                     // 避免注册进去后某些状态静默不播
                     match serde_json::from_str::<PersonaConfig>(&json) {
                         Ok(mut cfg) => {
-                            cfg.normalize();
+                            cfg.finalize();
                             match validate_persona_structure(&cfg) {
                                 Ok(()) => {
                                     personas.insert(cfg.id.clone(), Arc::new(cfg));
@@ -1795,57 +1831,46 @@ pub(crate) fn validate_persona_structure(persona: &PersonaConfig) -> Result<(), 
     if persona.clips.is_empty() {
         return Err("缺少 clips 动作定义".into());
     }
-    if persona.scenes.is_empty() {
-        return Err("缺少 scenes 段定义".into());
-    }
     for (clip_id, clip) in &persona.clips {
         if clip.frames == 0 || clip.frame_ms == 0 {
             return Err(format!("动作 {clip_id} 的 frames 与 frame_ms 必须大于 0"));
         }
     }
-    for (state, scenes) in &persona.scenes {
-        if !persona.states.contains_key(state) {
-            return Err(format!("段引用了未定义状态 {state}"));
+    // 活动校验：每个状态至少一条链，链里至少一个段，段里至少一拍，引用的动作必须已定义。
+    // 调用方应先 [`PersonaConfig::finalize`]（段 id / label 已补齐），否则查不到重复 id。
+    for (state, cfg) in &persona.states {
+        if cfg.chains.is_empty() {
+            return Err(format!("状态 {state} 没有可播放的活动（chains）"));
         }
-        if scenes.is_empty() {
-            return Err(format!("状态 {state} 没有可播放的段"));
-        }
-        for scene in scenes {
-            if scene.steps.is_empty() {
-                return Err(format!("段 {} 没有动作步骤", scene.id));
+        let mut chain_ids: Vec<&str> = Vec::new();
+        let mut segment_ids: Vec<&str> = Vec::new();
+        for chain in &cfg.chains {
+            if chain_ids.contains(&chain.id.as_str()) {
+                return Err(format!("状态 {state} 里有重名的链 {}", chain.id));
             }
-            for step in &scene.steps {
-                if !persona.clips.contains_key(&step.clip) {
-                    return Err(format!("段 {} 引用了未知动作 {}", scene.id, step.clip));
-                }
-                validate_step(step, &format!("段 {}", scene.id))?;
+            chain_ids.push(&chain.id);
+            if !chain.steps.is_empty() {
+                return Err(format!(
+                    "链 {} 同时写了 segments 与 steps（单段链只能二选一）",
+                    chain.id
+                ));
             }
-        }
-    }
-    for state in persona.states.keys() {
-        if !persona.scenes.contains_key(state) {
-            return Err(format!("状态 {state} 缺少 scenes 段定义"));
-        }
-    }
-    // 链校验：链内段按顺序播放（表达因果），链之间按权重选择。
-    // normalize() 已为旧格式补齐单段链，所以这里可以要求"每个段都必须在某条链里"，
-    // 否则那段素材永远不会被播到。
-    for state in persona.chains.keys() {
-        if !persona.states.contains_key(state) {
-            return Err(format!("链引用了未定义状态 {state}"));
-        }
-    }
-    // 按段所在的状态检查链覆盖：缺 chains 的状态同样要拦下（调用方应先 normalize）
-    for (state, scenes) in &persona.scenes {
-        let no_chains: Vec<ChainConfig> = Vec::new();
-        let chains = persona.chains.get(state).unwrap_or(&no_chains);
-        for chain in chains {
             if chain.segments.is_empty() {
                 return Err(format!("链 {} 没有段", chain.id));
             }
             for segment in &chain.segments {
-                if !scenes.iter().any(|s| s.id == *segment) {
-                    return Err(format!("链 {} 引用了不存在的段 {}", chain.id, segment));
+                if segment.steps.is_empty() {
+                    return Err(format!("段 {} 没有动作步骤", segment.id));
+                }
+                if segment_ids.contains(&segment.id.as_str()) {
+                    return Err(format!("状态 {state} 里有重名的段 {}", segment.id));
+                }
+                segment_ids.push(&segment.id);
+                for step in &segment.steps {
+                    if !persona.clips.contains_key(&step.clip) {
+                        return Err(format!("段 {} 引用了未知动作 {}", segment.id, step.clip));
+                    }
+                    validate_step(step, &format!("段 {}", segment.id))?;
                 }
             }
             if let Some(when) = &chain.when {
@@ -1860,11 +1885,6 @@ pub(crate) fn validate_persona_structure(persona: &PersonaConfig) -> Result<(), 
                 if when.max_per_day == Some(0) {
                     return Err(format!("链 {} 的 when.max_per_day 必须大于 0", chain.id));
                 }
-            }
-        }
-        for scene in scenes {
-            if !chains.iter().any(|c| c.segments.contains(&scene.id)) {
-                return Err(format!("段 {} 不属于任何链，永远不会播放", scene.id));
             }
         }
     }
@@ -2006,12 +2026,12 @@ pub(crate) fn validate_persona_structure(persona: &PersonaConfig) -> Result<(), 
     Ok(())
 }
 
-/// 状态是否有可播放素材（配置了非空段）。
+/// 状态是否有可播放素材（配置了至少一个非空段）。
 pub(crate) fn state_has_material(persona: &PersonaConfig, state: &str) -> bool {
     persona
-        .scenes
+        .states
         .get(state)
-        .is_some_and(|scenes| !scenes.is_empty())
+        .is_some_and(|cfg| cfg.chains.iter().any(|chain| !chain.segments.is_empty()))
 }
 
 /// 运行时有效状态：角色没配置该状态（无素材）时，完全按 routine 处理
@@ -2028,30 +2048,15 @@ pub(crate) fn runtime_state(persona: &PersonaConfig, state: &str) -> String {
 /// 只需要生成当前状态可能播到的动作，控制每日调用量。
 pub(crate) fn state_clip_ids(persona: &PersonaConfig, state: &str) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
-    let Some(scenes) = persona.scenes.get(state) else {
+    let Some(cfg) = persona.states.get(state) else {
         return ids;
     };
-    let mut ordered: Vec<&SceneConfig> = Vec::new();
-    if let Some(chains) = persona.chains.get(state) {
-        for chain in chains {
-            for segment in &chain.segments {
-                if let Some(scene) = scenes.iter().find(|s| s.id == *segment) {
-                    if !ordered.iter().any(|s| s.id == scene.id) {
-                        ordered.push(scene);
-                    }
+    for chain in &cfg.chains {
+        for segment in &chain.segments {
+            for step in &segment.steps {
+                if persona.clips.contains_key(&step.clip) && !ids.contains(&step.clip) {
+                    ids.push(step.clip.clone());
                 }
-            }
-        }
-    }
-    for scene in scenes {
-        if !ordered.iter().any(|s| s.id == scene.id) {
-            ordered.push(scene);
-        }
-    }
-    for scene in ordered {
-        for step in &scene.steps {
-            if persona.clips.contains_key(&step.clip) && !ids.contains(&step.clip) {
-                ids.push(step.clip.clone());
             }
         }
     }
@@ -2393,8 +2398,20 @@ mod tests {
     use super::*;
 
     fn link() -> PersonaConfig {
-        serde_json::from_str(include_str!("../../resources/characters/link/persona.json"))
-            .expect("内置 persona.json 解析失败")
+        let mut cfg: PersonaConfig =
+            serde_json::from_str(include_str!("../../resources/characters/link/persona.json"))
+                .expect("内置 persona.json 解析失败");
+        cfg.finalize();
+        cfg
+    }
+
+    /// 取某状态第一条链的第 `index` 段（可变）
+    fn segment_mut<'a>(
+        p: &'a mut PersonaConfig,
+        state: &str,
+        index: usize,
+    ) -> &'a mut SegmentConfig {
+        &mut p.states.get_mut(state).unwrap().chains[0].segments[index]
     }
 
     #[test]
@@ -2481,6 +2498,7 @@ mod tests {
                 talkativeness: String::new(),
                 tone: String::new(),
                 bubble_gap_min: None,
+                chains: vec![],
             },
         );
         let error = validate_persona_structure(&p).unwrap_err();
@@ -2492,8 +2510,6 @@ mod tests {
         // 角色没配 sleep 素材：日程里仍可写 sleep，运行时完全按 routine 处理
         let mut p = link();
         p.states.remove("sleep");
-        p.scenes.remove("sleep");
-        p.chains.remove("sleep");
         assert!(validate_persona_structure(&p).is_ok());
         assert_eq!(runtime_state(&p, "sleep"), "routine");
         assert_eq!(runtime_state(&p, "routine"), "routine");
@@ -2503,44 +2519,66 @@ mod tests {
     }
 
     #[test]
-    fn chain_validation_rejects_unknown_and_orphan_segments() {
+    fn chain_validation_rejects_duplicate_segment_and_empty_state() {
         let base = link();
 
-        // 链引用不存在的段
+        // 同一个状态里段的 id 撞车 → 事件里的 scene_id 会指错段
         let mut p = base.clone();
-        p.chains
+        let first_id = p.states["routine"].chains[0].segments[0].id.clone();
+        p.states
             .get_mut("routine")
             .unwrap()
+            .chains
             .first_mut()
             .unwrap()
             .segments
-            .push("ghost".into());
+            .push(SegmentConfig {
+                id: first_id,
+                steps: vec![SceneStepConfig {
+                    clip: "observe".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
         let error = validate_persona_structure(&p).unwrap_err();
-        assert!(error.contains("不存在的段"), "{error}");
+        assert!(error.contains("重名的段"), "{error}");
 
-        // 段不属于任何链 → 永远不会播放
+        // 状态没有任何活动 → 永远不播
         let mut p = base.clone();
-        p.chains.remove("routine");
+        p.states.get_mut("routine").unwrap().chains.clear();
         let error = validate_persona_structure(&p).unwrap_err();
-        assert!(error.contains("不属于任何链"), "{error}");
+        assert!(error.contains("没有可播放的活动"), "{error}");
     }
 
     #[test]
-    fn normalize_fills_single_segment_chains_for_legacy_personas() {
+    fn finalize_derives_ids_labels_and_asset_paths() {
         let mut p = link();
-        p.chains.clear();
-        p.normalize();
-        for (state, scenes) in &p.scenes {
-            let chains = p.chains.get(state).expect("normalize 后每个状态都应有链");
-            assert_eq!(chains.len(), scenes.len());
-            for scene in scenes {
-                assert!(
-                    chains.iter().any(|c| c.segments == vec![scene.id.clone()]),
-                    "段 {} 应合成单段链",
-                    scene.id
-                );
+        let expected_sheet = p.clips["walk"].spritesheet.clone();
+        // 清掉所有派生字段：段 id/label、链 label、动作资源路径
+        for cfg in p.states.values_mut() {
+            for chain in cfg.chains.iter_mut() {
+                chain.label.clear();
+                for segment in chain.segments.iter_mut() {
+                    segment.id.clear();
+                    segment.label.clear();
+                }
             }
         }
+        for clip in p.clips.values_mut() {
+            clip.spritesheet.clear();
+        }
+        p.finalize();
+
+        for cfg in p.states.values() {
+            for chain in &cfg.chains {
+                assert!(!chain.label.is_empty(), "链 label 应由 finalize 补齐");
+                for (index, segment) in chain.segments.iter().enumerate() {
+                    assert_eq!(segment.id, format!("{}#{index}", chain.id));
+                    assert!(!segment.label.is_empty(), "段 label 应由 finalize 补齐");
+                }
+            }
+        }
+        assert_eq!(p.clips["walk"].spritesheet, expected_sheet);
         assert!(validate_persona_structure(&p).is_ok());
     }
 
@@ -2640,7 +2678,7 @@ mod tests {
         assert_eq!(automatic_state(&p, noon, &tired), "sleep");
 
         // 需求拉去的状态必须真有素材，否则忽略
-        p.scenes.remove("eat");
+        p.states.remove("eat");
         assert_ne!(automatic_state(&p, noon, &hungry), "eat");
 
         // 硬时段最高优先：20:00~08:00 是睡眠时段，再饿也得先睡
@@ -2963,33 +3001,31 @@ mod tests {
     }
 
     #[test]
-    fn embedded_scenes_reference_existing_states_and_clips() {
+    fn embedded_activities_reference_existing_clips() {
         for (id, json) in EMBEDDED_PERSONAS {
-            let persona: PersonaConfig = serde_json::from_str(json).unwrap();
-            for state in persona.states.keys() {
+            let mut persona: PersonaConfig = serde_json::from_str(json).unwrap();
+            persona.finalize();
+            for (state, cfg) in &persona.states {
                 assert!(
-                    persona.scenes.contains_key(state),
-                    "{id}: 状态 {state} 缺少场景"
+                    !cfg.chains.is_empty(),
+                    "{id}: 状态 {state} 没有任何活动链"
                 );
-            }
-            for (state, scenes) in &persona.scenes {
-                assert!(
-                    persona.states.contains_key(state),
-                    "{id}: 场景引用未知状态 {state}"
-                );
-                for scene in scenes {
-                    assert!(
-                        !scene.steps.is_empty(),
-                        "{id}: 场景 {} 没有动作步骤",
-                        scene.id
-                    );
-                    for step in &scene.steps {
+                for chain in &cfg.chains {
+                    assert!(!chain.segments.is_empty(), "{id}: 链 {} 没有段", chain.id);
+                    for segment in &chain.segments {
                         assert!(
-                            persona.clips.contains_key(&step.clip),
-                            "{id}: 场景 {} 引用未知动作 {}",
-                            scene.id,
-                            step.clip
+                            !segment.steps.is_empty(),
+                            "{id}: 段 {} 没有动作步骤",
+                            segment.id
                         );
+                        for step in &segment.steps {
+                            assert!(
+                                persona.clips.contains_key(&step.clip),
+                                "{id}: 段 {} 引用未知动作 {}",
+                                segment.id,
+                                step.clip
+                            );
+                        }
                     }
                 }
             }
@@ -3003,16 +3039,18 @@ mod tests {
         let mut no_clips = p.clone();
         no_clips.clips.clear();
         assert!(validate_persona_structure(&no_clips).is_err());
-        let mut no_scenes = p.clone();
-        no_scenes.scenes.clear();
-        assert!(validate_persona_structure(&no_scenes).is_err());
-        // 任一状态缺少场景都视为不可播放（前端不做兜底假设）
-        let mut state_without_scene = p.clone();
-        state_without_scene.scenes.remove("sleep");
-        assert!(validate_persona_structure(&state_without_scene).is_err());
-        // 场景引用了不存在的动作：这正是"加载侧宽松"时会被静默过滤、什么都不播的情况
+        let mut no_activities = p.clone();
+        for cfg in no_activities.states.values_mut() {
+            cfg.chains.clear();
+        }
+        assert!(validate_persona_structure(&no_activities).is_err());
+        // 任一状态没有任何活动都视为不可播放（前端不做兜底假设）
+        let mut state_without_activity = p.clone();
+        state_without_activity.states.get_mut("sleep").unwrap().chains.clear();
+        assert!(validate_persona_structure(&state_without_activity).is_err());
+        // 段引用了不存在的动作：这正是"加载侧宽松"时会被静默过滤、什么都不播的情况
         let mut bad_step = p;
-        bad_step.scenes.get_mut("relax").unwrap()[0].steps[0].clip = "不存在的动作".into();
+        segment_mut(&mut bad_step, "relax", 0).steps[0].clip = "不存在的动作".into();
         let error = validate_persona_structure(&bad_step).unwrap_err();
         assert!(error.contains("未知动作"), "{error}");
     }
@@ -3045,7 +3083,6 @@ mod tests {
             vec![SceneStepConfig {
                 clip: "不存在的动作".into(),
                 seconds: Some(crate::engine::SecondsSpec::Fixed(3)),
-                loops: 1,
                 ..Default::default()
             }],
         );
@@ -3097,19 +3134,18 @@ mod tests {
     fn step_validation_checks_seconds_range_and_chance() {
         // 区间非法（min > max）
         let mut bad_range = link();
-        bad_range.scenes.get_mut("routine").unwrap()[0].steps[0].seconds =
+        segment_mut(&mut bad_range, "routine", 0).steps[0].seconds =
             Some(SecondsSpec::Range([10, 5]));
         assert!(validate_persona_structure(&bad_range).is_err());
 
         // 概率越界
         let mut bad_chance = link();
-        bad_chance.scenes.get_mut("routine").unwrap()[0].steps[0].chance = 1.5;
+        segment_mut(&mut bad_chance, "routine", 0).steps[0].chance = 1.5;
         assert!(validate_persona_structure(&bad_chance).is_err());
 
         // 合法区间通过
         let mut ok = link();
-        ok.scenes.get_mut("routine").unwrap()[0].steps[0].seconds =
-            Some(SecondsSpec::Range([5, 10]));
+        segment_mut(&mut ok, "routine", 0).steps[0].seconds = Some(SecondsSpec::Range([5, 10]));
         assert!(validate_persona_structure(&ok).is_ok());
     }
 

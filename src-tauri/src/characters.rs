@@ -37,7 +37,7 @@ pub async fn import_local_character(
     let mut persona: PersonaConfig = serde_json::from_slice(&pack.persona_json)
         .map_err(|e| format!("persona.json 格式错误: {e}"))?;
     // 旧格式（没有 chains）在这里补齐单段链，校验与播放都按统一的链模型走
-    persona.normalize();
+    persona.finalize();
     validate_persona(&persona, &pack.files)?;
 
     let id = format!("local-{}", sanitize_slug(&persona.id, &persona.name));
@@ -192,24 +192,6 @@ fn validate_persona(
             .ok_or_else(|| format!("动作 {clip_id} 缺少资源 {}", path.display()))?;
         validate_webp(bytes).map_err(|e| format!("动作 {clip_id} {e}"))?;
     }
-    for (state, scenes) in &persona.scenes {
-        if !persona.states.contains_key(state) {
-            return Err(format!("场景引用了未定义状态 {state}"));
-        }
-        if scenes.is_empty() {
-            return Err(format!("状态 {state} 没有可播放场景"));
-        }
-        for scene in scenes {
-            if scene.steps.is_empty() {
-                return Err(format!("场景 {} 没有动作步骤", scene.id));
-            }
-            for step in &scene.steps {
-                if !persona.clips.contains_key(&step.clip) {
-                    return Err(format!("场景 {} 引用了未知动作 {}", scene.id, step.clip));
-                }
-            }
-        }
-    }
     Ok(())
 }
 
@@ -324,13 +306,19 @@ mod tests {
                 "reply_style": "简短回复"
             },
             "states": {
-                "routine": { "label": "日常" }
+                "routine": {
+                    "label": "日常",
+                    "chains": [
+                        {
+                            "id": "wave_chain",
+                            "weight": 1,
+                            "segments": [ { "steps": [ { "clip": "wave", "seconds": 45 } ] } ]
+                        }
+                    ]
+                }
             },
             "clips": {
                 "wave": { "spritesheet": "clips/wave.webp", "frames": 2, "frame_ms": 83 }
-            },
-            "scenes": {
-                "routine": [ { "id": "wave_once", "steps": [ { "clip": "wave", "seconds": 45 } ] } ]
             },
             "schedule": { "loop": [ { "state": "routine", "duration": 10 } ], "time": [] }
         }"#
@@ -359,17 +347,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_persona_requires_clips_scenes_and_per_state_scenes() {
+    fn validate_persona_requires_clips_and_per_state_activities() {
         let mut persona: PersonaConfig = serde_json::from_str(minimal_persona_json()).unwrap();
-        persona.normalize();
+        persona.finalize();
         assert!(validate_persona(&persona, &demo_files()).is_ok());
 
-        persona.scenes.clear();
+        persona.states.get_mut("routine").unwrap().chains.clear();
         let error = validate_persona(&persona, &demo_files()).unwrap_err();
-        assert!(error.contains("scenes"), "{error}");
+        assert!(error.contains("活动"), "{error}");
 
         persona = serde_json::from_str(minimal_persona_json()).unwrap();
-        persona.normalize();
+        persona.finalize();
         persona.states.insert(
             "extra".into(),
             serde_json::from_str(r#"{ "label": "额外" }"#).unwrap(),
@@ -382,7 +370,7 @@ mod tests {
     fn validate_persona_rejects_schedule_with_unknown_state() {
         // 导入侧与启动扫描共用同一套日程判据：坏引用必须在安装前就被拒绝
         let mut persona: PersonaConfig = serde_json::from_str(minimal_persona_json()).unwrap();
-        persona.normalize();
+        persona.finalize();
         persona.schedule.r#loop[0].state = "ghost".into();
         let error = validate_persona(&persona, &demo_files()).unwrap_err();
         assert!(error.contains("ghost"), "{error}");
@@ -391,7 +379,7 @@ mod tests {
     #[test]
     fn validate_persona_rejects_missing_or_invalid_clip_assets() {
         let mut persona: PersonaConfig = serde_json::from_str(minimal_persona_json()).unwrap();
-        persona.normalize();
+        persona.finalize();
         let error = validate_persona(&persona, &HashMap::new()).unwrap_err();
         assert!(error.contains("wave"), "{error}");
 

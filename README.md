@@ -14,7 +14,7 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
 | 多角色运行时切换 | 内置林克；托盘「更换角色」子菜单即时切换（✓ 标记当前角色） |
 | 角色删除 | 设置界面一键删除导入角色，删除当前角色时自动回退到默认角色 |
 | 动作片段（clips） | 每个动作一份独立的横向 WebP 帧条（自带帧数/帧时长/说明/专属台词），CSS `steps()` 逐帧播放 |
-| 编排（chains/scenes） | 状态 → 链（链内**有序**表达因果、链间按权重可选）→ 段（一次"事"，由若干**节拍**组成）→ 节拍（一个动作实例）；**由 Rust 决定走哪条链、播哪一段的哪一拍**。段内节拍可随机取舍（`chance`）、时长可给区间（`seconds: [min,max]`）、可插一次性微动作（`once`），每拍还有 ±8% 速度抖动与随机起始帧相位，所以同一段每遍都不完全一样 |
+| 编排（chains） | 状态 → 链（链内**有序**表达因果、链间按权重可选）→ 段（一次"事"，由若干**节拍**组成）→ 节拍（一个动作实例）；**由 Rust 决定走哪条链、播哪一段的哪一拍**。段内节拍可随机取舍（`chance`）、时长可给区间（`seconds: [min,max]`）、微动作不写 `seconds` 即只播一遍，每拍还有 ±8% 速度抖动与随机起始帧相位，所以同一段每遍都不完全一样 |
 | 动作衔接 | 双图层交叉淡入（150ms）+ 帧条几何归一（脚线/中线对齐）+ 循环缝重剪，消除切动作时的"跳一下" |
 | 对话面板 | 双击角色打开，跟随角色的对话气泡（尖角指向角色、高度自适应），接入 OpenAI 兼容大模型，流式输出，支持图片消息 |
 | 状态气泡 | 角色随机「自言自语」的环境气泡：每个动作实例最多一句，时刻落在实例的 20%~70%，展示时长跟随动作剩余；**台词挂在动作上、只在动作在屏时出现** |
@@ -58,7 +58,7 @@ DeskZen 是一款拥有“独立生活节律”的桌面伴生 AI 软件。
 ### 角色导入与删除
 
 - 本地导入：设置界面「角色导入」支持从本地文件夹 / zip 导入（`persona.json` + `clips/` 动作帧条），也可直接把文件夹 / zip 拖入设置窗口的导入区域。
-- 导入校验：状态必须落在固定 6 个状态内且含 `routine`、每个已声明状态都有段、链引用的段必须存在且每个段至少属于一条链、步骤引用的动作必须存在、动作资源必须是 `clips/` 下的 WebP；任一不满足即拒绝导入。旧格式（只有 `scenes` 没有 `chains`）会自动为每个段合成一条单段链。
+- 导入校验：状态必须落在固定 6 个状态内且含 outine、每个已声明状态都要有活动链、链里每段至少一拍、拍引用的动作必须存在、动作资源必须是包内 WebP；任一不满足即拒绝导入。
 - 删除：设置界面角色列表可删除导入角色；同时移除磁盘文件与托盘菜单项；删除当前角色时自动回退到内置默认角色（林克）；内置角色不可删除。
 
 ### 聊天窗口
@@ -151,7 +151,7 @@ DeskZen/
 
 ### 状态引擎流程
 
-1. 启动时加载角色：编译期内嵌的内置角色（`resources/characters/link/persona.json`）+ 扫描用户数据目录（`%APPDATA%\com.deskzen.desktop\characters\*\persona.json`）中已导入的角色。加载与导入共用同一套**结构校验**（固定状态集合 / 段与链引用齐备等），旧格式自动补齐单段链；不通过的目录跳过并在控制台打印原因。
+1. 启动时加载角色：编译期内嵌的内置角色（esources/characters/link/persona.json）+ 扫描用户数据目录（%APPDATA%\com.deskzen.desktop\characters\*\persona.json）中已导入的角色。加载与导入共用同一套**结构校验**（固定状态集合 / 活动链与动作引用齐备等）；不通过的目录跳过并在控制台打印原因。
 2. Rust 引擎按「下一次唤醒时刻」（状态切换 / 本次实例的说话时刻 / **当前动作实例播完**，取最早者；单次睡眠最多 15 分钟）定时唤醒：状态变化时广播 `state-changed` 并重开编排；动作实例到点时推进播放（同段下一步 → 同链下一段 → 链走完按权重换链，链内顺序永不打乱）。动作接力只留 60ms 余量，避免切换前定格。
 3. 后端把要播的动作用 `playback` 事件下发（链/段/动作/帧参数/实例时长），前端只负责渲染与交叉淡入；因为后端始终知道"当前在演哪个动作"，气泡文案与画面天然对齐。切换角色时广播 `persona-changed` 让前端重新渲染。
 
@@ -237,30 +237,52 @@ DeskZen/
 
 - `system_prompt`：角色定义与回复风格（注入 LLM，全局生效）；
 - `display_w` / `display_h`：角色显示尺寸（可省略，缺省时按第一个动作帧条的实际尺寸 ÷ 帧数自动计算）；
-- `states`：**必须是固定 6 个状态**（`routine`/`focus`/`active`/`relax`/`eat`/`sleep`）的子集，且必须包含 `routine`；未配置的状态运行时完全按日常处理。每个状态可写：中文名 `label`、话痨程度 `talkativeness`（`chatty`/`normal`/`quiet`/`mute`，缺省 `normal`）、可选对话语气 `tone`、可选期望说话间隔 `bubble_gap_min`（分钟）。
-  `talkativeness`/`bubble_gap_min` 决定**环境气泡间隔**；`tone` 决定**对话时的语气**，不写就按 `talkativeness` 推导。台词不在这里配；
-- `clips`：独立动作片段表，每个动作使用自己的横向 `spritesheet`、`frames` 与 `frame_ms`（同一角色内各动作的帧尺寸需一致）；
-- `clips[].label` / `clips[].description` / `clips[].bubbles`：动作名、**画面描述**与该动作唯一的静态文案池。
-  AI 台词生成只依据 `description`（"角色正在做什么、什么心情"），不再注入状态级指引——状态指引只用于对话时的说话风格；
-- `scenes`：状态 → **段**列表，段由若干节拍组成：
+- `states`：**必须是固定 6 个状态**（`routine`/`focus`/`active`/`relax`/`eat`/`sleep`）的子集，且必须包含 `routine`；未配置的状态运行时完全按日常处理。
+  每个状态写自己的展示/说话配置 + **该状态的活动链**：中文名 `label`、话痨程度 `talkativeness`（`chatty`/`normal`/`quiet`/`mute`，缺省 `normal`）、
+  可选对话语气 `tone`、可选期望说话间隔 `bubble_gap_min`（分钟）、`chains`（见下）。`talkativeness`/`bubble_gap_min` 决定**环境气泡间隔**；
+  `tone` 决定**对话时的语气**，不写就按 `talkativeness` 推导。台词不在这里配；
+- `clips`：动作片段表（可跨状态复用）。每个动作写 `frames` 与 `frame_ms`（同一角色内各动作的帧尺寸需一致）；
+  资源路径默认取 `clips_dir/<动作id>.webp`，只有命名不规律时才需要单独写 `spritesheet`：
 
   ```jsonc
-  {"id": "patrol_a_round", "label": "巡视一圈", "steps": [
-    {"clip": "walk", "seconds": [18, 30]},            // 时长区间：每遍随机取一个值
-    {"clip": "observe", "once": true, "chance": 0.7},  // 70% 概率插入的一次性微动作
-    {"clip": "walk", "seconds": [10, 18]}
-  ]}
+  "clips_dir": "/characters/link/clips",      // 动作资源目录（可省略）
+  "clips": { "walk": {"frames": 16, "frame_ms": 150, "label": "走动", "description": "…", "bubbles": ["…"]} }
   ```
 
-  `seconds` 可为数字（固定）或 `[min,max]`（随机区间），按动作原生时长取整到整数个循环；`once` 表示只播一遍（优先于 `seconds`）；
-  `chance`（0~1，缺省 1）决定这一拍出现在本次表演里的概率；`loops` 是旧格式回退。**说话按"段"算**：段总时长 ≥30 秒才配台词，且一段最多一句（落在段内的哪一拍，就用那一拍动作的文案）；
-- `chains`：状态 → **链**列表，`{id,label,weight,segments:[段id...],when}`。链内段按数组顺序播放（表达因果，不洗牌），链之间按 `weight` 选择且不与上一条相同；每个段至少要出现在一条链里；
+- `clips[].label` / `clips[].description` / `clips[].bubbles`：动作名、**画面描述**与该动作唯一的静态文案池。
+  AI 台词生成只依据 `description`（"角色正在做什么、什么心情"），不再注入状态级指引——状态指引只用于对话时的说话风格；
+- `states.<s>.chains`：该状态的**活动链**列表，`{id, weight, segments | steps, tags, when}`。
+  链内段按数组顺序播放（表达因果，不洗牌），链之间按 `weight` 选择且不与上一条相同。**段 = 一次连续表演**，
+  由若干节拍（`steps`）组成；只有一个段的链可以直接写 `steps`（少一层嵌套）：
+
+  ```jsonc
+  "chains": [
+    // 单段链：直接写 steps
+    {"id": "notice_viewer", "weight": 2, "tags": ["social"],
+     "steps": [{"clip": "greet_wave", "seconds": 30}]},
+
+    // 多段链：segments 是有序的段列表，每段可以给自己的名字
+    {"id": "patrol_round", "weight": 5, "tags": ["explore"],
+     "segments": [
+       {"steps": [{"clip": "observe", "seconds": [30, 50]}]},
+       {"label": "巡视一圈", "steps": [
+         {"clip": "walk", "seconds": [18, 30]},          // 时长区间：每遍随机取一个值
+         {"clip": "observe", "chance": 0.7},             // 70% 概率插入的微动作
+         {"clip": "walk", "seconds": [10, 18]}
+       ]}
+     ]}
+  ]
+  ```
+
+  `seconds` 可为数字（固定）或 `[min,max]`（随机区间），按动作原生时长取整到整数个循环；**不写 = 只播一遍**（用于插入张望、擦汗这类微动作）；
+  `chance`（0~1，缺省 1）决定这一拍出现在本次表演里的概率。**说话按"段"算**：段总时长 ≥30 秒才配台词，且一段最多一句（落在段内的哪一拍，就用那一拍动作的文案）；
+  段 `id` 与段 `label`、链 `label` 都可以不写：段 id 缺省取 `<链id>#<段序号>`，段 label 缺省取该段首个动作的名字，链 label 缺省取首段名字。
   `when` 是**触发约束**（权重只能表达偏好，因果与节制靠它）：
 
   ```jsonc
-  {"id": "battle_aftermath", "segments": ["adventure_progress"],
+  {"id": "battle_aftermath", "weight": 3, "steps": [{"clip": "task_cheer", "seconds": 30}],
    "when": {"requires_recent": ["fight"], "within_min": 20}},   // 最近 20 分钟真打过架才可能出现
-  {"id": "gear_maintenance", "segments": ["maintain_the_shield", "check_the_route"],
+  {"id": "gear_maintenance", "weight": 5, "segments": [ … ],
    "when": {"cooldown_min": 45}}                                 // 保养完 45 分钟内不再保养
   ```
 

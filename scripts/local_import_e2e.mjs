@@ -24,7 +24,10 @@ const PACK_PERSONA = {
     reply_style: "简短回复",
   },
   states: {
-    routine: { label: "日常" },
+    routine: {
+      label: "日常",
+      chains: [{ id: "look_around", weight: 1, steps: [{ clip: "observe", seconds: 45 }] }],
+    },
   },
   clips: {
     observe: {
@@ -35,15 +38,6 @@ const PACK_PERSONA = {
       frame_ms: 83,
       bubbles: ["看看周围。"],
     },
-  },
-  scenes: {
-    routine: [
-      {
-        id: "look_around",
-        label: "观察周围",
-        steps: [{ clip: "observe", seconds: 45 }],
-      },
-    ],
   },
   schedule: { loop: [{ state: "routine", duration: 10 }], time: [] },
 };
