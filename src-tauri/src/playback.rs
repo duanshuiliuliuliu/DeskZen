@@ -9,8 +9,8 @@ use chrono::{DateTime, Local};
 use serde::Serialize;
 
 use crate::engine::{
-    refill_bag, rng_unit, AnimationClipConfig, ChainConfig, PersonaConfig, SegmentConfig,
-    SceneStepConfig,
+    refill_bag, rng_unit, AnimationClipConfig, ChainConfig, PersonaConfig, SceneStepConfig,
+    SegmentConfig,
 };
 
 /// 单个动作实例的时长上限（毫秒）：防止手改配置把角色卡在同一个动作上
@@ -213,9 +213,7 @@ impl Playback {
 
     /// 记住"这条链开播了"（冷却与每日上限都基于它）
     fn remember_chain(&mut self, chain_id: &str, now: DateTime<Local>) {
-        self.history
-            .chain_last
-            .insert(chain_id.to_string(), now);
+        self.history.chain_last.insert(chain_id.to_string(), now);
         let today = today_key(now);
         let entry = self
             .history
@@ -405,9 +403,17 @@ impl Playback {
                 .filter(|chain| !eligible.iter().any(|c| c.id == chain.id))
                 .map(|chain| chain.id.as_str())
                 .collect();
-            log::debug!("抽链 {state}：{} 条链被 when 约束挡下（{}）", blocked.len(), blocked.join("、"));
+            log::debug!(
+                "抽链 {state}：{} 条链被 when 约束挡下（{}）",
+                blocked.len(),
+                blocked.join("、")
+            );
         }
-        let chains = if eligible.is_empty() { chains } else { eligible };
+        let chains = if eligible.is_empty() {
+            chains
+        } else {
+            eligible
+        };
         if self.bags.get(state).is_none_or(|bag| bag.is_empty()) {
             let mut pool: Vec<String> = Vec::new();
             for chain in &chains {
@@ -449,7 +455,10 @@ impl Playback {
             Some(chain) => *chain,
             None => return self.pick_chain(persona, state, now),
         };
-        log::debug!("抽链 {state}：选中 {}（袋里还剩 {remaining} 条）", picked.id);
+        log::debug!(
+            "抽链 {state}：选中 {}（袋里还剩 {remaining} 条）",
+            picked.id
+        );
         self.last_chain.insert(state.to_string(), id);
         Some(picked)
     }
@@ -510,9 +519,7 @@ impl Playback {
         let beat = run.beats.get(index)?;
         let clip: &AnimationClipConfig = persona.clips.get(&beat.clip)?;
         // 记住这个动作最近播过（`when.requires_recent` 靠它判断因果）
-        self.history
-            .recent_clips
-            .insert(beat.clip.clone(), now);
+        self.history.recent_clips.insert(beat.clip.clone(), now);
         let frames = clip.frames.max(1);
         let frame_ms = clip.frame_ms.max(1);
         let duration_ms = beat.duration_ms;
@@ -604,9 +611,9 @@ fn resolve_beat(persona: &PersonaConfig, step: &SceneStepConfig) -> Option<Resol
     let native_ms = (frames as f64 * frame_ms as f64 / speed).round().max(1.0) as i64;
     let max_loops = ((MAX_ACTION_MS / native_ms).max(1)) as u32;
     let loops = match &step.seconds {
-        Some(spec) => {
-            (spec.sample_ms() as f64 / native_ms as f64).round().clamp(1.0, max_loops as f64) as u32
-        }
+        Some(spec) => (spec.sample_ms() as f64 / native_ms as f64)
+            .round()
+            .clamp(1.0, max_loops as f64) as u32,
         // 不写时长 = 只播一遍
         None => 1,
     };
@@ -622,7 +629,10 @@ fn resolve_beat(persona: &PersonaConfig, step: &SceneStepConfig) -> Option<Resol
 
 /// 链内按 id 找段（段现在内联在链里，不再有独立段表）
 fn find_segment<'a>(chain: &'a ChainConfig, segment_id: &str) -> Option<&'a SegmentConfig> {
-    chain.segments.iter().find(|segment| segment.id == segment_id)
+    chain
+        .segments
+        .iter()
+        .find(|segment| segment.id == segment_id)
 }
 
 fn find_chain<'a>(
@@ -727,7 +737,12 @@ mod tests {
     }
 
     /// 用现成的段造一条链
-    fn chain_of(id: &str, weight: u32, segments: Vec<SegmentConfig>, tags: Vec<&str>) -> ChainConfig {
+    fn chain_of(
+        id: &str,
+        weight: u32,
+        segments: Vec<SegmentConfig>,
+        tags: Vec<&str>,
+    ) -> ChainConfig {
         ChainConfig {
             id: id.into(),
             label: id.into(),
@@ -844,7 +859,10 @@ mod tests {
             "时长应接近目标 1000ms，实际 {}ms",
             event.duration_ms
         );
-        assert!(event.phase_frames < event.frames.max(1), "相位必须在帧数范围内");
+        assert!(
+            event.phase_frames < event.frames.max(1),
+            "相位必须在帧数范围内"
+        );
         assert_eq!(
             playback.next_at(),
             Some(now + chrono::Duration::milliseconds(event.duration_ms as i64))
@@ -897,7 +915,9 @@ mod tests {
         // 只留"乙"这条链：首拍不写 seconds → 播一遍（"two" 原生 300ms）
         let b = p.states["routine"].chains[1].clone();
         set_chains(&mut p, "routine", vec![b]);
-        let event = Playback::default().reset(&p, "routine", at(10, 0, 0)).unwrap();
+        let event = Playback::default()
+            .reset(&p, "routine", at(10, 0, 0))
+            .unwrap();
         assert_eq!(event.clip, "two");
         assert_eq!(event.loops, 1);
         assert!(
@@ -982,7 +1002,10 @@ mod tests {
         let now = at(10, 0, 0);
         let first = playback.reset(&p, "routine", now).unwrap();
         let second = playback
-            .advance(&p, now + chrono::Duration::milliseconds(first.duration_ms as i64))
+            .advance(
+                &p,
+                now + chrono::Duration::milliseconds(first.duration_ms as i64),
+            )
             .unwrap();
         assert_eq!(second.scene_id, "b");
         assert_eq!(second.clip, "three", "chance=0 的那一拍应被跳过");
@@ -1023,10 +1046,7 @@ mod tests {
         // 还没播过 "one" → 不可选
         assert!(!playback.chain_allowed(&chain, start));
         // 播过之后 5 分钟内可选
-        playback
-            .history
-            .recent_clips
-            .insert("one".into(), start);
+        playback.history.recent_clips.insert("one".into(), start);
         assert!(playback.chain_allowed(&chain, start + chrono::Duration::minutes(5)));
         // 超过有效期 → 再次不可选
         assert!(!playback.chain_allowed(&chain, start + chrono::Duration::minutes(11)));
@@ -1054,7 +1074,10 @@ mod tests {
         assert!(playback.chain_allowed(&chain, start), "首次可选");
         playback.remember_chain(&chain.id, start);
         assert!(!playback.chain_allowed(&chain, start + chrono::Duration::minutes(30)));
-        assert!(playback.chain_allowed(&chain, start + chrono::Duration::minutes(46)), "冷却结束");
+        assert!(
+            playback.chain_allowed(&chain, start + chrono::Duration::minutes(46)),
+            "冷却结束"
+        );
 
         let capped = chain_with_when(
             "egg",
@@ -1197,7 +1220,11 @@ mod tests {
         let mut playback = Playback::default();
         let start = at(10, 0, 0);
         let before = playback.reset(&p, "routine", start).unwrap();
-        let steps = p.acknowledge.steps_for("routine", "click").unwrap().to_vec();
+        let steps = p
+            .acknowledge
+            .steps_for("routine", "click")
+            .unwrap()
+            .to_vec();
 
         let ack = playback
             .acknowledge(&p, "routine", &steps, start + chrono::Duration::seconds(1))
@@ -1208,8 +1235,9 @@ mod tests {
         assert_eq!(playback.current_clip(), Some("three"));
 
         // 反应播完 → 回到被打断的那条链、那一段、那一步
-        let resumed_at =
-            start + chrono::Duration::seconds(1) + chrono::Duration::milliseconds(ack.duration_ms as i64);
+        let resumed_at = start
+            + chrono::Duration::seconds(1)
+            + chrono::Duration::milliseconds(ack.duration_ms as i64);
         let resumed = playback.advance(&p, resumed_at).unwrap();
         assert_eq!(resumed.clip, before.clip);
         assert_eq!(resumed.chain_id, before.chain_id);
@@ -1221,7 +1249,11 @@ mod tests {
     #[test]
     fn acknowledge_skips_when_no_current_already_reacting_or_too_late() {
         let p = long_instance_persona();
-        let steps = p.acknowledge.steps_for("routine", "click").unwrap().to_vec();
+        let steps = p
+            .acknowledge
+            .steps_for("routine", "click")
+            .unwrap()
+            .to_vec();
 
         // 没有正在播的内容 → 不打断
         let mut idle = Playback::default();

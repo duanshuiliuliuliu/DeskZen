@@ -141,7 +141,11 @@ impl Logger {
     fn new(dir: PathBuf) -> Option<Self> {
         fs::create_dir_all(&dir).ok()?;
         let path = dir.join(format!("{FILE_STEM}.log"));
-        let file = OpenOptions::new().create(true).append(true).open(&path).ok()?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok()?;
         let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
         Some(Self {
             dir,
@@ -184,10 +188,18 @@ impl Logger {
         drop(state.file.take());
         if fs::rename(&current, &rotated).is_err() {
             // 改名失败就接着往原文件写，别把日志弄丢
-            state.file = OpenOptions::new().create(true).append(true).open(&current).ok();
+            state.file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&current)
+                .ok();
             return;
         }
-        state.file = OpenOptions::new().create(true).append(true).open(&current).ok();
+        state.file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&current)
+            .ok();
         state.bytes = 0;
         self.prune();
     }
@@ -325,12 +337,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let logger = Logger::new(dir.clone()).expect("测试目录应可写");
         let enabled = |level: log::Level| {
-            logger.enabled(
-                &log::Metadata::builder()
-                    .level(level)
-                    .target("test")
-                    .build(),
-            )
+            logger.enabled(&log::Metadata::builder().level(level).target("test").build())
         };
 
         set_level("debug");

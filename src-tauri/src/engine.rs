@@ -680,10 +680,7 @@ impl StateEngine {
                                     personas.insert(cfg.id.clone(), Arc::new(cfg));
                                 }
                                 Err(reason) => {
-                                    log::warn!(
-                                        "跳过角色目录 {}：{reason}",
-                                        entry.path().display()
-                                    )
+                                    log::warn!("跳过角色目录 {}：{reason}", entry.path().display())
                                 }
                             }
                         }
@@ -753,7 +750,10 @@ impl StateEngine {
     ) -> String {
         // 需求快照在锁外取，避免与 persona 形成嵌套锁
         let needs = crate::util::lock(&self.needs).clone();
-        runtime_state(persona, &automatic_state(persona, now_minutes(&now), &needs))
+        runtime_state(
+            persona,
+            &automatic_state(persona, now_minutes(&now), &needs),
+        )
     }
 
     /// 当前角色配置（克隆）
@@ -895,9 +895,9 @@ impl StateEngine {
             let mut seen = crate::util::lock(&self.seen);
             let pointer = AcknowledgeConfig::is_pointer_kind(kind);
             if pointer
-                && seen
-                    .last_any
-                    .is_some_and(|t| (now - t).num_seconds() < persona.acknowledge.global_cooldown_s)
+                && seen.last_any.is_some_and(|t| {
+                    (now - t).num_seconds() < persona.acknowledge.global_cooldown_s
+                })
             {
                 log::debug!("被注意到（{kind}）：被全局冷却挡下（状态 {state}）");
                 return;
@@ -953,20 +953,18 @@ impl StateEngine {
     fn reschedule_speech(&self, now: chrono::DateTime<chrono::Local>) {
         let instance = {
             let playback = crate::util::lock(&self.playback);
-            playback
-                .current()
-                .map(|c| {
-                    (
-                        c.run.started_at,
-                        c.run.total_ms,
-                        c.run.ack,
-                        c.run
-                            .beats
-                            .iter()
-                            .map(|beat| beat.clip.clone())
-                            .collect::<Vec<String>>(),
-                    )
-                })
+            playback.current().map(|c| {
+                (
+                    c.run.started_at,
+                    c.run.total_ms,
+                    c.run.ack,
+                    c.run
+                        .beats
+                        .iter()
+                        .map(|beat| beat.clip.clone())
+                        .collect::<Vec<String>>(),
+                )
+            })
         };
         let Some((started_at, duration_ms, ack, beat_clips)) = instance else {
             crate::util::lock(&self.ambient).speak_at = None;
@@ -1612,7 +1610,6 @@ impl StateEngine {
             engine.fire_ambient_bubble_if_due(now);
         });
     }
-
 }
 
 #[tauri::command]
@@ -3063,10 +3060,7 @@ mod tests {
             let mut persona: PersonaConfig = serde_json::from_str(json).unwrap();
             persona.finalize();
             for (state, cfg) in &persona.states {
-                assert!(
-                    !cfg.chains.is_empty(),
-                    "{id}: 状态 {state} 没有任何活动链"
-                );
+                assert!(!cfg.chains.is_empty(), "{id}: 状态 {state} 没有任何活动链");
                 for chain in &cfg.chains {
                     assert!(!chain.segments.is_empty(), "{id}: 链 {} 没有段", chain.id);
                     for segment in &chain.segments {
@@ -3103,7 +3097,12 @@ mod tests {
         assert!(validate_persona_structure(&no_activities).is_err());
         // 任一状态没有任何活动都视为不可播放（前端不做兜底假设）
         let mut state_without_activity = p.clone();
-        state_without_activity.states.get_mut("sleep").unwrap().chains.clear();
+        state_without_activity
+            .states
+            .get_mut("sleep")
+            .unwrap()
+            .chains
+            .clear();
         assert!(validate_persona_structure(&state_without_activity).is_err());
         // 段引用了不存在的动作：这正是"加载侧宽松"时会被静默过滤、什么都不播的情况
         let mut bad_step = p;
@@ -3148,11 +3147,17 @@ mod tests {
 
         // 未知来源 / 未知状态键 → 同样拦下
         let mut bad_key = link();
-        bad_key.acknowledge.by_state.insert("walking".to_string(), vec![]);
+        bad_key
+            .acknowledge
+            .by_state
+            .insert("walking".to_string(), vec![]);
         let error = validate_persona_structure(&bad_key).unwrap_err();
         assert!(error.contains("未知状态"), "{error}");
         let mut bad_kind = link();
-        bad_kind.acknowledge.by_kind.insert("poke".to_string(), vec![]);
+        bad_kind
+            .acknowledge
+            .by_kind
+            .insert("poke".to_string(), vec![]);
         let error = validate_persona_structure(&bad_kind).unwrap_err();
         assert!(error.contains("未知来源"), "{error}");
     }

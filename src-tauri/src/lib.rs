@@ -109,7 +109,11 @@ pub fn run() {
             // 日志尽早装上（按偏好里的级别与大小）：后面的角色加载、引擎启动都往里记
             let prefs = prefs::load_prefs(app.handle());
             logging::install(app.handle(), &prefs.log_level, prefs.log_size_mb);
-            log::info!("DeskZen 启动（日志级别 {}，单文件 {}MB）", logging::level_name(), logging::size_mb());
+            log::info!(
+                "DeskZen 启动（日志级别 {}，单文件 {}MB）",
+                logging::level_name(),
+                logging::size_mb()
+            );
             let engine = engine::StateEngine::new(app.handle().clone());
             app.manage(engine);
             app.state::<engine::StateEngine>().start();
@@ -511,7 +515,10 @@ fn set_ai_bubbles(
 ) -> Result<(), String> {
     engine.set_ai_bubbles(enabled);
     prefs::save_prefs(&app, &engine.prefs())?;
-    log::info!("AI 每日内容（气泡/计划）：{}", if enabled { "开启" } else { "关闭" });
+    log::info!(
+        "AI 每日内容（气泡/计划）：{}",
+        if enabled { "开启" } else { "关闭" }
+    );
     if enabled {
         genbubble::maybe_spawn_for_state(&app);
         plan::maybe_spawn_for_today(&app);

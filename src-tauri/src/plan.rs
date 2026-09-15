@@ -359,7 +359,10 @@ mod tests {
     fn prompt_asks_for_json_and_lists_tags() {
         let persona = link_persona();
         let system = build_system_prompt(&persona);
-        assert!(system.contains(&persona.system_prompt.definition), "{system}");
+        assert!(
+            system.contains(&persona.system_prompt.definition),
+            "{system}"
+        );
         let user = build_user_prompt(&tag_options(&persona), &["昨天在忙保养".to_string()]);
         for key in ["theme", "say", "focus", "avoid"] {
             assert!(user.contains(key), "提示词缺少字段 {key}：{user}");
