@@ -2705,31 +2705,41 @@ mod tests {
     #[test]
     fn needs_pull_beats_loop_but_loses_to_time_slot() {
         let mut p = link();
-        // 12:00 不在任何 time 时段内（link 只在 20:00~08:00 睡觉）→ 需求说了算
-        let noon = 12 * 60;
-        let looped = loop_state_at(&p.schedule, noon).unwrap();
+        // 找一个不在任何 time 时段内的时刻：这里需求说了算（作者随时可能加减时段，
+        // 所以别写死具体钟点，否则日程一改用例就假失败）
+        let free = (0..24 * 60)
+            .find(|mins| find_active_slot(&p.schedule, *mins).is_none())
+            .expect("内置角色应至少有一段空闲时间");
+        let looped = loop_state_at(&p.schedule, free).unwrap();
         let needs = crate::needs::NeedsState::default();
-        assert_eq!(automatic_state(&p, noon, &needs), looped);
+        assert_eq!(automatic_state(&p, free, &needs), looped);
 
         // 饿了 → 拉去吃饭（需求优先于循环）
         let hungry = crate::needs::NeedsState {
             hunger: 0.95,
             ..Default::default()
         };
-        assert_eq!(automatic_state(&p, noon, &hungry), "eat");
+        assert_eq!(automatic_state(&p, free, &hungry), "eat");
 
         // 很累 → 拉去睡觉（pull 里 energy 的规则更靠前）
         let mut tired = hungry.clone();
         tired.hunger = 0.2;
         tired.energy = 0.1;
-        assert_eq!(automatic_state(&p, noon, &tired), "sleep");
+        assert_eq!(automatic_state(&p, free, &tired), "sleep");
 
         // 需求拉去的状态必须真有素材，否则忽略
         p.states.remove("eat");
-        assert_ne!(automatic_state(&p, noon, &hungry), "eat");
+        assert_ne!(automatic_state(&p, free, &hungry), "eat");
 
-        // 硬时段最高优先：20:00~08:00 是睡眠时段，再饿也得先睡
-        assert_eq!(automatic_state(&p, 23 * 60, &hungry), "sleep");
+        // 硬时段最高优先：睡觉时段内再饿也得先睡（取睡觉时段的起始分钟）
+        let sleep_slot = p
+            .schedule
+            .time()
+            .iter()
+            .find(|slot| slot.state == "sleep")
+            .expect("内置角色应有睡眠时段");
+        let sleep_min = parse_mins(&sleep_slot.start).unwrap();
+        assert_eq!(automatic_state(&p, sleep_min, &hungry), "sleep");
     }
 
     #[test]

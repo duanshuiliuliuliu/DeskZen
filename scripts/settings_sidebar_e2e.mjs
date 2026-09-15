@@ -33,7 +33,7 @@ const init = await evaluate(
        nav: [...document.querySelectorAll(".nav-item")].map((b) => b.textContent.trim()),
        active: document.querySelector(".nav-item.active")?.dataset.panel,
        hasSidebar: !!document.querySelector(".settings-sidebar"),
-       panels: ["panel-role", "panel-llm", "panel-about"].filter((id) => document.getElementById(id)).length,
+       panels: ["panel-role", "panel-llm", "panel-log", "panel-about"].filter((id) => document.getElementById(id)).length,
        version: document.getElementById("app-version").textContent.trim(),
      };
    })()`,
@@ -43,7 +43,7 @@ if (
   init.nav.join(",") !== "角色,大模型,日志,关于" ||
   init.active !== "role" ||
   !init.hasSidebar ||
-  init.panels !== 3
+  init.panels !== 4
 ) {
   throw new Error("侧边栏初始状态异常");
 }
