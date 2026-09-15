@@ -1,6 +1,6 @@
 [package]
 name = "deskzen"
-version = "0.1.0"
+version = "1.0.0"
 description = "DeskZen 桌面众生"
 edition = "2021"
 
