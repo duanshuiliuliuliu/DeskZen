@@ -21,8 +21,11 @@ jobs:
           node-version: 20
           cache: npm
 
+      # 工具链固定在 rust-toolchain.toml 里的版本：rustfmt 升级会改默认排版，
+      # 浮动 stable 会让下面的格式检查突然变红
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.98.0
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2

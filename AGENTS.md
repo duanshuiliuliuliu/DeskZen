@@ -43,6 +43,8 @@
 - 产品尚未正式发布：**不做向后兼容**，旧字段/旧格式直接删干净，不留兼容分支，怎么最优怎么来。
 - 改完至少跑：`cargo test --lib`、`cargo clippy --all-targets`、`npm run build`；
   涉及运行时行为（状态机 / 编排 / 气泡 / 窗口）再用 `scripts/` 里的 CDP e2e 脚本跑一遍。
+- Rust 工具链固定在 `rust-toolchain.toml`（1.98.0）与 CI 的 `toolchain:` 输入里，两边要一起改；
+  rustfmt 默认排版会随版本变，升级工具链时必须在同一提交里跑一次 `cargo fmt --all`，否则 CI 的格式检查会红。
 
 ## 排查问题先看日志
 

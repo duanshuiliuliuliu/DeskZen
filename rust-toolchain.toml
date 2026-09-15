@@ -1,0 +1,6 @@
+# 固定 Rust 工具链：rustfmt 的默认排版会随版本变化，浮动 stable 会让 CI 的
+# `cargo fmt --all -- --check` 在 rustfmt 升级后突然变红（历史上就这样红过一次）。
+# 升级时改这里的版本号，并在同一提交里跑一次 `cargo fmt --all`。
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
