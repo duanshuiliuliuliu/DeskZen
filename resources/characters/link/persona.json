@@ -152,14 +152,15 @@
     "loop": [
       {"state": "routine", "duration": 30},
       {"state": "active", "duration": 20},
-      {"state": "focus", "duration": 20},
-      {"state": "relax", "duration": 30}
+      {"state": "focus", "duration": 20}
     ],
     "time": [
-      {"start": "20:00", "end": "08:00", "state": "sleep"},
       {"start": "08:00", "end": "09:00", "state": "eat"},
+      {"start": "11:30", "end": "12:00", "state": "relax"},
       {"start": "12:00", "end": "13:00", "state": "eat"},
-      {"start": "18:00", "end": "19:00", "state": "eat"}
+      {"start": "17:30", "end": "18:00", "state": "relax"},
+      {"start": "18:00", "end": "19:00", "state": "eat"},
+      {"start": "20:00", "end": "08:00", "state": "sleep"}
     ]
   },
   "clips_dir": "/characters/link/clips",
