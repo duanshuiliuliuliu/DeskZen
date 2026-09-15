@@ -34,6 +34,15 @@ if (typeof tauri.identifier === "string" && tauri.identifier.endsWith(".app")) {
   problems.push(`tauri.conf.json identifier must not end with ".app": ${tauri.identifier}`);
 }
 
+// 打 tag 发布时（CI 的 tag 触发里 GITHUB_REF_NAME=v1.2.3）顺带校验 tag 与版本号一致；
+// 分支触发时 GITHUB_REF_NAME 是分支名，不参与校验。
+const refName = process.env.GITHUB_REF_NAME;
+if (cargoVersion && refName && refName.startsWith("v") && refName !== `v${cargoVersion}`) {
+  problems.push(
+    `tag ${refName} 与版本号 v${cargoVersion} 不一致（改完版本号要提交并重新打 tag）`,
+  );
+}
+
 if (problems.length > 0) {
   for (const problem of problems) console.error(`x ${problem}`);
   process.exit(1);

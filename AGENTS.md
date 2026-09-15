@@ -45,6 +45,8 @@
   涉及运行时行为（状态机 / 编排 / 气泡 / 窗口）再用 `scripts/` 里的 CDP e2e 脚本跑一遍。
 - Rust 工具链固定在 `rust-toolchain.toml`（1.98.0）与 CI 的 `toolchain:` 输入里，两边要一起改；
   rustfmt 默认排版会随版本变，升级工具链时必须在同一提交里跑一次 `cargo fmt --all`，否则 CI 的格式检查会红。
+- 发布：改版本号（`Cargo.toml` / `tauri.conf.json` / `package.json`）→ `npm run check:versions` → 打 `v<版本>` tag 推送，
+  `.github/workflows/release.yml` 会自动构建并创建 Release（tag 与版本号不一致会被拦下）。
 
 ## 排查问题先看日志
 

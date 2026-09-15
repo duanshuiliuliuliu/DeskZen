@@ -379,6 +379,26 @@ npm run tauri build -- --no-bundle  # 仅生成 deskzen.exe，不打包安装包
 
 > 注意：不要用裸 `cargo build` 代替 `tauri build` —— 前者是 dev 模式，会去连接 vite 开发服务器，页面无法独立运行。
 
+### 发布（GitHub Release）
+
+版本号有 3 处：`src-tauri/Cargo.toml`（为准）、`src-tauri/tauri.conf.json`、`package.json`（以及 `package-lock.json`），
+`npm run check:versions` 会校验它们一致、并且在 tag 触发时校验 tag 名与版本号一致。
+
+发布走自动化（[`.github/workflows/release.yml`](.github/workflows/release.yml)）：**打 `v<版本>` 标签并推送**即可，
+GitHub 上会自动构建 Windows 安装包并创建 Release（附件为 NSIS 安装器与 MSI）：
+
+```bash
+npm run check:versions                  # 1) 先确认版本号一致（改版本时三处一起改）
+git commit -am "chore: 版本号提升到 1.1.0"
+git tag -a v1.1.0 -m "DeskZen 1.1.0"    # 2) 打 tag 并推送 → 触发 Release
+git push origin main --follow-tags
+```
+
+不想走 CI 时也可以手动发布：`npm run tauri build` 之后，产物在
+`src-tauri/target/release/bundle/nsis/DeskZen_<版本>_x64-setup.exe`（给普通用户）与
+`.../bundle/msi/DeskZen_<版本>_x64_en-US.msi`（企业分发），在 GitHub Releases 里手动建 tag 并上传这两个文件。
+注意 `bundle/` 会累积历史版本产物，别误传旧版本的安装包。
+
 ## 测试
 
 - Rust 单元测试：在 `src-tauri/` 下运行 `cargo test --lib`，覆盖角色包校验与导入（固定状态集合 / 段与链引用 / 动作资源 / WebP 校验、路径重写）、动作帧条与声明帧数一致性、**链式播放调度**（链内顺序 / 段内步骤 / 链间选择 / seconds 时长换算）、**气泡调度**（动作实例窗口 / 间隔与静默上限 / 洗牌袋）、LLM 网关、状态引擎与缺状态回退日常、AI 气泡文案校验、对话历史持久化、偏好读写。真实调用大模型的用例默认忽略（需已配置 Key 与网络）：`cargo test --lib -- --ignored`。

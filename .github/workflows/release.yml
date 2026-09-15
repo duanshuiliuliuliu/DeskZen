@@ -1,0 +1,60 @@
+name: Release
+
+# 打 v* 标签即发布：构建 Windows 安装包（NSIS/MSI）并创建 Release。
+# 版本号改完记得提交并让 tag 与 tauri.conf.json 的版本一致，否则下面的校验会拦下。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # 创建 Release 并上传附件
+
+jobs:
+  release:
+    # 依赖 WebView2 / Win32（xcap），只能在 Windows 上打包
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # 与 CI 一致：工具链固定在 rust-toolchain.toml 里的版本（见该文件注释）
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      # 顺带校验 tag 与版本号一致（脚本会读 GITHUB_REF_NAME）
+      - name: 版本号与 tag 校验
+        run: npm run check:versions
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 仓库里的 tauri 包装器（scripts/tauri.mjs）默认走国内镜像下载 WiX/NSIS 打包工具；
+          # GitHub runner 直连更快更稳，这里显式给成官方模板，包装器就不会覆盖它。
+          TAURI_BUNDLER_TOOLS_GITHUB_MIRROR_TEMPLATE: "https://github.com/<owner>/<repo>/releases/download/<version>/<asset>"
+        with:
+          tagName: v__VERSION__
+          releaseName: "DeskZen v__VERSION__"
+          releaseBody: |
+            仅支持 Windows x64。附件是两个安装包，选一个装即可：
+
+            - `DeskZen_<版本>_x64-setup.exe`（NSIS 安装器）—— 推荐：按当前用户安装，不需要管理员权限
+            - `DeskZen_<版本>_x64_en-US.msi`（MSI）—— 适合企业 / 组策略分发
+
+            第一次启动后角色会出现在桌面右下角；托盘图标里有「设置 / 更换角色 / 隐藏角色 / 退出」。
+            想让角色说话、生成每日计划，去「设置 → 大模型」填 OpenAI 兼容接口与 API Key。
+          releaseDraft: false
+          prerelease: false
+          # 没有接自动更新插件，不需要生成 latest.json
+          uploadUpdaterJson: false
